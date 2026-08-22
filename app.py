@@ -210,9 +210,24 @@ with tabs[1]:
     start = b.date_input("Start Date", date.today()-timedelta(days=730), key="bt_start")
     end = c.date_input("End Date", date.today(), key="bt_end")
     a,b,c,d = st.columns(4)
-    capital = a.number_input("Capital ₹", 1_000_000, step=100_000, key="bt_cap")
-    risk = b.number_input("Risk %", 1.0, step=.25, key="bt_risk")
-    sl = c.number_input("SL %", 7.0, step=.5, key="bt_sl")
+    capital = a.number_input(
+        "Capital ₹",
+        value=1_000_000,
+        step=100_000,
+        key="bt_cap"
+    )
+    risk = b.number_input(
+        "Risk %",
+        value=1.0,
+        step=.25,
+        key="bt_risk"
+    )
+    sl = c.number_input(
+        "SL %",
+        value=7.0,
+        step=.5,
+        key="bt_sl"
+    )
     rr = d.selectbox("Target R", [2,2.5,3,3.5,4,5], index=2, key="bt_rr")
     strategies = st.multiselect("Strategies", [1,2,3,4], [1,2,3,4], key="bt_strats")
     if st.button("🚀 Run Backtest", type="primary", key="bt_run"):
@@ -250,9 +265,27 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("🔬 Walk-Forward")
     a,b,c = st.columns(3)
-    a.number_input("Training months",12,min_value=3,max_value=60,key="wf_train")
-    b.number_input("Validation months",3,min_value=1,max_value=24,key="wf_val")
-    c.number_input("Unseen forward months",3,min_value=1,max_value=24,key="wf_test")
+    a.number_input(
+        "Training months",
+        value=12,
+        min_value=3,
+        max_value=60,
+        key="wf_train"
+    )
+    b.number_input(
+        "Validation months",
+        value=3,
+        min_value=1,
+        max_value=24,
+        key="wf_val"
+    )
+    c.number_input(
+        "Unseen forward months",
+        value=3,
+        min_value=1,
+        max_value=24,
+        key="wf_test"
+    )
     st.info("Promote a learned filter only if it improves unseen forward expectancy and drawdown.")
 
 with tabs[3]:
@@ -324,4 +357,4 @@ with tabs[7]:
 
 st.markdown("---")
 st.caption("Educational research software. Validate with unseen forward data before risking real capital.")
-    
+                
