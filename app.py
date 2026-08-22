@@ -77,7 +77,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader('Walk-Forward');st.write('Rolling train → validation → unseen forward test. A learned filter should only be promoted if it improves unseen data.');st.number_input('Training months',12);st.number_input('Validation months',3);st.number_input('Forward months',3);st.info('This is deliberately separated from training to reduce overfitting.')
 with tabs[3]:
-    st.subheader('Forward Test');st.text_input('Ticker / Pair / Coin');st.selectbox('Asset class',['Indian Equity','Forex','Crypto']);st.selectbox('Style',['Intraday','Swing','Positional']);st.number_input('Entry',min_value=0.0);st.number_input('Stop',min_value=0.0);st.number_input('Target',min_value=0.0);st.text_area('Setup / mistake notes');st.multiselect('Mistakes',['None','Early entry','Late entry','Chased','Moved SL','Exited early','Overtraded','Wrong regime','Oversized','Ignored news']);st.button('Save forward setup')
+    st.subheader('Forward Test');st.text_input('Ticker / Pair / Coin',key='forward_symbol');st.selectbox('Asset class',['Indian Equity','Forex','Crypto']);st.selectbox('Style',['Intraday','Swing','Positional']);st.number_input('Entry',min_value=0.0);st.number_input('Stop',min_value=0.0);st.number_input('Target',min_value=0.0);st.text_area('Setup / mistake notes');st.multiselect('Mistakes',['None','Early entry','Late entry','Chased','Moved SL','Exited early','Overtraded','Wrong regime','Oversized','Ignored news']);st.button('Save forward setup')
 with tabs[4]:
     st.subheader('Pattern Learning');st.write('Compare winning and losing setups by RSI, EMA distance, relative volume, volatility, market regime, strategy and your rule adherence.');st.warning('Never train and score on the same trades. The model must be judged on unseen forward trades.')
 with tabs[5]:
@@ -95,5 +95,5 @@ with tabs[6]:
             for n in t.news[:10]:st.write('•',n.get('content',{}).get('title') or n.get('title') or 'News')
         except Exception as e:st.error(str(e))
 with tabs[7]:
-    st.subheader('Trade Journal');st.write('Record actual trades and mistakes. Closed forward/live trades can later become training data only after the evaluation period closes.');st.text_input('Ticker / Pair / Coin');st.number_input('R multiple',value=0.0);st.text_area('What happened?');st.button('Save journal entry')
+    st.subheader('Trade Journal');st.write('Record actual trades and mistakes. Closed forward/live trades can later become training data only after the evaluation period closes.');st.text_input('Ticker / Pair / Coin',key='forward_symbol');st.number_input('R multiple',value=0.0);st.text_area('What happened?');st.button('Save journal entry')
 st.caption('Educational research software. Current fundamentals/news must not be backfilled into historical tests; point-in-time datasets are required for unbiased historical fundamental/news testing.')
