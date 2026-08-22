@@ -125,8 +125,7 @@ risk=st.sidebar.number_input("Risk / trade (%)",1.0,step=.25)/100
 sl=st.sidebar.number_input("Stop-loss (%)",7.0,step=.5)/100
 rr=st.sidebar.selectbox("Target", [2,2.5,3,3.5,4,5], index=2)
 slip=st.sidebar.number_input("Slippage / side (%)",.10,step=.05)/100
-maxpos=st.sidebar.number_input("Max positions",5,min_value=1,max_value=50)
-
+maxpos=st.sidebar.number_input("Max positions", value=5, min_value=1, max_value=50, step=1)
 st.sidebar.subheader("Universe")
 universe=st.sidebar.radio("Select",["Custom CSV","Nifty 500 / Smallcap 100 template"])
 uploaded=st.sidebar.file_uploader("CSV with Ticker column",type="csv")
