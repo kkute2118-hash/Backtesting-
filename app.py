@@ -441,100 +441,219 @@ with tabs[0]:
 **Safety engine:** Small/micro-cap liquidity and abnormal-volatility checks reduce risk but do not change the four strategies.
 """)
 with tabs[1]:
-    st.subheader("📡 Daily High-Quality Scanner")
-    a,b,c=st.columns(3)
-    universes=a.multiselect("Trading universes",
+    st.subheader("📡 Daily Live Scanner")
+    st.caption("First audit the raw strategy signals. Then turn on the score gate. Each strategy is scanned independently.")
+
+    a,b,c = st.columns(3)
+    universes = a.multiselect(
+        "Trading universes",
         ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
-        ["Nifty 500","Nifty Smallcap 250"],key="scan_universes")
-    min_score=b.number_input("Minimum score",value=85,min_value=85,max_value=100,key="scan_score")
-    max_candidates=c.number_input("Maximum candidates",value=10,min_value=1,max_value=50,key="scan_max")
-    st.caption("Only candidates scoring at least 85 enter the forward-test queue.")
+        ["Nifty 500","Nifty Smallcap 250"],
+        key="scan_universes"
+    )
+    scan_mode = b.selectbox(
+        "Scan mode",
+        ["Raw strategy signals (audit)", "Scored candidates (forward test)"],
+        key="scan_mode_v4"
+    )
+    min_score = c.number_input(
+        "Minimum score",
+        value=85,
+        min_value=0,
+        max_value=100,
+        key="scan_score_v4"
+    )
 
-    if st.button("🔄 Scan Market Now",type="primary",key="scan_button"):
+    d,e = st.columns(2)
+    selected_strategies = d.multiselect(
+        "Strategies to scan independently",
+        [1,2,3,4],
+        [1,2,3,4],
+        key="scan_strategies_v4"
+    )
+    result_mode = e.selectbox(
+        "Results",
+        ["ALL qualifying setups","Top 10","Top 25","Top 50"],
+        key="scan_result_mode_v4"
+    )
+
+    st.info(
+        "RAW mode shows every stock/strategy signal before score filtering. "
+        "Use RAW first to verify that the strategy engine is actually producing candidates."
+    )
+
+    if st.button("🔄 Scan Market Now", type="primary", key="scan_button_v4"):
         try:
-            # Nifty 500 constituents are used for the market proxy calculation.
-            idx_tickers=index_universe("Nifty 500")
-            idx_data=download_prices(tuple(idx_tickers),date.today()-timedelta(days=450),date.today())
-            regime="UNKNOWN"; regime_score=0
-            if idx_data:
-                proxy=max(idx_data.values(),key=len)
-                regime,regime_score=regime_from_index(proxy)
+            if not selected_strategies:
+                st.warning("Select at least one strategy.")
+                st.stop()
+            if not universes:
+                st.warning("Select at least one universe.")
+                st.stop()
 
-            st.success(f"Market regime: {regime} | score {regime_score}/100")
-
-            universe=set()
-            for u in universes: universe.update(index_universe(u))
-            tickers=sorted(universe)
-            data=download_prices(tuple(tickers),date.today()-timedelta(days=450),date.today())
-            rows=[]; bar=st.progress(0)
-            scanned_count = 0
-            data_count = 0
-            signal_counts = {1: 0, 2: 0, 3: 0, 4: 0}
-            score_counts = {1: 0, 2: 0, 3: 0, 4: 0}
-            rejected_safety = 0
-
-            for n,(ticker,df) in enumerate(data.items()):
-                scanned_count += 1
-                if df is not None and not df.empty:
-                    data_count += 1
-                if len(df)<260:
-                    bar.progress((n+1)/max(1,len(data))); continue
-                f=features(df).dropna()
-                if f.empty:
-                    bar.progress((n+1)/max(1,len(data))); continue
-                info,_=company_info(ticker)
-                safe,safe_status,flags=safety(info,df)
-
-                for s in [1,2,3,4]:
-                    sig=strategy_signal(f,s)
-                    if bool(sig.iloc[-1]) and safe_status!="REJECT":
-                        score, score_parts = final_setup_score(f,s,regime,safe)
-                        if score>=min_score:
-                            z=f.iloc[-1]; entry=float(z.close); stop=entry*.93; target=entry+3*(entry-stop)
-                            rows.append({
-                                "Score":score,"Ticker":ticker.replace(".NS",""),"Strategy":f"S{s}",
-                                "Regime":regime,"Safety":safe_status,
-                                "Entry":round(entry,2),"SL":round(stop,2),"Target 3R":round(target,2),
-                                "R:R":"1:3","RSI":round(float(z.rsi14),1),
-                                "RelVol":round(float(z.relvol),2),"Daily EMA20":round(float(z.ema20),2),
-                                "Safety Score":safe,"Safety Flags":", ".join(flags),
-                                "HTF Score":score_parts["HTF Demand"],
-                                "Footprint Score":score_parts["Footprint"],
-                                "Strategy Score":score_parts["Strategy"],
-                                "Entry Quality":score_parts["Entry Quality"],
-                                "Relative Strength":score_parts["Relative Strength"]
-                            })
-                bar.progress((n+1)/max(1,len(data)))
-
-            result=pd.DataFrame(rows)
-
-            st.subheader("🔎 Scanner Diagnostics")
-            dc1,dc2,dc3,dc4,dc5 = st.columns(5)
-            dc1.metric("Stocks scanned", scanned_count)
-            dc2.metric("Price data available", data_count)
-            dc3.metric("S1 signals", signal_counts[1])
-            dc4.metric("S2 signals", signal_counts[2])
-            dc5.metric("S3/S4 signals", signal_counts[3] + signal_counts[4])
-            st.caption(
-                f"Score ≥ {min_score}: S1={score_counts[1]}, S2={score_counts[2]}, "
-                f"S3={score_counts[3]}, S4={score_counts[4]}. "
-                f"Safety rejections: {rejected_safety}."
+            idx_tickers = index_universe("Nifty 500")
+            idx_data = download_prices(
+                tuple(idx_tickers),
+                date.today()-timedelta(days=450),
+                date.today()
             )
 
-            if result.empty:
-                st.warning(
-                    f"No setup reached score ≥ {min_score}. "
-                    "Check the diagnostics above. The scanner did scan the selected universe; "
-                    "a zero-result day is not treated as a trade."
+            if not idx_data:
+                st.error("No Nifty 500 price data returned by Yahoo Finance. This is a data-source problem.")
+                st.stop()
+
+            proxy = max(idx_data.values(), key=len)
+            regime, regime_score = regime_from_index(proxy)
+
+            universe = set()
+            for u in universes:
+                universe.update(index_universe(u))
+            tickers = sorted(universe)
+
+            data = download_prices(
+                tuple(tickers),
+                date.today()-timedelta(days=450),
+                date.today()
+            )
+
+            if not data:
+                st.error(
+                    "Yahoo Finance returned no price data for the selected universe. "
+                    "The scanner cannot generate signals until price data is available."
                 )
+                st.stop()
+
+            rows = []
+            bar = st.progress(0)
+            stats = {
+                "downloaded": len(data),
+                "usable": 0,
+                "too_short": 0,
+                "signals": {1:0,2:0,3:0,4:0},
+                "qualified": {1:0,2:0,3:0,4:0},
+                "safety_reject": 0
+            }
+
+            for n,(ticker,df) in enumerate(data.items()):
+                if len(df) < 260:
+                    stats["too_short"] += 1
+                    bar.progress((n+1)/max(1,len(data)))
+                    continue
+
+                f = features(df).dropna()
+                if f.empty:
+                    bar.progress((n+1)/max(1,len(data)))
+                    continue
+
+                stats["usable"] += 1
+                info,_ = company_info(ticker)
+                safe,safe_status,flags = safety(info,df)
+
+                for s in selected_strategies:
+                    sig = strategy_signal(f,s)
+                    signal = bool(sig.iloc[-1])
+
+                    if signal:
+                        stats["signals"][s] += 1
+
+                    if not signal:
+                        continue
+
+                    score, parts = final_setup_score(f,s,regime,safe)
+
+                    # RAW mode is deliberately not blocked by score or safety.
+                    if scan_mode == "Scored candidates (forward test)":
+                        if safe_status == "REJECT":
+                            stats["safety_reject"] += 1
+                            continue
+                        if score < min_score:
+                            continue
+
+                    stats["qualified"][s] += 1
+
+                    z = f.iloc[-1]
+                    entry = float(z.close)
+                    stop = entry * .93
+                    target = entry + 3*(entry-stop)
+
+                    rows.append({
+                        "Score": score,
+                        "Ticker": ticker.replace(".NS",""),
+                        "Strategy": f"S{s}",
+                        "Signal": "RAW" if scan_mode.startswith("Raw") else "FORWARD TEST",
+                        "Regime": regime,
+                        "Safety": safe_status,
+                        "Entry": round(entry,2),
+                        "SL 7%": round(stop,2),
+                        "Target 3R": round(target,2),
+                        "R:R": "1:3",
+                        "RSI": round(float(z.rsi14),1),
+                        "RelVol": round(float(z.relvol),2),
+                        "HTF Score": parts["HTF Demand"],
+                        "Footprint Score": parts["Footprint"],
+                        "Strategy Score": parts["Strategy"],
+                        "Entry Quality": parts["Entry Quality"],
+                        "Relative Strength": parts["Relative Strength"],
+                        "Safety Score": safe,
+                        "Safety Flags": ", ".join(flags)
+                    })
+
+                bar.progress((n+1)/max(1,len(data)))
+
+            result = pd.DataFrame(rows)
+
+            st.subheader("🔎 Scanner Diagnostics")
+            c1,c2,c3,c4,c5,c6 = st.columns(6)
+            c1.metric("Universe stocks", len(tickers))
+            c2.metric("Price datasets", stats["downloaded"])
+            c3.metric("Usable datasets", stats["usable"])
+            c4.metric("S1/S2 signals", stats["signals"][1]+stats["signals"][2])
+            c5.metric("S3/S4 signals", stats["signals"][3]+stats["signals"][4])
+            c6.metric("Safety rejects", stats["safety_reject"])
+
+            diag = pd.DataFrame({
+                "Strategy":["S1","S2","S3","S4"],
+                "Raw signals":[stats["signals"][1],stats["signals"][2],stats["signals"][3],stats["signals"][4]],
+                "Displayed/qualified":[stats["qualified"][1],stats["qualified"][2],stats["qualified"][3],stats["qualified"][4]]
+            })
+            st.dataframe(diag,use_container_width=True,hide_index=True)
+
+            if result.empty:
+                st.error(
+                    "ZERO RESULTS. If RAW mode also shows zero signals, the problem is in the "
+                    "strategy/data layer—not the scoring filters."
+                )
+                st.stop()
+
+            result = result.sort_values(["Score","Strategy","Ticker"],ascending=[False,True,True])
+
+            if result_mode != "ALL qualifying setups":
+                result = result.head(int(result_mode.split()[1]))
+
+            st.subheader("📋 Scanner Results")
+            st.dataframe(result,use_container_width=True,hide_index=True)
+
+            if scan_mode == "Scored candidates (forward test)":
+                st.session_state["forward_queue"] = result
+                st.success(f"{len(result)} setups entered the forward-test queue.")
             else:
-                result=result.sort_values(["Score","Strategy"],ascending=[False,True]).head(int(max_candidates))
-                st.session_state["forward_queue"]=result
-                st.dataframe(result,use_container_width=True,hide_index=True)
-                st.success(f"{len(result)} high-quality setups entered the forward-test queue.")
-                st.download_button("⬇️ Download scan CSV",result.to_csv(index=False).encode(),"daily_scan.csv",key="scan_download")
+                st.caption("RAW mode is an audit. No raw signal is automatically treated as a high-conviction trade.")
+
+            st.download_button(
+                "⬇️ Download scan CSV",
+                result.to_csv(index=False).encode(),
+                "scanner_results.csv",
+                "text/csv",
+                key="scanner_download_v4"
+            )
+
+            st.subheader("📊 Strategy Opportunity Count")
+            chart_df = diag.set_index("Strategy")
+            st.bar_chart(chart_df[["Raw signals"]])
+
         except Exception as e:
             st.error(f"Scanner error: {e}")
+            st.exception(e)
 
 with tabs[2]:
     st.subheader("📊 Backtest Strategies 1–4")
@@ -672,4 +791,5 @@ with tabs[7]:
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
-    
+            
+
