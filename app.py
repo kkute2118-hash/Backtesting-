@@ -1,25 +1,17 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import requests
 import io
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
 
 # ========================= DATA =========================
-#
-# Primary market-data source: DhanHQ Data API.
-# Strategy rules are not modified by the data-source switch.
-#
-# Dhan historical daily data provides OHLCV and is available back to the
-# instrument's inception. We cache each symbol separately so repeated scans
-# do not redownload the same history.
-#
-# Optional: company_info() remains a small safety/news adapter. It is NOT used
-# to alter Strategies 1-4.
 
 INDEX_URLS = {
     "Nifty 500": "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
@@ -28,7 +20,18 @@ INDEX_URLS = {
     "Nifty Midcap 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
 }
 
+@st.cache_data(ttl=86400)
+def index_universe(name):
+    r = requests.get(INDEX_URLS[name], headers={"User-Agent":"Mozilla/5.0"}, timeout=30)
+    r.raise_for_status()
+    df = pd.read_csv(pd.io.common.BytesIO(r.content))
+    col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
+    return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
+
+# ========================= FAST PERSISTENT DHAN DATA LAYER =========================
 DHAN_BASE_URL = "https://api.dhan.co/v2"
+DATA_DB = "market_data.sqlite3"
+DATA_DAYS = 800
 
 def dhan_configured():
     try:
@@ -36,187 +39,362 @@ def dhan_configured():
     except Exception:
         return False
 
-def dhan_headers():
-    return {
+def dhan_headers(quote=False):
+    h = {
         "access-token": str(st.secrets["DHAN_ACCESS_TOKEN"]),
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
+    if quote:
+        h["client-id"] = str(st.secrets["DHAN_CLIENT_ID"])
+    return h
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def dhan_profile():
-    r=requests.get(f"{DHAN_BASE_URL}/profile",
-                   headers={"access-token":str(st.secrets["DHAN_ACCESS_TOKEN"])},
-                   timeout=30)
-    r.raise_for_status()
-    return r.json()
+def db_connect():
+    con = sqlite3.connect(DATA_DB, timeout=30, check_same_thread=False)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS candles (
+            symbol TEXT NOT NULL,
+            dt TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            PRIMARY KEY(symbol, dt)
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT,
+            symbol TEXT,
+            strategy TEXT,
+            score REAL,
+            regime TEXT,
+            entry REAL,
+            sl REAL,
+            target REAL,
+            status TEXT DEFAULT 'ACTIVE',
+            last_price REAL,
+            mfe_pct REAL DEFAULT 0,
+            mae_pct REAL DEFAULT 0,
+            last_update TEXT,
+            UNIQUE(symbol, strategy, created_at)
+        )
+    """)
+    con.commit()
+    return con
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def dhan_instrument_master():
-    urls=[
+    urls = [
         "https://images.dhan.co/api-data/api-scrip-master.csv",
         "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
     ]
-    last=""
+    last = ""
     for url in urls:
         try:
-            r=requests.get(url,timeout=45)
+            r = requests.get(url, timeout=45)
             r.raise_for_status()
-            if len(r.content)>1000:
-                return pd.read_csv(io.BytesIO(r.content),low_memory=False)
+            if len(r.content) > 1000:
+                return pd.read_csv(io.BytesIO(r.content), low_memory=False)
         except Exception as e:
-            last=str(e)
-    raise RuntimeError("Dhan instrument master failed: "+last)
+            last = str(e)
+    raise RuntimeError("Dhan instrument master download failed: " + last)
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def dhan_security_map():
-    """Build NSE cash symbol -> Security ID map once per day."""
-    m=dhan_instrument_master()
-    cols={str(c).strip().lower():c for c in m.columns}
-    sym_col=next((cols[k] for k in [
-        "sem_trading_symbol","trading_symbol","sem_custom_symbol",
-        "custom_symbol","sm_symbol_name"
-    ] if k in cols),None)
-    sid_col=next((cols[k] for k in [
+def dhan_symbol_map():
+    m = dhan_instrument_master()
+    cols = {str(c).strip().lower(): c for c in m.columns}
+    sym_col = next((cols[k] for k in [
+        "sem_trading_symbol","trading_symbol","sem_custom_symbol","custom_symbol"
+    ] if k in cols), None)
+    sid_col = next((cols[k] for k in [
         "sem_smst_security_id","sem_security_id","security_id"
-    ] if k in cols),None)
-    exch_col=next((cols[k] for k in [
-        "sem_exm_exch_id","sem_exchange","exchange"
-    ] if k in cols),None)
-    seg_col=next((cols[k] for k in [
-        "sem_segment","segment"
-    ] if k in cols),None)
+    ] if k in cols), None)
     if not sym_col or not sid_col:
-        raise RuntimeError("Dhan instrument master columns changed. Symbol/Security ID not found.")
-
-    q=m.copy()
-    if exch_col:
-        q=q[q[exch_col].astype(str).str.upper().str.strip().eq("NSE")]
-    if seg_col:
-        seg=q[seg_col].astype(str).str.upper().str.strip()
-        eq=seg.isin(["E","NSE_EQ","EQUITY"])
-        if eq.any(): q=q[eq]
-
-    out={}
-    for _,row in q[[sym_col,sid_col]].dropna().iterrows():
-        sym=str(row[sym_col]).upper().strip()
-        if sym and sym not in out:
-            out[sym]=str(row[sid_col])
-    return out
+        raise RuntimeError("Dhan symbol/Security ID columns not found.")
+    x = m[[sym_col, sid_col]].copy()
+    x.columns = ["symbol","security_id"]
+    x["symbol"] = x["symbol"].astype(str).str.upper().str.strip()
+    x["security_id"] = x["security_id"].astype(str)
+    return dict(zip(x.symbol, x.security_id))
 
 def dhan_security_id(symbol):
-    sym=str(symbol).upper().replace(".NS","").strip()
-    return dhan_security_map().get(sym)
+    return dhan_symbol_map().get(str(symbol).upper().replace(".NS","").strip())
 
-@st.cache_data(ttl=900, show_spinner=False)
-def dhan_daily_history(symbol,start_date,end_date):
-    sid=dhan_security_id(symbol)
-    if sid is None:
-        raise ValueError(f"Dhan Security ID not found for {symbol}")
-    payload={
-        "securityId":str(sid),
-        "exchangeSegment":"NSE_EQ",
-        "instrument":"EQUITY",
-        "expiryCode":0,
-        "oi":False,
-        "fromDate":pd.Timestamp(start_date).strftime("%Y-%m-%d"),
-        "toDate":pd.Timestamp(end_date).strftime("%Y-%m-%d"),
+def dhan_fetch_history(symbol, start_date, end_date):
+    sid = dhan_security_id(symbol)
+    if not sid:
+        raise ValueError(f"Security ID not found: {symbol}")
+    payload = {
+        "securityId": str(sid),
+        "exchangeSegment": "NSE_EQ",
+        "instrument": "EQUITY",
+        "expiryCode": 0,
+        "oi": False,
+        "fromDate": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+        "toDate": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
     }
-    r=requests.post(f"{DHAN_BASE_URL}/charts/historical",
-                    headers=dhan_headers(),json=payload,timeout=45)
+    r = requests.post(
+        f"{DHAN_BASE_URL}/charts/historical",
+        headers=dhan_headers(),
+        json=payload,
+        timeout=45,
+    )
     if not r.ok:
-        raise RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:500]}")
-    raw=r.json()
-    out=pd.DataFrame({
-        "open":raw.get("open",[]),
-        "high":raw.get("high",[]),
-        "low":raw.get("low",[]),
-        "close":raw.get("close",[]),
-        "volume":raw.get("volume",[]),
+        raise RuntimeError(f"Dhan {r.status_code}: {r.text[:300]}")
+    raw = r.json()
+    if not isinstance(raw, dict) or "close" not in raw:
+        raise RuntimeError("Unexpected Dhan historical response.")
+    d = pd.DataFrame({
+        "open": raw.get("open", []),
+        "high": raw.get("high", []),
+        "low": raw.get("low", []),
+        "close": raw.get("close", []),
+        "volume": raw.get("volume", []),
     })
-    ts=raw.get("timestamp",[])
+    ts = raw.get("timestamp", [])
     if ts:
-        out.index=pd.to_datetime(ts,unit="s",errors="coerce")
-        out.index.name="date"
-    out=out.apply(pd.to_numeric,errors="coerce").dropna(subset=["close"]).sort_index()
-    return out
+        d.index = pd.to_datetime(ts, unit="s", errors="coerce")
+        d.index.name = "date"
+    d = d.apply(pd.to_numeric, errors="coerce").dropna(subset=["close"]).sort_index()
+    return d
 
-def _dhan_fetch_one(ticker,start,end):
-    # A tiny retry helps with transient 429/5xx responses.
-    for attempt in range(3):
-        try:
-            return ticker,dhan_daily_history(ticker,start,end),None
-        except Exception as e:
-            msg=str(e)
-            if attempt<2 and ("429" in msg or "500" in msg or "502" in msg or "503" in msg):
-                time.sleep(0.8*(attempt+1))
-                continue
-            return ticker,None,msg
-    return ticker,None,"unknown Dhan error"
+def _db_bounds(con, symbol):
+    row = con.execute(
+        "SELECT MIN(dt), MAX(dt) FROM candles WHERE symbol=?",
+        (symbol,)
+    ).fetchone()
+    return row if row else (None, None)
 
-def download_prices(tickers,start,end):
+def _db_read(con, symbol, start_date, end_date):
+    q = """
+        SELECT dt, open, high, low, close, volume
+        FROM candles
+        WHERE symbol=? AND dt>=? AND dt<=?
+        ORDER BY dt
     """
-    Dhan-backed replacement for the old Yahoo download_prices().
-    Dhan Data API is rate-limited, so requests are deliberately throttled
-    through a small worker pool. Individual symbol results are cached.
+    d = pd.read_sql_query(
+        q, con,
+        params=(symbol, pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+                pd.Timestamp(end_date).strftime("%Y-%m-%d"))
+    )
+    if d.empty:
+        return pd.DataFrame()
+    d["dt"] = pd.to_datetime(d["dt"])
+    d = d.set_index("dt")
+    d.index.name = "date"
+    return d
+
+def _db_upsert(con, symbol, d):
+    if d is None or d.empty:
+        return 0
+    rows = []
+    for idx, r in d.iterrows():
+        rows.append((
+            symbol,
+            pd.Timestamp(idx).strftime("%Y-%m-%d"),
+            float(r.open), float(r.high), float(r.low),
+            float(r.close), float(r.volume)
+        ))
+    con.executemany("""
+        INSERT OR REPLACE INTO candles
+        (symbol, dt, open, high, low, close, volume)
+        VALUES (?,?,?,?,?,?,?)
+    """, rows)
+    con.commit()
+    return len(rows)
+
+def update_one_symbol(symbol, start_date, end_date):
+    """Incrementally update one stock. Existing candles are never re-downloaded."""
+    clean = str(symbol).upper().replace(".NS","")
+    con = db_connect()
+    try:
+        mn, mx = _db_bounds(con, clean)
+        requested_start = pd.Timestamp(start_date).date()
+        requested_end = pd.Timestamp(end_date).date()
+
+        # First run: get the full warm-up window.
+        if mn is None:
+            d = dhan_fetch_history(clean, requested_start, requested_end)
+            return _db_upsert(con, clean, d), "initial"
+
+        existing_min = pd.Timestamp(mn).date()
+        existing_max = pd.Timestamp(mx).date()
+        fetched = 0
+
+        # Fetch only missing data on either side.
+        if requested_start < existing_min:
+            d = dhan_fetch_history(clean, requested_start, existing_min - timedelta(days=1))
+            fetched += _db_upsert(con, clean, d)
+
+        if requested_end > existing_max:
+            d = dhan_fetch_history(clean, existing_max + timedelta(days=1), requested_end)
+            fetched += _db_upsert(con, clean, d)
+
+        return fetched, "incremental"
+    finally:
+        con.close()
+
+def download_prices(tickers, start, end):
     """
-    tickers=tuple(tickers)
-    if not tickers: return {}
+    Compatibility wrapper used by the existing scanner/backtester.
+    Dhan + SQLite persistent cache replaces Yahoo.
+    Only missing candles are requested.
+    """
+    tickers = tuple(tickers)
+    if not tickers:
+        return {}
     if not dhan_configured():
-        raise RuntimeError("Dhan credentials are not configured in Streamlit Secrets.")
+        raise RuntimeError("Dhan is not configured in Streamlit Secrets.")
 
-    # Dhan Data APIs have a 5/sec limit. Four workers keeps a small safety margin.
-    out={}
-    failures=[]
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futures=[ex.submit(_dhan_fetch_one,t,start,end) for t in tickers]
-        for fut in as_completed(futures):
-            ticker,d,err=fut.result()
-            if d is not None and not d.empty:
-                out[ticker]=d
-            elif err:
-                failures.append((ticker,err))
-    return out
+    # One-time instrument master load.
+    dhan_symbol_map()
 
-def dhan_ltp_map(symbols):
-    """Fetch current LTP in batches of <=1000 using Dhan Market Quote."""
-    clean=[str(s).upper().replace(".NS","") for s in symbols]
-    ids=[]
-    sm=dhan_security_map()
-    for s in clean:
-        sid=sm.get(s)
-        if sid: ids.append((s,sid))
-    result={}
-    for i in range(0,len(ids),1000):
-        batch=ids[i:i+1000]
-        payload={"NSE_EQ":[int(sid) if str(sid).isdigit() else sid for _,sid in batch]}
-        r=requests.post(f"{DHAN_BASE_URL}/marketfeed/ltp",
-                        headers={"access-token":str(st.secrets["DHAN_ACCESS_TOKEN"]),
-                                 "client-id":str(st.secrets["DHAN_CLIENT_ID"]),
-                                 "Content-Type":"application/json"},
-                        json=payload,timeout=30)
-        if not r.ok: continue
-        data=r.json().get("data",{}).get("NSE_EQ",{})
-        for sym,sid in batch:
-            v=data.get(str(sid),{})
-            if "last_price" in v:
-                result[sym]=float(v["last_price"])
-        if i+1000<len(ids):
-            time.sleep(1.05)
-    return result
+    # Parallelize a small number of independent first-time downloads.
+    # Keep this conservative because Dhan Data APIs are rate limited.
+    results = {}
+    jobs = {}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for t in tickers:
+            jobs[ex.submit(update_one_symbol, t, start, end)] = t
+        for fut in as_completed(jobs):
+            t = jobs[fut]
+            try:
+                fut.result()
+            except Exception:
+                # One failed stock must not stop the whole universe scan.
+                pass
 
-@st.cache_data(ttl=86400)
-def index_universe(name):
-    r=requests.get(INDEX_URLS[name],headers={"User-Agent":"Mozilla/5.0"},timeout=30)
-    r.raise_for_status()
-    df=pd.read_csv(pd.io.common.BytesIO(r.content))
-    col=next(c for c in df.columns if str(c).strip().upper()=="SYMBOL")
-    return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
+    con = db_connect()
+    try:
+        for t in tickers:
+            clean = str(t).upper().replace(".NS","")
+            d = _db_read(con, clean, start, end)
+            if not d.empty:
+                results[t] = d
+    finally:
+        con.close()
+    return results
 
+def dhan_ltp(symbols):
+    """Fetch LTP for up to 1000 NSE cash instruments in one Dhan request."""
+    clean = [str(s).upper().replace(".NS","") for s in symbols]
+    mapping = dhan_symbol_map()
+    ids = {mapping[s]: s for s in clean if s in mapping}
+    if not ids:
+        return {}
+
+    payload = {"NSE_EQ": [int(x) for x in ids.keys()]}
+    r = requests.post(
+        f"{DHAN_BASE_URL}/marketfeed/ltp",
+        headers=dhan_headers(quote=True),
+        json=payload,
+        timeout=20,
+    )
+    if not r.ok:
+        raise RuntimeError(f"Dhan LTP {r.status_code}: {r.text[:300]}")
+    raw = r.json()
+    data = raw.get("data", {}).get("NSE_EQ", {})
+    return {
+        ids[str(sid)]: float(v["last_price"])
+        for sid, v in data.items()
+        if isinstance(v, dict) and v.get("last_price") is not None
+    }
+
+def add_forward_candidates(df):
+    if df is None or df.empty:
+        return 0
+    con = db_connect()
+    now = datetime.now().isoformat(timespec="seconds")
+    added = 0
+    for _, r in df.iterrows():
+        try:
+            ticker = str(r["Ticker"]).upper().replace(".NS","")
+            strategy = str(r["Strategy"])
+            score = float(r["Score"])
+            con.execute("""
+                INSERT OR IGNORE INTO watchlist
+                (created_at,symbol,strategy,score,regime,entry,sl,target,status,last_update)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (
+                now, ticker, strategy, score, str(r["Regime"]),
+                float(r["Entry"]), float(r["SL 7%"]), float(r["Target 3R"]),
+                "ACTIVE", now
+            ))
+            added += 1
+        except Exception:
+            pass
+    con.commit()
+    con.close()
+    return added
+
+def active_watchlist():
+    con = db_connect()
+    try:
+        return pd.read_sql_query(
+            "SELECT * FROM watchlist WHERE status='ACTIVE' ORDER BY score DESC, id DESC",
+            con
+        )
+    finally:
+        con.close()
+
+def update_watchlist_prices():
+    q = active_watchlist()
+    if q.empty:
+        return q
+    prices = dhan_ltp(q["symbol"].tolist())
+    con = db_connect()
+    now = datetime.now().isoformat(timespec="seconds")
+
+    for _, r in q.iterrows():
+        sym = r["symbol"]
+        px = prices.get(sym)
+        if px is None:
+            continue
+
+        entry = float(r["entry"])
+        sl = float(r["sl"])
+        target = float(r["target"])
+        mfe = max(float(r["mfe_pct"] or 0), (px/entry - 1) * 100)
+        mae = min(float(r["mae_pct"] or 0), (px/entry - 1) * 100)
+
+        status = "ACTIVE"
+        if px <= sl:
+            status = "STOP"
+        elif px >= target:
+            status = "TARGET"
+
+        con.execute("""
+            UPDATE watchlist
+            SET last_price=?, mfe_pct=?, mae_pct=?, status=?, last_update=?
+            WHERE id=?
+        """, (px, mfe, mae, status, now, int(r["id"])))
+
+    con.commit()
+    con.close()
+    return active_watchlist()
+
+def data_health():
+    con = db_connect()
+    try:
+        n = con.execute("SELECT COUNT(DISTINCT symbol) FROM candles").fetchone()[0]
+        rows = con.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
+        last = con.execute("SELECT MAX(dt) FROM candles").fetchone()[0]
+        active = con.execute("SELECT COUNT(*) FROM watchlist WHERE status='ACTIVE'").fetchone()[0]
+        return int(n), int(rows), last or "—", int(active)
+    finally:
+        con.close()
+
+@st.cache_data(ttl=3600)
 def company_info(ticker):
-    # No Dhan fundamental fields are assumed here.
-    # This is intentionally kept empty unless a separate fundamentals provider
-    # is configured. Strategies 1-4 never call this for signal generation.
-    return {}, []
+    t = yf.Ticker(ticker)
+    try: info = t.info
+    except Exception: info = {}
+    try: news = t.news[:10]
+    except Exception: news = []
+    return info, news
 
 # ========================= INDICATORS =========================
 
@@ -801,85 +979,6 @@ def model_b(info):
     if not np.isfinite(val(info,"piotroskiScore")): unavailable.append("Piotroski score")
     return checks,unavailable
 
-
-# ========================= FORWARD-TEST LEARNING =========================
-
-LEARNING_FILE="forward_learning.csv"
-
-def _load_learning():
-    if "learning_df" not in st.session_state:
-        try:
-            st.session_state["learning_df"]=pd.read_csv(LEARNING_FILE)
-        except Exception:
-            st.session_state["learning_df"]=pd.DataFrame()
-    return st.session_state["learning_df"]
-
-def _save_learning(df):
-    st.session_state["learning_df"]=df.copy()
-    try:
-        df.to_csv(LEARNING_FILE,index=False)
-    except Exception:
-        pass
-
-def record_forward_setup(row):
-    df=_load_learning()
-    new=pd.DataFrame([row])
-    df=pd.concat([df,new],ignore_index=True)
-    _save_learning(df)
-
-def learning_summary():
-    df=_load_learning()
-    if df.empty:
-        return pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
-    d=df.copy()
-    d["R"]=pd.to_numeric(d.get("R"),errors="coerce")
-    by_strategy=d.groupby("Strategy",dropna=False).agg(
-        Trades=("R","count"),
-        WinRate=("R",lambda s: round((s>0).mean()*100,1)),
-        AvgR=("R","mean"),
-        TotalR=("R","sum")
-    ).reset_index()
-    by_regime=d.groupby(["Strategy","Regime"],dropna=False).agg(
-        Trades=("R","count"),
-        WinRate=("R",lambda s: round((s>0).mean()*100,1)),
-        AvgR=("R","mean"),
-        TotalR=("R","sum")
-    ).reset_index()
-    if "Score" in d:
-        d["Score Bucket"]=pd.cut(
-            pd.to_numeric(d["Score"],errors="coerce"),
-            bins=[-1,84,89,94,100],
-            labels=["<85","85-89","90-94","95-100"]
-        )
-        by_score=d.groupby(["Strategy","Score Bucket"],observed=False).agg(
-            Trades=("R","count"),
-            WinRate=("R",lambda s: round((s>0).mean()*100,1)),
-            AvgR=("R","mean")
-        ).reset_index()
-    else:
-        by_score=pd.DataFrame()
-    return by_strategy,by_regime,by_score
-
-def learning_component_summary():
-    df=_load_learning()
-    if df.empty: return pd.DataFrame()
-    component_cols=[
-        "Strategy Score","HTF Demand","Footprint","Trend",
-        "Entry Quality","Relative Strength","Market Regime","Safety"
-    ]
-    available=[c for c in component_cols if c in df.columns]
-    if "R" not in df.columns or not available: return pd.DataFrame()
-    d=df.copy()
-    d["R"]=pd.to_numeric(d["R"],errors="coerce")
-    rows=[]
-    for c in available:
-        x=pd.to_numeric(d[c],errors="coerce")
-        if x.notna().sum()<10: continue
-        corr=x.corr(d["R"])
-        rows.append({"Component":c,"Correlation with R":round(float(corr),3) if pd.notna(corr) else np.nan,
-                     "Observations":int(x.notna().sum())})
-    return pd.DataFrame(rows).sort_values("Correlation with R",ascending=False)
-
 # ========================= BACKTEST =========================
 
 def run_backtest(d,sig,capital,risk,sl,rr,slip=.001):
@@ -920,11 +1019,12 @@ def stats(t):
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab")
-st.caption("Dhan-powered MTF swing research • 4 exact strategies • ≥85 forward-test gate • evidence learning • separate long-term investment engine")
+st.caption("MTF swing research • 4 strategies • ≥85 forward-test gate • market-cycle learning • separate long-term investment engine")
 
 tabs=st.tabs([
     "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
-    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety","🔌 Dhan API","🧪 Custom Strategy"
+    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety",
+    "⚡ Live Monitor","💾 Data Manager","🧪 Custom Strategy"
 ])
 
 with tabs[0]:
@@ -941,16 +1041,6 @@ with tabs[0]:
 
 **Safety engine:** Small/micro-cap liquidity and abnormal-volatility checks reduce risk but do not change the four strategies.
 """)
-
-
-    if "backtest_board" in st.session_state:
-        st.markdown("### 📊 Latest backtest evidence")
-        bb=st.session_state["backtest_board"]
-        st.dataframe(bb,use_container_width=True,hide_index=True)
-    st.caption(
-        "Learning policy: hard strategy rules remain fixed. Backtest/forward-test results "
-        "are used only to rank evidence, identify strengths/weaknesses and calibrate the score."
-    )
 
 with tabs[1]:
     st.subheader("📡 Daily Live Scanner")
@@ -1006,12 +1096,12 @@ with tabs[1]:
             idx_tickers = index_universe("Nifty 500")
             idx_data = download_prices(
                 tuple(idx_tickers),
-                date.today()-timedelta(days=1200),
+                date.today()-timedelta(days=1000),
                 date.today()
             )
 
             if not idx_data:
-                st.error("No Nifty 500 price data returned by Yahoo Finance. This is a data-source problem.")
+                st.error("No Nifty 500 Dhan price data returned. Check Dhan authentication/data subscription.")
                 st.stop()
 
             proxy = max(idx_data.values(), key=len)
@@ -1024,13 +1114,13 @@ with tabs[1]:
 
             data = download_prices(
                 tuple(tickers),
-                date.today()-timedelta(days=1200),
+                date.today()-timedelta(days=1000),
                 date.today()
             )
 
             if not data:
                 st.error(
-                    "Yahoo Finance returned no price data for the selected universe. "
+                    "Dhan returned no price data for the selected universe. "
                     "The scanner cannot generate signals until price data is available."
                 )
                 st.stop()
@@ -1054,23 +1144,34 @@ with tabs[1]:
 
                 f = features(df)
                 # Keep the latest row even when some long-term indicators are unavailable.
-                # Individual strategy conditions will evaluate NaNs as False.
                 f = f.replace([np.inf, -np.inf], np.nan)
                 if len(f) < 260:
                     bar.progress((n+1)/max(1,len(data)))
                     continue
 
                 stats["usable"] += 1
+
+                # Evaluate all four strategy signals first. This avoids slow company-info
+                # calls for hundreds of non-candidates.
+                signals_for_stock = {}
+                any_signal = False
+                for s in selected_strategies:
+                    sig = strategy_signal(f,s)
+                    signals_for_stock[s] = bool(sig.iloc[-1])
+                    if signals_for_stock[s]:
+                        stats["signals"][s] += 1
+                        any_signal = True
+
+                if not any_signal:
+                    bar.progress((n+1)/max(1,len(data)))
+                    continue
+
+                # Safety/fundamental metadata is fetched only for actual strategy candidates.
                 info,_ = company_info(ticker)
                 safe,safe_status,flags = safety(info,df)
 
                 for s in selected_strategies:
-                    sig = strategy_signal(f,s)
-                    signal = bool(sig.iloc[-1])
-
-                    if signal:
-                        stats["signals"][s] += 1
-
+                    signal = signals_for_stock[s]
                     if not signal:
                         continue
 
@@ -1116,14 +1217,6 @@ with tabs[1]:
                 bar.progress((n+1)/max(1,len(data)))
 
             result = pd.DataFrame(rows)
-
-            # Refresh current LTP only for candidates. This does not change any strategy rule.
-            if not result.empty:
-                try:
-                    ltp_map=dhan_ltp_map(result["Ticker"].tolist())
-                    result["Current LTP"]=result["Ticker"].map(ltp_map)
-                except Exception:
-                    result["Current LTP"]=np.nan
 
             # Strategy 4 condition audit — shown only when S4 is selected.
             if 4 in selected_strategies and stats["usable"] > 0:
@@ -1264,8 +1357,8 @@ with tabs[1]:
             c5.metric("S3/S4 signals", stats["signals"][3]+stats["signals"][4])
             c6.metric("Safety rejects", stats["safety_reject"])
             st.caption(
-                "Warm-up history: 1000 calendar days. This is required for EMA250 and monthly EMA20; "
-                "the previous 450-day window could leave the feature table with zero valid rows."
+                "Dhan data is stored persistently in market_data.sqlite3. "
+                "After the first download, only missing/new candles are requested."
             )
 
             diag = pd.DataFrame({
@@ -1292,7 +1385,11 @@ with tabs[1]:
 
             if scan_mode == "Scored candidates (forward test)":
                 st.session_state["forward_queue"] = result
-                st.success(f"{len(result)} setups entered the forward-test queue.")
+                added = add_forward_candidates(result[result["Score"] >= 85])
+                st.success(
+                    f"{len(result)} setups entered the forward-test queue. "
+                    f"{added} candidates added to the persistent active monitor."
+                )
             else:
                 st.caption("RAW mode is an audit. No raw signal is automatically treated as a high-conviction trade.")
 
@@ -1314,26 +1411,19 @@ with tabs[1]:
 
 with tabs[2]:
     st.subheader("📊 Backtest Strategies 1–4")
-    st.caption("Backtest uses the same hard Strategy 1–4 signal rules. Score/learning layers are kept separate.")
     a,b,c=st.columns(3)
     uni=a.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="bt_universe")
-    start=b.date_input("Start",date.today()-timedelta(days=1200),key="bt_start")
+    start=b.date_input("Start",date.today()-timedelta(days=730),key="bt_start")
     end=c.date_input("End",date.today(),key="bt_end")
     a,b,c,d=st.columns(4)
     capital=a.number_input("Capital ₹",value=1_000_000,step=100_000,key="bt_capital")
     risk=b.number_input("Risk %",value=1.0,step=.25,key="bt_risk")
-    sl=d.number_input("SL %",value=7.0,step=.5,key="bt_sl")
-    rr=c.selectbox("Target R",[2,2.5,3,3.5,4,5],index=2,key="bt_rr")
+    sl=b.number_input("SL %",value=7.0,step=.5,key="bt_sl")
+    rr=d.selectbox("Target R",[2,2.5,3,3.5,4,5],index=2,key="bt_rr")
     selected=st.multiselect("Strategies",[1,2,3,4],[1,2,3,4],key="bt_strategies")
-
     if st.button("🚀 Run Backtest",type="primary",key="bt_run"):
         try:
-            if not selected:
-                st.warning("Select at least one strategy.")
-                st.stop()
-            tickers=index_universe(uni)
-            with st.spinner(f"Downloading {len(tickers)} symbols from Dhan..."):
-                data=download_prices(tuple(tickers),start,end)
+            tickers=index_universe(uni); data=download_prices(tuple(tickers),start,end)
             logs=[]; summary=[]; bar=st.progress(0)
             for n,(ticker,df) in enumerate(data.items()):
                 if len(df)>=260:
@@ -1342,72 +1432,26 @@ with tabs[2]:
                         try:
                             tr,_=run_backtest(df,strategy_signal(f,s),capital,risk/100,sl/100,rr)
                             if not tr.empty:
-                                tr["Ticker"]=ticker
-                                tr["Strategy"]=f"S{s}"
-                                logs.append(tr)
+                                tr["Ticker"]=ticker; tr["Strategy"]=f"S{s}"; logs.append(tr)
                                 m=stats(tr);m["Strategy"]=f"S{s}";summary.append(m)
-                        except Exception:
-                            pass
+                        except Exception: pass
                 bar.progress((n+1)/max(1,len(data)))
-
             if summary:
                 alltrades=pd.concat(logs,ignore_index=True)
-                board=pd.DataFrame(summary).groupby("Strategy").agg(
-                    Trades=("Trades","sum"),
-                    WinPct=("Win %","mean"),
-                    ExpectancyR=("Expectancy R","mean"),
-                    TotalR=("Total R","sum"),
-                    ProfitFactor=("Profit Factor","mean")
-                ).sort_values("ExpectancyR",ascending=False)
-
-                st.session_state["backtest_trades"]=alltrades
-                st.session_state["backtest_board"]=board.reset_index()
-
-                st.subheader("🏆 Strategy comparison")
-                st.dataframe(board,use_container_width=True)
-
-                best=board.index[0]
-                best_exp=float(board.iloc[0]["ExpectancyR"])
-                st.success(
-                    f"Backtest evidence leader: {best} with average expectancy {best_exp:.3f}R. "
-                    "This is research evidence only; it does not change any strategy rule."
-                )
+                board=pd.DataFrame(summary).groupby("Strategy").mean(numeric_only=True).sort_values("Expectancy R",ascending=False)
+                st.subheader("🏆 Strategy comparison");st.dataframe(board,use_container_width=True)
                 st.dataframe(alltrades,use_container_width=True,hide_index=True)
-                st.download_button(
-                    "⬇️ Download backtest",
-                    alltrades.to_csv(index=False).encode(),
-                    "backtest.csv",
-                    key="bt_download"
-                )
-            else:
-                st.warning("No qualifying trades.")
-        except Exception as e:
-            st.error(f"Backtest error: {e}")
-            st.exception(e)
-
-    if "backtest_board" in st.session_state:
-        st.markdown("### 🧠 Backtest evidence for future selection")
-        st.dataframe(st.session_state["backtest_board"],use_container_width=True,hide_index=True)
-        st.caption(
-            "Use this table to compare strategies before forward testing. "
-            "Do not select a strategy solely because it has the highest historical return."
-        )
+                st.download_button("⬇️ Download backtest",alltrades.to_csv(index=False).encode(),"backtest.csv",key="bt_download")
+            else: st.warning("No qualifying trades.")
+        except Exception as e: st.error(f"Backtest error: {e}")
 
 with tabs[3]:
-    st.subheader("🔬 Forward Testing")
-    st.caption("Only setups passing your score gate are intended for this queue. The strategy rules remain unchanged.")
-
+    st.subheader("🔬 Forward Testing — Score ≥85")
     q=st.session_state.get("forward_queue",pd.DataFrame())
-    if q.empty:
-        st.info("No forward-test candidates yet. Run the Daily Scanner in Scored mode.")
+    if q.empty: st.info("Run the Daily Scanner first.")
     else:
         st.dataframe(q,use_container_width=True,hide_index=True)
-        st.download_button(
-            "⬇️ Download forward-test queue",
-            q.to_csv(index=False).encode(),
-            "forward_queue.csv",
-            key="forward_queue_download"
-        )
+        st.download_button("⬇️ Export forward queue",q.to_csv(index=False).encode(),"forward_queue.csv",key="forward_queue_download")
 
     st.markdown("### Record completed paper trade")
     a,b,c,d=st.columns(4)
@@ -1416,115 +1460,63 @@ with tabs[3]:
     exitp=c.number_input("Exit",min_value=0.0,key="ft_exit")
     rres=d.number_input("R result",value=0.0,step=.25,key="ft_r")
     reason=st.selectbox("Exit reason",["Target","Stop","Trailing stop","Time exit","Invalidated"],key="ft_reason")
-    notes=st.text_area("Notes / mistake / what worked",key="ft_notes")
-
-    qrow=pd.DataFrame()
-    if not q.empty and ticker:
-        qrow=q[q["Ticker"].astype(str).str.upper()==ticker.upper()].tail(1)
-
+    notes=st.text_area("Notes / mistake",key="ft_notes")
     if st.button("💾 Save Forward Result",key="ft_save"):
-        if not ticker:
-            st.warning("Enter a ticker.")
-        else:
-            base={}
-            if not qrow.empty:
-                base=qrow.iloc[0].to_dict()
-            base.update({
-                "Result Date":str(date.today()),
-                "Ticker":ticker.upper(),
-                "Entry Actual":entry,
-                "Exit Actual":exitp,
-                "R":rres,
-                "Exit Reason":reason,
-                "Notes":notes,
-            })
-            record_forward_setup(base)
-            st.success("Forward result recorded. This result is now available to the learning layer.")
-
-    learned=_load_learning()
-    if not learned.empty:
-        st.markdown("### 📚 Forward-test journal")
-        st.dataframe(learned,use_container_width=True,hide_index=True)
-        st.download_button("⬇️ Download learning journal",
-                           learned.to_csv(index=False).encode(),
-                           "forward_learning.csv",
-                           key="learning_download")
+        row=pd.DataFrame([{"Date":str(date.today()),"Ticker":ticker,"Entry":entry,"Exit":exitp,"R":rres,"Reason":reason,"Notes":notes}])
+        st.session_state["forward_results"]=pd.concat([st.session_state.get("forward_results",pd.DataFrame()),row],ignore_index=True)
+        st.success("Forward result recorded.")
+    if "forward_results" in st.session_state:
+        st.dataframe(st.session_state["forward_results"],use_container_width=True,hide_index=True)
 
 with tabs[4]:
     st.subheader("🧠 Market-Cycle Learning")
-    st.caption("Learning ranks evidence from your backtests/forward tests. It does NOT rewrite Strategies 1–4.")
+    st.markdown("### Evidence confidence")
+    st.caption("Confidence is based on the number of comparable forward-test observations. It is not a probability of winning.")
+    rr = st.session_state.get("forward_results", pd.DataFrame())
+    if not rr.empty and "R" in rr.columns:
+        nobs = len(rr)
+        conf = "LOW" if nobs < 30 else "MEDIUM" if nobs < 75 else "HIGH"
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Comparable observations", nobs)
+        c2.metric("Evidence confidence", conf)
+        c3.metric("Observed expectancy", f"{rr.R.mean():.3f}R")
 
-    r=_load_learning()
+    st.warning("The learning layer records evidence and compares performance. It does not rewrite Strategy 1–4 rules.")
+    r=st.session_state.get("forward_results",pd.DataFrame())
     if r.empty:
-        st.info("No completed forward-test results yet.")
+        st.info("No forward-test results yet.")
     else:
-        a,b,c=st.columns(3)
-        a.metric("Recorded trades",len(r))
-        a.metric("Observed expectancy",f"{pd.to_numeric(r['R'],errors='coerce').mean():.3f}R")
-        a.metric("Total R",f"{pd.to_numeric(r['R'],errors='coerce').sum():.2f}R")
+        a,b=st.columns(2)
+        a.metric("Forward expectancy",f"{r.R.mean():.3f}R")
+        b.metric("Total R",f"{r.R.sum():.2f}R")
+        st.dataframe(r,use_container_width=True,hide_index=True)
+    st.markdown("""
+### Strategy × Market Cycle
+After enough forward trades, the dashboard will populate:
 
-        by_strategy,by_regime,by_score=learning_summary()
-        st.markdown("### Strategy performance")
-        st.dataframe(by_strategy,use_container_width=True,hide_index=True)
+| Market cycle | S1 | S2 | S3 | S4 |
+|---|---:|---:|---:|---:|
+| Strong Bull | — | — | — | — |
+| Bull | — | — | — | — |
+| Recovery | — | — | — | — |
+| Sideways | — | — | — | — |
+| Early Bear | — | — | — | — |
+| Bear | — | — | — | — |
 
-        st.markdown("### Strategy × Market Cycle")
-        st.dataframe(by_regime,use_container_width=True,hide_index=True)
+The numbers must be earned from forward/out-of-sample results.
 
-        st.markdown("### Score calibration")
-        st.dataframe(by_score,use_container_width=True,hide_index=True)
-
-        comp=learning_component_summary()
-        if not comp.empty:
-            st.markdown("### Setup strengths / weak points")
-            st.caption("Positive correlation means the component has tended to be associated with better R results in the recorded sample. Correlation is evidence, not causation.")
-            st.dataframe(comp,use_container_width=True,hide_index=True)
-
-        st.warning(
-            "The learning layer can identify which strategies, market cycles, score buckets and "
-            "setup components have performed better or worse. It never changes the hard entry rules."
-        )
+### Score calibration
+The system will also learn whether 85–89, 90–94 and 95–100 actually have different historical outcomes. A score is not called a probability until enough forward data proves it is calibrated.
+""")
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamental Scanner")
-    st.warning(
-        "Separate from Strategies 1–4. Your two fundamental rule sets are preserved. "
-        "DhanHQ Data API supplies market data, Security IDs and OHLCV, but Dhan's documented "
-        "v2 API does not expose the Screener.in-style ROE/ROCE/Piotroski/P-E/P-FCF/current-ratio "
-        "fundamental fields required by your two rules. Therefore this module will NOT invent "
-        "or substitute those fields from Dhan."
-    )
-    st.markdown("""
-**Your fundamental models remain exactly separate:**
-
-**Model A — Quality / Value**
-- Market Cap > 5000 Cr
-- EPS > 15
-- Sales growth 5Y > 10%
-- ROE > 15%
-- ROCE > 15%
-- Debt/Equity < 0.5
-- Price/FCF > 0
-- Net profit > 10%
-- P/E < 25
-- Current ratio > 1.5
-- Dividend yield > 1%
-- Operating profit growth > 15%
-- Promoter holding > 40%
-
-**Model B — Growth / Piotroski**
-- Market Cap 200–20000 Cr
-- 1Y return > 0
-- YoY quarterly sales growth > 10%
-- YoY quarterly profit growth > 10%
-- ROCE > 15%
-- ROE > 15%
-- Piotroski score = 9
-""")
-    st.info(
-        "Next integration point: a dedicated fundamental provider can be connected here without "
-        "touching Dhan technical scanning or Strategies 1–4."
-    )
-    st.caption("No CSV is required by the technical Dhan scanner. Fundamental automation is kept separate until a provider exposes the exact fields above.")
+    st.warning("Completely separate from Strategies 1–4. This is for finding long-term investment candidates in the wider Indian cash market.")
+    model=st.radio("Model",["Model A — Quality / Value","Model B — Growth / Piotroski"],horizontal=True,key="fund_model")
+    limit=st.number_input("Stocks to analyse this run",value=100,min_value=10,max_value=500,key="fund_limit")
+    st.caption("Yahoo Finance does not reliably expose every Screener.in field. Missing fields are shown as unavailable rather than guessed.")
+    if st.button("🔎 Run Fundamental Scan",type="primary",key="fund_scan"):
+        st.warning("Fundamental API is intentionally paused for now. We will connect a dedicated fundamental-data API after the live trading scanner is fully validated. No Yahoo field is being substituted for your Screener.in rules.")
 
 with tabs[6]:
     st.subheader("🏢 Small/Micro-Cap Safety")
@@ -1542,25 +1534,64 @@ These checks cannot guarantee that a company is free from manipulation, governan
 """)
 
 with tabs[7]:
-    st.subheader("🔌 Dhan API Status")
-    if not dhan_configured():
-        st.error("Dhan credentials are missing from Streamlit Secrets.")
-    else:
+    st.subheader("⚡ Live Forward-Test Monitor")
+    st.caption(
+        "Only persistent ≥85 candidates are monitored here. "
+        "Dhan LTP is refreshed automatically; strategy rules are not changed."
+    )
+
+    def _live_monitor_body():
         try:
-            p=dhan_profile()
-            a,b,c=st.columns(3)
-            a.metric("Client ID",str(p.get("dhanClientId","—")))
-            b.metric("Data Plan",str(p.get("dataPlan","—")))
-            c.metric("Data Validity",str(p.get("dataValidity","—")))
-            st.success("Dhan authentication is valid.")
-            if st.button("🔄 Refresh Dhan Instrument Map",key="dhan_refresh_map"):
-                dhan_instrument_master.clear()
-                dhan_security_map.clear()
-                st.success("Dhan instrument cache cleared. Run the scanner again.")
+            q = update_watchlist_prices()
+            if q.empty:
+                st.info("No active ≥85 forward-test candidates yet. Run the scanner in Scored candidates mode.")
+                return
+            c1,c2,c3 = st.columns(3)
+            c1.metric("Active setups", int((q.status=="ACTIVE").sum()))
+            c2.metric("Targets", int((q.status=="TARGET").sum()))
+            c3.metric("Stops", int((q.status=="STOP").sum()))
+            show = q[[
+                "symbol","strategy","score","regime","entry","sl","target",
+                "status","last_price","mfe_pct","mae_pct","last_update"
+            ]].copy()
+            show.columns = [
+                "Stock","Strategy","Score","Regime","Entry","SL","Target",
+                "Status","LTP","MFE %","MAE %","Updated"
+            ]
+            st.dataframe(show,use_container_width=True,hide_index=True)
         except Exception as e:
-            st.error(f"Dhan authentication failed: {e}")
+            st.error(f"Live monitor error: {e}")
+
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every="60s")
+        def live_monitor_fragment():
+            _live_monitor_body()
+        live_monitor_fragment()
+    else:
+        if st.button("🔄 Refresh active tests", key="live_manual_refresh"):
+            st.rerun()
+        _live_monitor_body()
 
 with tabs[8]:
+    st.subheader("💾 Dhan Data Manager")
+    st.caption("Persistent local cache: first run downloads history; later scans request only missing candles.")
+    if not dhan_configured():
+        st.error("Dhan credentials are not configured.")
+    else:
+        try:
+            ns, nrows, last_dt, active = data_health()
+            a,b,c,d = st.columns(4)
+            a.metric("Cached stocks", ns)
+            b.metric("Cached candles", f"{nrows:,}")
+            c.metric("Latest candle", last_dt)
+            d.metric("Active ≥85 tests", active)
+
+            if st.button("🔄 Update selected data now", key="data_manager_update"):
+                st.info("Use Daily Scanner → Scan Market Now to update the selected universe incrementally.")
+        except Exception as e:
+            st.error(f"Data manager error: {e}")
+
+with tabs[9]:
     st.subheader("🧪 Custom Strategy Lab")
     st.text_area("Paste your strategy",height=220,key="custom_strategy",
                  placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
@@ -1571,4 +1602,4 @@ with tabs[8]:
         st.success("Strategy received. Convert ambiguous language into explicit testable rules before backtesting.")
 
 st.markdown("---")
-st.caption("Research / paper-testing system. Dhan market-data integration is enabled; real-money order execution remains intentionally disabled.")
+st.caption("Research / paper-testing system. Dhan market data is enabled; real-money Dhan order execution remains intentionally disabled.")
