@@ -494,7 +494,7 @@ with tabs[1]:
             idx_tickers = index_universe("Nifty 500")
             idx_data = download_prices(
                 tuple(idx_tickers),
-                date.today()-timedelta(days=450),
+                date.today()-timedelta(days=1000),
                 date.today()
             )
 
@@ -512,7 +512,7 @@ with tabs[1]:
 
             data = download_prices(
                 tuple(tickers),
-                date.today()-timedelta(days=450),
+                date.today()-timedelta(days=1000),
                 date.today()
             )
 
@@ -540,8 +540,11 @@ with tabs[1]:
                     bar.progress((n+1)/max(1,len(data)))
                     continue
 
-                f = features(df).dropna()
-                if f.empty:
+                f = features(df)
+                # Keep the latest row even when some long-term indicators are unavailable.
+                # Individual strategy conditions will evaluate NaNs as False.
+                f = f.replace([np.inf, -np.inf], np.nan)
+                if len(f) < 260:
                     bar.progress((n+1)/max(1,len(data)))
                     continue
 
@@ -610,6 +613,10 @@ with tabs[1]:
             c4.metric("S1/S2 signals", stats["signals"][1]+stats["signals"][2])
             c5.metric("S3/S4 signals", stats["signals"][3]+stats["signals"][4])
             c6.metric("Safety rejects", stats["safety_reject"])
+            st.caption(
+                "Warm-up history: 1000 calendar days. This is required for EMA250 and monthly EMA20; "
+                "the previous 450-day window could leave the feature table with zero valid rows."
+            )
 
             diag = pd.DataFrame({
                 "Strategy":["S1","S2","S3","S4"],
@@ -792,4 +799,3 @@ with tabs[7]:
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
             
-
