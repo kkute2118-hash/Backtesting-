@@ -1,14 +1,25 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import requests
 import io
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
 
 # ========================= DATA =========================
+#
+# Primary market-data source: DhanHQ Data API.
+# Strategy rules are not modified by the data-source switch.
+#
+# Dhan historical daily data provides OHLCV and is available back to the
+# instrument's inception. We cache each symbol separately so repeated scans
+# do not redownload the same history.
+#
+# Optional: company_info() remains a small safety/news adapter. It is NOT used
+# to alter Strategies 1-4.
 
 INDEX_URLS = {
     "Nifty 500": "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
@@ -16,55 +27,6 @@ INDEX_URLS = {
     "Nifty Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
     "Nifty Midcap 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
 }
-
-@st.cache_data(ttl=86400)
-def index_universe(name):
-    r = requests.get(INDEX_URLS[name], headers={"User-Agent":"Mozilla/5.0"}, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(pd.io.common.BytesIO(r.content))
-    col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
-    return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
-
-@st.cache_data(ttl=1800)
-def download_prices(tickers, start, end):
-    tickers = tuple(tickers)
-    if not tickers:
-        return {}
-    raw = yf.download(list(tickers), start=start, end=end+timedelta(days=1),
-                      auto_adjust=False, progress=False, group_by="ticker", threads=True)
-    out = {}
-    if len(tickers) == 1:
-        if not raw.empty:
-            raw.columns = [str(c).lower() for c in raw.columns]
-            out[tickers[0]] = raw.dropna(subset=["close"])
-        return out
-    for t in tickers:
-        try:
-            d = raw[t].copy()
-            d.columns = [str(c).lower() for c in d.columns]
-            d = d.dropna(subset=["close"])
-            if not d.empty:
-                out[t] = d
-        except Exception:
-            pass
-    return out
-
-@st.cache_data(ttl=3600)
-def company_info(ticker):
-    t = yf.Ticker(ticker)
-    try: info = t.info
-    except Exception: info = {}
-    try: news = t.news[:10]
-    except Exception: news = []
-    return info, news
-
-
-# ========================= DHAN DATA LAYER =========================
-# Dhan credentials must be stored in Streamlit Cloud Secrets:
-# DHAN_CLIENT_ID = "your_client_id"
-# DHAN_ACCESS_TOKEN = "your_access_token"
-#
-# This layer is DATA-ONLY. It does not place or modify orders.
 
 DHAN_BASE_URL = "https://api.dhan.co/v2"
 
@@ -81,280 +43,180 @@ def dhan_headers():
     }
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def dhan_profile():
+    r=requests.get(f"{DHAN_BASE_URL}/profile",
+                   headers={"access-token":str(st.secrets["DHAN_ACCESS_TOKEN"])},
+                   timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def dhan_instrument_master():
-    """Load Dhan's instrument master for Security-ID mapping."""
-    urls = [
+    urls=[
         "https://images.dhan.co/api-data/api-scrip-master.csv",
         "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
     ]
-    last_error = ""
+    last=""
     for url in urls:
         try:
-            r = requests.get(url, timeout=45)
+            r=requests.get(url,timeout=45)
             r.raise_for_status()
-            if len(r.content) > 1000:
-                return pd.read_csv(io.BytesIO(r.content), low_memory=False)
+            if len(r.content)>1000:
+                return pd.read_csv(io.BytesIO(r.content),low_memory=False)
         except Exception as e:
-            last_error = str(e)
-    raise RuntimeError("Dhan instrument master download failed: " + last_error)
+            last=str(e)
+    raise RuntimeError("Dhan instrument master failed: "+last)
 
-def dhan_security_id(symbol):
-    """Resolve an NSE equity symbol to a Dhan Security ID.
-    Uses Dhan's segmentwise instrument endpoint first, then falls back
-    to the published CSV and dynamically detects the relevant columns.
-    """
-    clean_symbol = str(symbol).upper().replace(".NS", "").strip()
-
-    # Preferred route: Dhan's segmentwise NSE_EQ instrument endpoint.
-    try:
-        r = requests.get(
-            f"{DHAN_BASE_URL}/instrument/NSE_EQ",
-            headers={"access-token": str(st.secrets["DHAN_ACCESS_TOKEN"])},
-            timeout=45,
-        )
-        if r.ok:
-            payload = r.json()
-            if isinstance(payload, list):
-                rows = payload
-            elif isinstance(payload, dict):
-                rows = (
-                    payload.get("data")
-                    or payload.get("instruments")
-                    or payload.get("result")
-                    or []
-                )
-            else:
-                rows = []
-
-            if rows:
-                m = pd.DataFrame(rows)
-                cols = {str(c).strip().lower(): c for c in m.columns}
-
-                sym_col = next(
-                    (cols[k] for k in [
-                        "sem_trading_symbol", "trading_symbol",
-                        "sem_custom_symbol", "custom_symbol",
-                        "symbol_name"
-                    ] if k in cols), None
-                )
-                sid_col = next(
-                    (cols[k] for k in [
-                        "security_id", "sem_security_id",
-                        "sem_smst_security_id"
-                    ] if k in cols), None
-                )
-
-                # Dynamic fallback: find columns whose names clearly contain
-                # trading/symbol and security/id.
-                if sym_col is None:
-                    sym_col = next(
-                        (c for c in m.columns
-                         if "symbol" in str(c).lower() and
-                            ("trading" in str(c).lower() or "custom" in str(c).lower())),
-                        None
-                    )
-                if sid_col is None:
-                    sid_col = next(
-                        (c for c in m.columns
-                         if "security" in str(c).lower() and "id" in str(c).lower()),
-                        None
-                    )
-
-                if sym_col and sid_col:
-                    hit = m[
-                        m[sym_col].astype(str).str.upper().str.strip().eq(clean_symbol)
-                    ]
-                    if not hit.empty:
-                        return str(hit.iloc[0][sid_col])
-
-    except Exception:
-        pass
-
-    # Fallback: published compact instrument CSV.
-    master = dhan_instrument_master()
-    cols = {str(c).strip().lower(): c for c in master.columns}
-
-    sym_col = next(
-        (cols[k] for k in [
-            "sem_trading_symbol", "trading_symbol",
-            "sem_custom_symbol", "custom_symbol", "sm_symbol_name"
-        ] if k in cols), None)
-    sid_col = next(
-        (cols[k] for k in [
-            "sem_smst_security_id", "sem_security_id", "security_id"
-        ] if k in cols), None)
-
-
-    # Dynamic column discovery for future Dhan master changes.
-    if sym_col is None:
-        sym_col = next(
-            (c for c in master.columns
-             if "symbol" in str(c).lower() and
-                ("trading" in str(c).lower() or "custom" in str(c).lower())),
-            None
-        )
-    if sid_col is None:
-        sid_col = next(
-            (c for c in master.columns
-             if "security" in str(c).lower() and "id" in str(c).lower()),
-            None
-        )
-
+@st.cache_data(ttl=86400, show_spinner=False)
+def dhan_security_map():
+    """Build NSE cash symbol -> Security ID map once per day."""
+    m=dhan_instrument_master()
+    cols={str(c).strip().lower():c for c in m.columns}
+    sym_col=next((cols[k] for k in [
+        "sem_trading_symbol","trading_symbol","sem_custom_symbol",
+        "custom_symbol","sm_symbol_name"
+    ] if k in cols),None)
+    sid_col=next((cols[k] for k in [
+        "sem_smst_security_id","sem_security_id","security_id"
+    ] if k in cols),None)
+    exch_col=next((cols[k] for k in [
+        "sem_exm_exch_id","sem_exchange","exchange"
+    ] if k in cols),None)
+    seg_col=next((cols[k] for k in [
+        "sem_segment","segment"
+    ] if k in cols),None)
     if not sym_col or not sid_col:
-        raise RuntimeError(
-            "Could not identify Dhan Security ID/trading-symbol columns. "
-            "Detected columns: " + ", ".join(map(str, master.columns[:60]))
-        )
+        raise RuntimeError("Dhan instrument master columns changed. Symbol/Security ID not found.")
 
-    m = master[
-        master[sym_col].astype(str).str.upper().str.strip().eq(clean_symbol)
-    ].copy()
+    q=m.copy()
+    if exch_col:
+        q=q[q[exch_col].astype(str).str.upper().str.strip().eq("NSE")]
+    if seg_col:
+        seg=q[seg_col].astype(str).str.upper().str.strip()
+        eq=seg.isin(["E","NSE_EQ","EQUITY"])
+        if eq.any(): q=q[eq]
 
-    exch_col = cols.get("sem_exm_exch_id") or cols.get("sem_exchange") or cols.get("exchange")
-    seg_col = cols.get("sem_segment") or cols.get("segment")
-
-    if exch_col and not m.empty:
-        q = m[exch_col].astype(str).str.upper().str.strip().eq("NSE")
-        if q.any():
-            m = m[q]
-
-    if seg_col and not m.empty:
-        seg = m[seg_col].astype(str).str.upper().str.strip()
-        q = seg.isin(["E", "NSE_EQ", "EQUITY"])
-        if q.any():
-            m = m[q]
-
-    if m.empty:
-        return None
-
-    return str(m.iloc[0][sid_col])
-
-@st.cache_data(ttl=900, show_spinner=False)
-def dhan_daily_history(symbol, start_date, end_date):
-    """Download Dhan daily OHLCV and return the same columns used by the scanner."""
-    sid = dhan_security_id(symbol)
-    if sid is None:
-        raise ValueError(f"NSE Security ID not found for {symbol}")
-
-    payload = {
-        "securityId": str(sid),
-        "exchangeSegment": "NSE_EQ",
-        "instrument": "EQUITY",
-        "fromDate": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
-        "toDate": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
-    }
-
-    r = requests.post(
-        f"{DHAN_BASE_URL}/charts/historical",
-        headers=dhan_headers(),
-        json=payload,
-        timeout=45,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:500]}")
-
-    raw = r.json()
-    if not isinstance(raw, dict) or "close" not in raw:
-        raise RuntimeError(
-            "Unexpected Dhan historical response: " + str(raw)[:500]
-        )
-
-    out = pd.DataFrame({
-        "open": raw.get("open", []),
-        "high": raw.get("high", []),
-        "low": raw.get("low", []),
-        "close": raw.get("close", []),
-        "volume": raw.get("volume", []),
-    })
-
-    timestamps = raw.get("timestamp", [])
-    if timestamps:
-        out.index = pd.to_datetime(
-            timestamps, unit="s", errors="coerce"
-        )
-        out.index.name = "date"
-
-    out = out.apply(pd.to_numeric, errors="coerce")
-    out = out.dropna(subset=["close"]).sort_index()
+    out={}
+    for _,row in q[[sym_col,sid_col]].dropna().iterrows():
+        sym=str(row[sym_col]).upper().strip()
+        if sym and sym not in out:
+            out[sym]=str(row[sid_col])
     return out
 
-def dhan_test_panel():
-    """Visible connection/data test; does not affect the scanner."""
-    st.subheader("🔌 Dhan API Connection Test")
-    st.caption(
-        "Data-only test. Your access token is read from Streamlit Secrets "
-        "and is never displayed."
-    )
+def dhan_security_id(symbol):
+    sym=str(symbol).upper().replace(".NS","").strip()
+    return dhan_security_map().get(sym)
 
-    if not dhan_configured():
-        st.error(
-            "Dhan credentials not found. Add these to Streamlit Secrets:\n\n"
-            "DHAN_CLIENT_ID = \"your_client_id\"\n\n"
-            "DHAN_ACCESS_TOKEN = \"your_access_token\""
-        )
-        return
+@st.cache_data(ttl=900, show_spinner=False)
+def dhan_daily_history(symbol,start_date,end_date):
+    sid=dhan_security_id(symbol)
+    if sid is None:
+        raise ValueError(f"Dhan Security ID not found for {symbol}")
+    payload={
+        "securityId":str(sid),
+        "exchangeSegment":"NSE_EQ",
+        "instrument":"EQUITY",
+        "expiryCode":0,
+        "oi":False,
+        "fromDate":pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+        "toDate":pd.Timestamp(end_date).strftime("%Y-%m-%d"),
+    }
+    r=requests.post(f"{DHAN_BASE_URL}/charts/historical",
+                    headers=dhan_headers(),json=payload,timeout=45)
+    if not r.ok:
+        raise RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:500]}")
+    raw=r.json()
+    out=pd.DataFrame({
+        "open":raw.get("open",[]),
+        "high":raw.get("high",[]),
+        "low":raw.get("low",[]),
+        "close":raw.get("close",[]),
+        "volume":raw.get("volume",[]),
+    })
+    ts=raw.get("timestamp",[])
+    if ts:
+        out.index=pd.to_datetime(ts,unit="s",errors="coerce")
+        out.index.name="date"
+    out=out.apply(pd.to_numeric,errors="coerce").dropna(subset=["close"]).sort_index()
+    return out
 
-    st.success("Dhan credentials found in Streamlit Secrets.")
-
-    if st.button("🔌 Run Dhan Data Test", type="primary", key="dhan_test_button"):
+def _dhan_fetch_one(ticker,start,end):
+    # A tiny retry helps with transient 429/5xx responses.
+    for attempt in range(3):
         try:
-            with st.spinner("Loading Dhan instrument master..."):
-                master = dhan_instrument_master()
-            st.success(f"Instrument master loaded: {len(master):,} rows.")
-            with st.expander("Dhan master diagnostics"):
-                st.write("Detected columns:")
-                st.code(", ".join(map(str, master.columns)))
+            return ticker,dhan_daily_history(ticker,start,end),None
         except Exception as e:
-            st.error(f"Instrument master test failed: {e}")
-            return
+            msg=str(e)
+            if attempt<2 and ("429" in msg or "500" in msg or "502" in msg or "503" in msg):
+                time.sleep(0.8*(attempt+1))
+                continue
+            return ticker,None,msg
+    return ticker,None,"unknown Dhan error"
 
-        rows = []
-        start = date.today() - timedelta(days=365)
-        end = date.today()
+def download_prices(tickers,start,end):
+    """
+    Dhan-backed replacement for the old Yahoo download_prices().
+    Dhan Data API is rate-limited, so requests are deliberately throttled
+    through a small worker pool. Individual symbol results are cached.
+    """
+    tickers=tuple(tickers)
+    if not tickers: return {}
+    if not dhan_configured():
+        raise RuntimeError("Dhan credentials are not configured in Streamlit Secrets.")
 
-        for symbol in ["RELIANCE", "TCS", "HDFCBANK"]:
-            try:
-                sid = dhan_security_id(symbol)
-                if sid is None:
-                    raise RuntimeError("Security ID not found")
+    # Dhan Data APIs have a 5/sec limit. Four workers keeps a small safety margin.
+    out={}
+    failures=[]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures=[ex.submit(_dhan_fetch_one,t,start,end) for t in tickers]
+        for fut in as_completed(futures):
+            ticker,d,err=fut.result()
+            if d is not None and not d.empty:
+                out[ticker]=d
+            elif err:
+                failures.append((ticker,err))
+    return out
 
-                with st.spinner(f"Downloading {symbol} history..."):
-                    d = dhan_daily_history(symbol, start, end)
+def dhan_ltp_map(symbols):
+    """Fetch current LTP in batches of <=1000 using Dhan Market Quote."""
+    clean=[str(s).upper().replace(".NS","") for s in symbols]
+    ids=[]
+    sm=dhan_security_map()
+    for s in clean:
+        sid=sm.get(s)
+        if sid: ids.append((s,sid))
+    result={}
+    for i in range(0,len(ids),1000):
+        batch=ids[i:i+1000]
+        payload={"NSE_EQ":[int(sid) if str(sid).isdigit() else sid for _,sid in batch]}
+        r=requests.post(f"{DHAN_BASE_URL}/marketfeed/ltp",
+                        headers={"access-token":str(st.secrets["DHAN_ACCESS_TOKEN"]),
+                                 "client-id":str(st.secrets["DHAN_CLIENT_ID"]),
+                                 "Content-Type":"application/json"},
+                        json=payload,timeout=30)
+        if not r.ok: continue
+        data=r.json().get("data",{}).get("NSE_EQ",{})
+        for sym,sid in batch:
+            v=data.get(str(sid),{})
+            if "last_price" in v:
+                result[sym]=float(v["last_price"])
+        if i+1000<len(ids):
+            time.sleep(1.05)
+    return result
 
-                rows.append({
-                    "Symbol": symbol,
-                    "Security ID": sid,
-                    "Rows": len(d),
-                    "First Date": str(d.index.min().date()) if len(d) else "—",
-                    "Last Date": str(d.index.max().date()) if len(d) else "—",
-                    "Status": "✅",
-                })
-            except Exception as e:
-                rows.append({
-                    "Symbol": symbol,
-                    "Security ID": "—",
-                    "Rows": 0,
-                    "First Date": "—",
-                    "Last Date": "—",
-                    "Status": "❌ " + str(e)[:180],
-                })
+@st.cache_data(ttl=86400)
+def index_universe(name):
+    r=requests.get(INDEX_URLS[name],headers={"User-Agent":"Mozilla/5.0"},timeout=30)
+    r.raise_for_status()
+    df=pd.read_csv(pd.io.common.BytesIO(r.content))
+    col=next(c for c in df.columns if str(c).strip().upper()=="SYMBOL")
+    return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
 
-        test_df = pd.DataFrame(rows)
-        st.dataframe(test_df, use_container_width=True, hide_index=True)
-
-        if not test_df.empty and (test_df["Status"] == "✅").all():
-            st.success(
-                "🎉 Dhan historical-data connection is working for all three test stocks."
-            )
-            st.info(
-                "Next stage: switch the scanner's price-data layer from Yahoo Finance "
-                "to Dhan without changing Strategy 1–4 rules."
-            )
-        else:
-            st.warning(
-                "Dhan test is not fully successful. Fix the failed row before "
-                "switching the scanner's data source."
-            )
+def company_info(ticker):
+    # No Dhan fundamental fields are assumed here.
+    # This is intentionally kept empty unless a separate fundamentals provider
+    # is configured. Strategies 1-4 never call this for signal generation.
+    return {}, []
 
 # ========================= INDICATORS =========================
 
@@ -939,6 +801,85 @@ def model_b(info):
     if not np.isfinite(val(info,"piotroskiScore")): unavailable.append("Piotroski score")
     return checks,unavailable
 
+
+# ========================= FORWARD-TEST LEARNING =========================
+
+LEARNING_FILE="forward_learning.csv"
+
+def _load_learning():
+    if "learning_df" not in st.session_state:
+        try:
+            st.session_state["learning_df"]=pd.read_csv(LEARNING_FILE)
+        except Exception:
+            st.session_state["learning_df"]=pd.DataFrame()
+    return st.session_state["learning_df"]
+
+def _save_learning(df):
+    st.session_state["learning_df"]=df.copy()
+    try:
+        df.to_csv(LEARNING_FILE,index=False)
+    except Exception:
+        pass
+
+def record_forward_setup(row):
+    df=_load_learning()
+    new=pd.DataFrame([row])
+    df=pd.concat([df,new],ignore_index=True)
+    _save_learning(df)
+
+def learning_summary():
+    df=_load_learning()
+    if df.empty:
+        return pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
+    d=df.copy()
+    d["R"]=pd.to_numeric(d.get("R"),errors="coerce")
+    by_strategy=d.groupby("Strategy",dropna=False).agg(
+        Trades=("R","count"),
+        WinRate=("R",lambda s: round((s>0).mean()*100,1)),
+        AvgR=("R","mean"),
+        TotalR=("R","sum")
+    ).reset_index()
+    by_regime=d.groupby(["Strategy","Regime"],dropna=False).agg(
+        Trades=("R","count"),
+        WinRate=("R",lambda s: round((s>0).mean()*100,1)),
+        AvgR=("R","mean"),
+        TotalR=("R","sum")
+    ).reset_index()
+    if "Score" in d:
+        d["Score Bucket"]=pd.cut(
+            pd.to_numeric(d["Score"],errors="coerce"),
+            bins=[-1,84,89,94,100],
+            labels=["<85","85-89","90-94","95-100"]
+        )
+        by_score=d.groupby(["Strategy","Score Bucket"],observed=False).agg(
+            Trades=("R","count"),
+            WinRate=("R",lambda s: round((s>0).mean()*100,1)),
+            AvgR=("R","mean")
+        ).reset_index()
+    else:
+        by_score=pd.DataFrame()
+    return by_strategy,by_regime,by_score
+
+def learning_component_summary():
+    df=_load_learning()
+    if df.empty: return pd.DataFrame()
+    component_cols=[
+        "Strategy Score","HTF Demand","Footprint","Trend",
+        "Entry Quality","Relative Strength","Market Regime","Safety"
+    ]
+    available=[c for c in component_cols if c in df.columns]
+    if "R" not in df.columns or not available: return pd.DataFrame()
+    d=df.copy()
+    d["R"]=pd.to_numeric(d["R"],errors="coerce")
+    rows=[]
+    for c in available:
+        x=pd.to_numeric(d[c],errors="coerce")
+        if x.notna().sum()<10: continue
+        corr=x.corr(d["R"])
+        rows.append({"Component":c,"Correlation with R":round(float(corr),3) if pd.notna(corr) else np.nan,
+                     "Observations":int(x.notna().sum())})
+    return pd.DataFrame(rows).sort_values("Correlation with R",ascending=False)
+
 # ========================= BACKTEST =========================
 
 def run_backtest(d,sig,capital,risk,sl,rr,slip=.001):
@@ -979,12 +920,11 @@ def stats(t):
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab")
-st.caption("MTF swing research • 4 strategies • ≥85 forward-test gate • market-cycle learning • separate long-term investment engine")
+st.caption("Dhan-powered MTF swing research • 4 exact strategies • ≥85 forward-test gate • evidence learning • separate long-term investment engine")
 
 tabs=st.tabs([
     "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
-    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety",
-    "🔌 Dhan API","🧪 Custom Strategy"
+    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety","🔌 Dhan API","🧪 Custom Strategy"
 ])
 
 with tabs[0]:
@@ -1001,6 +941,16 @@ with tabs[0]:
 
 **Safety engine:** Small/micro-cap liquidity and abnormal-volatility checks reduce risk but do not change the four strategies.
 """)
+
+
+    if "backtest_board" in st.session_state:
+        st.markdown("### 📊 Latest backtest evidence")
+        bb=st.session_state["backtest_board"]
+        st.dataframe(bb,use_container_width=True,hide_index=True)
+    st.caption(
+        "Learning policy: hard strategy rules remain fixed. Backtest/forward-test results "
+        "are used only to rank evidence, identify strengths/weaknesses and calibrate the score."
+    )
 
 with tabs[1]:
     st.subheader("📡 Daily Live Scanner")
@@ -1056,7 +1006,7 @@ with tabs[1]:
             idx_tickers = index_universe("Nifty 500")
             idx_data = download_prices(
                 tuple(idx_tickers),
-                date.today()-timedelta(days=1000),
+                date.today()-timedelta(days=1200),
                 date.today()
             )
 
@@ -1074,7 +1024,7 @@ with tabs[1]:
 
             data = download_prices(
                 tuple(tickers),
-                date.today()-timedelta(days=1000),
+                date.today()-timedelta(days=1200),
                 date.today()
             )
 
@@ -1166,6 +1116,14 @@ with tabs[1]:
                 bar.progress((n+1)/max(1,len(data)))
 
             result = pd.DataFrame(rows)
+
+            # Refresh current LTP only for candidates. This does not change any strategy rule.
+            if not result.empty:
+                try:
+                    ltp_map=dhan_ltp_map(result["Ticker"].tolist())
+                    result["Current LTP"]=result["Ticker"].map(ltp_map)
+                except Exception:
+                    result["Current LTP"]=np.nan
 
             # Strategy 4 condition audit — shown only when S4 is selected.
             if 4 in selected_strategies and stats["usable"] > 0:
@@ -1356,19 +1314,26 @@ with tabs[1]:
 
 with tabs[2]:
     st.subheader("📊 Backtest Strategies 1–4")
+    st.caption("Backtest uses the same hard Strategy 1–4 signal rules. Score/learning layers are kept separate.")
     a,b,c=st.columns(3)
     uni=a.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="bt_universe")
-    start=b.date_input("Start",date.today()-timedelta(days=730),key="bt_start")
+    start=b.date_input("Start",date.today()-timedelta(days=1200),key="bt_start")
     end=c.date_input("End",date.today(),key="bt_end")
     a,b,c,d=st.columns(4)
     capital=a.number_input("Capital ₹",value=1_000_000,step=100_000,key="bt_capital")
     risk=b.number_input("Risk %",value=1.0,step=.25,key="bt_risk")
-    sl=b.number_input("SL %",value=7.0,step=.5,key="bt_sl")
-    rr=d.selectbox("Target R",[2,2.5,3,3.5,4,5],index=2,key="bt_rr")
+    sl=d.number_input("SL %",value=7.0,step=.5,key="bt_sl")
+    rr=c.selectbox("Target R",[2,2.5,3,3.5,4,5],index=2,key="bt_rr")
     selected=st.multiselect("Strategies",[1,2,3,4],[1,2,3,4],key="bt_strategies")
+
     if st.button("🚀 Run Backtest",type="primary",key="bt_run"):
         try:
-            tickers=index_universe(uni); data=download_prices(tuple(tickers),start,end)
+            if not selected:
+                st.warning("Select at least one strategy.")
+                st.stop()
+            tickers=index_universe(uni)
+            with st.spinner(f"Downloading {len(tickers)} symbols from Dhan..."):
+                data=download_prices(tuple(tickers),start,end)
             logs=[]; summary=[]; bar=st.progress(0)
             for n,(ticker,df) in enumerate(data.items()):
                 if len(df)>=260:
@@ -1377,26 +1342,72 @@ with tabs[2]:
                         try:
                             tr,_=run_backtest(df,strategy_signal(f,s),capital,risk/100,sl/100,rr)
                             if not tr.empty:
-                                tr["Ticker"]=ticker; tr["Strategy"]=f"S{s}"; logs.append(tr)
+                                tr["Ticker"]=ticker
+                                tr["Strategy"]=f"S{s}"
+                                logs.append(tr)
                                 m=stats(tr);m["Strategy"]=f"S{s}";summary.append(m)
-                        except Exception: pass
+                        except Exception:
+                            pass
                 bar.progress((n+1)/max(1,len(data)))
+
             if summary:
                 alltrades=pd.concat(logs,ignore_index=True)
-                board=pd.DataFrame(summary).groupby("Strategy").mean(numeric_only=True).sort_values("Expectancy R",ascending=False)
-                st.subheader("🏆 Strategy comparison");st.dataframe(board,use_container_width=True)
+                board=pd.DataFrame(summary).groupby("Strategy").agg(
+                    Trades=("Trades","sum"),
+                    WinPct=("Win %","mean"),
+                    ExpectancyR=("Expectancy R","mean"),
+                    TotalR=("Total R","sum"),
+                    ProfitFactor=("Profit Factor","mean")
+                ).sort_values("ExpectancyR",ascending=False)
+
+                st.session_state["backtest_trades"]=alltrades
+                st.session_state["backtest_board"]=board.reset_index()
+
+                st.subheader("🏆 Strategy comparison")
+                st.dataframe(board,use_container_width=True)
+
+                best=board.index[0]
+                best_exp=float(board.iloc[0]["ExpectancyR"])
+                st.success(
+                    f"Backtest evidence leader: {best} with average expectancy {best_exp:.3f}R. "
+                    "This is research evidence only; it does not change any strategy rule."
+                )
                 st.dataframe(alltrades,use_container_width=True,hide_index=True)
-                st.download_button("⬇️ Download backtest",alltrades.to_csv(index=False).encode(),"backtest.csv",key="bt_download")
-            else: st.warning("No qualifying trades.")
-        except Exception as e: st.error(f"Backtest error: {e}")
+                st.download_button(
+                    "⬇️ Download backtest",
+                    alltrades.to_csv(index=False).encode(),
+                    "backtest.csv",
+                    key="bt_download"
+                )
+            else:
+                st.warning("No qualifying trades.")
+        except Exception as e:
+            st.error(f"Backtest error: {e}")
+            st.exception(e)
+
+    if "backtest_board" in st.session_state:
+        st.markdown("### 🧠 Backtest evidence for future selection")
+        st.dataframe(st.session_state["backtest_board"],use_container_width=True,hide_index=True)
+        st.caption(
+            "Use this table to compare strategies before forward testing. "
+            "Do not select a strategy solely because it has the highest historical return."
+        )
 
 with tabs[3]:
-    st.subheader("🔬 Forward Testing — Score ≥85")
+    st.subheader("🔬 Forward Testing")
+    st.caption("Only setups passing your score gate are intended for this queue. The strategy rules remain unchanged.")
+
     q=st.session_state.get("forward_queue",pd.DataFrame())
-    if q.empty: st.info("Run the Daily Scanner first.")
+    if q.empty:
+        st.info("No forward-test candidates yet. Run the Daily Scanner in Scored mode.")
     else:
         st.dataframe(q,use_container_width=True,hide_index=True)
-        st.download_button("⬇️ Export forward queue",q.to_csv(index=False).encode(),"forward_queue.csv",key="forward_queue_download")
+        st.download_button(
+            "⬇️ Download forward-test queue",
+            q.to_csv(index=False).encode(),
+            "forward_queue.csv",
+            key="forward_queue_download"
+        )
 
     st.markdown("### Record completed paper trade")
     a,b,c,d=st.columns(4)
@@ -1405,63 +1416,115 @@ with tabs[3]:
     exitp=c.number_input("Exit",min_value=0.0,key="ft_exit")
     rres=d.number_input("R result",value=0.0,step=.25,key="ft_r")
     reason=st.selectbox("Exit reason",["Target","Stop","Trailing stop","Time exit","Invalidated"],key="ft_reason")
-    notes=st.text_area("Notes / mistake",key="ft_notes")
+    notes=st.text_area("Notes / mistake / what worked",key="ft_notes")
+
+    qrow=pd.DataFrame()
+    if not q.empty and ticker:
+        qrow=q[q["Ticker"].astype(str).str.upper()==ticker.upper()].tail(1)
+
     if st.button("💾 Save Forward Result",key="ft_save"):
-        row=pd.DataFrame([{"Date":str(date.today()),"Ticker":ticker,"Entry":entry,"Exit":exitp,"R":rres,"Reason":reason,"Notes":notes}])
-        st.session_state["forward_results"]=pd.concat([st.session_state.get("forward_results",pd.DataFrame()),row],ignore_index=True)
-        st.success("Forward result recorded.")
-    if "forward_results" in st.session_state:
-        st.dataframe(st.session_state["forward_results"],use_container_width=True,hide_index=True)
+        if not ticker:
+            st.warning("Enter a ticker.")
+        else:
+            base={}
+            if not qrow.empty:
+                base=qrow.iloc[0].to_dict()
+            base.update({
+                "Result Date":str(date.today()),
+                "Ticker":ticker.upper(),
+                "Entry Actual":entry,
+                "Exit Actual":exitp,
+                "R":rres,
+                "Exit Reason":reason,
+                "Notes":notes,
+            })
+            record_forward_setup(base)
+            st.success("Forward result recorded. This result is now available to the learning layer.")
+
+    learned=_load_learning()
+    if not learned.empty:
+        st.markdown("### 📚 Forward-test journal")
+        st.dataframe(learned,use_container_width=True,hide_index=True)
+        st.download_button("⬇️ Download learning journal",
+                           learned.to_csv(index=False).encode(),
+                           "forward_learning.csv",
+                           key="learning_download")
 
 with tabs[4]:
     st.subheader("🧠 Market-Cycle Learning")
-    st.markdown("### Evidence confidence")
-    st.caption("Confidence is based on the number of comparable forward-test observations. It is not a probability of winning.")
-    rr = st.session_state.get("forward_results", pd.DataFrame())
-    if not rr.empty and "R" in rr.columns:
-        nobs = len(rr)
-        conf = "LOW" if nobs < 30 else "MEDIUM" if nobs < 75 else "HIGH"
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Comparable observations", nobs)
-        c2.metric("Evidence confidence", conf)
-        c3.metric("Observed expectancy", f"{rr.R.mean():.3f}R")
+    st.caption("Learning ranks evidence from your backtests/forward tests. It does NOT rewrite Strategies 1–4.")
 
-    st.warning("The learning layer records evidence and compares performance. It does not rewrite Strategy 1–4 rules.")
-    r=st.session_state.get("forward_results",pd.DataFrame())
+    r=_load_learning()
     if r.empty:
-        st.info("No forward-test results yet.")
+        st.info("No completed forward-test results yet.")
     else:
-        a,b=st.columns(2)
-        a.metric("Forward expectancy",f"{r.R.mean():.3f}R")
-        b.metric("Total R",f"{r.R.sum():.2f}R")
-        st.dataframe(r,use_container_width=True,hide_index=True)
-    st.markdown("""
-### Strategy × Market Cycle
-After enough forward trades, the dashboard will populate:
+        a,b,c=st.columns(3)
+        a.metric("Recorded trades",len(r))
+        a.metric("Observed expectancy",f"{pd.to_numeric(r['R'],errors='coerce').mean():.3f}R")
+        a.metric("Total R",f"{pd.to_numeric(r['R'],errors='coerce').sum():.2f}R")
 
-| Market cycle | S1 | S2 | S3 | S4 |
-|---|---:|---:|---:|---:|
-| Strong Bull | — | — | — | — |
-| Bull | — | — | — | — |
-| Recovery | — | — | — | — |
-| Sideways | — | — | — | — |
-| Early Bear | — | — | — | — |
-| Bear | — | — | — | — |
+        by_strategy,by_regime,by_score=learning_summary()
+        st.markdown("### Strategy performance")
+        st.dataframe(by_strategy,use_container_width=True,hide_index=True)
 
-The numbers must be earned from forward/out-of-sample results.
+        st.markdown("### Strategy × Market Cycle")
+        st.dataframe(by_regime,use_container_width=True,hide_index=True)
 
-### Score calibration
-The system will also learn whether 85–89, 90–94 and 95–100 actually have different historical outcomes. A score is not called a probability until enough forward data proves it is calibrated.
-""")
+        st.markdown("### Score calibration")
+        st.dataframe(by_score,use_container_width=True,hide_index=True)
+
+        comp=learning_component_summary()
+        if not comp.empty:
+            st.markdown("### Setup strengths / weak points")
+            st.caption("Positive correlation means the component has tended to be associated with better R results in the recorded sample. Correlation is evidence, not causation.")
+            st.dataframe(comp,use_container_width=True,hide_index=True)
+
+        st.warning(
+            "The learning layer can identify which strategies, market cycles, score buckets and "
+            "setup components have performed better or worse. It never changes the hard entry rules."
+        )
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamental Scanner")
-    st.warning("Completely separate from Strategies 1–4. This is for finding long-term investment candidates in the wider Indian cash market.")
-    model=st.radio("Model",["Model A — Quality / Value","Model B — Growth / Piotroski"],horizontal=True,key="fund_model")
-    limit=st.number_input("Stocks to analyse this run",value=100,min_value=10,max_value=500,key="fund_limit")
-    st.caption("Yahoo Finance does not reliably expose every Screener.in field. Missing fields are shown as unavailable rather than guessed.")
-    if st.button("🔎 Run Fundamental Scan",type="primary",key="fund_scan"):
-        st.warning("Fundamental API is intentionally paused for now. We will connect a dedicated fundamental-data API after the live trading scanner is fully validated. No Yahoo field is being substituted for your Screener.in rules.")
+    st.warning(
+        "Separate from Strategies 1–4. Your two fundamental rule sets are preserved. "
+        "DhanHQ Data API supplies market data, Security IDs and OHLCV, but Dhan's documented "
+        "v2 API does not expose the Screener.in-style ROE/ROCE/Piotroski/P-E/P-FCF/current-ratio "
+        "fundamental fields required by your two rules. Therefore this module will NOT invent "
+        "or substitute those fields from Dhan."
+    )
+    st.markdown("""
+**Your fundamental models remain exactly separate:**
+
+**Model A — Quality / Value**
+- Market Cap > 5000 Cr
+- EPS > 15
+- Sales growth 5Y > 10%
+- ROE > 15%
+- ROCE > 15%
+- Debt/Equity < 0.5
+- Price/FCF > 0
+- Net profit > 10%
+- P/E < 25
+- Current ratio > 1.5
+- Dividend yield > 1%
+- Operating profit growth > 15%
+- Promoter holding > 40%
+
+**Model B — Growth / Piotroski**
+- Market Cap 200–20000 Cr
+- 1Y return > 0
+- YoY quarterly sales growth > 10%
+- YoY quarterly profit growth > 10%
+- ROCE > 15%
+- ROE > 15%
+- Piotroski score = 9
+""")
+    st.info(
+        "Next integration point: a dedicated fundamental provider can be connected here without "
+        "touching Dhan technical scanning or Strategies 1–4."
+    )
+    st.caption("No CSV is required by the technical Dhan scanner. Fundamental automation is kept separate until a provider exposes the exact fields above.")
 
 with tabs[6]:
     st.subheader("🏢 Small/Micro-Cap Safety")
@@ -1478,9 +1541,24 @@ with tabs[6]:
 These checks cannot guarantee that a company is free from manipulation, governance problems or accounting risk.
 """)
 
-
 with tabs[7]:
-    dhan_test_panel()
+    st.subheader("🔌 Dhan API Status")
+    if not dhan_configured():
+        st.error("Dhan credentials are missing from Streamlit Secrets.")
+    else:
+        try:
+            p=dhan_profile()
+            a,b,c=st.columns(3)
+            a.metric("Client ID",str(p.get("dhanClientId","—")))
+            b.metric("Data Plan",str(p.get("dataPlan","—")))
+            c.metric("Data Validity",str(p.get("dataValidity","—")))
+            st.success("Dhan authentication is valid.")
+            if st.button("🔄 Refresh Dhan Instrument Map",key="dhan_refresh_map"):
+                dhan_instrument_master.clear()
+                dhan_security_map.clear()
+                st.success("Dhan instrument cache cleared. Run the scanner again.")
+        except Exception as e:
+            st.error(f"Dhan authentication failed: {e}")
 
 with tabs[8]:
     st.subheader("🧪 Custom Strategy Lab")
@@ -1493,4 +1571,4 @@ with tabs[8]:
         st.success("Strategy received. Convert ambiguous language into explicit testable rules before backtesting.")
 
 st.markdown("---")
-st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
+st.caption("Research / paper-testing system. Dhan market-data integration is enabled; real-money order execution remains intentionally disabled.")
