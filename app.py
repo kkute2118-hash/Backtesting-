@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import io
 from datetime import date, timedelta
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
@@ -56,6 +57,214 @@ def company_info(ticker):
     try: news = t.news[:10]
     except Exception: news = []
     return info, news
+
+
+# ========================= DHAN DATA LAYER =========================
+# Dhan credentials must be stored in Streamlit Cloud Secrets:
+# DHAN_CLIENT_ID = "your_client_id"
+# DHAN_ACCESS_TOKEN = "your_access_token"
+#
+# This layer is DATA-ONLY. It does not place or modify orders.
+
+DHAN_BASE_URL = "https://api.dhan.co/v2"
+
+def dhan_configured():
+    try:
+        return bool(st.secrets.get("DHAN_CLIENT_ID")) and bool(st.secrets.get("DHAN_ACCESS_TOKEN"))
+    except Exception:
+        return False
+
+def dhan_headers():
+    return {
+        "access-token": str(st.secrets["DHAN_ACCESS_TOKEN"]),
+        "Content-Type": "application/json",
+    }
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def dhan_instrument_master():
+    """Load Dhan's instrument master for Security-ID mapping."""
+    urls = [
+        "https://images.dhan.co/api-data/api-scrip-master.csv",
+        "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
+    ]
+    last_error = ""
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=45)
+            r.raise_for_status()
+            if len(r.content) > 1000:
+                return pd.read_csv(io.BytesIO(r.content), low_memory=False)
+        except Exception as e:
+            last_error = str(e)
+    raise RuntimeError("Dhan instrument master download failed: " + last_error)
+
+def dhan_security_id(symbol):
+    """Resolve an NSE equity symbol to its Dhan Security ID."""
+    master = dhan_instrument_master()
+    cols = {str(c).strip().lower(): c for c in master.columns}
+
+    sym_col = next(
+        (cols[k] for k in [
+            "sem_trading_symbol", "trading_symbol",
+            "sem_custom_symbol", "custom_symbol"
+        ] if k in cols), None
+    )
+    sid_col = next(
+        (cols[k] for k in ["sem_security_id", "security_id"] if k in cols), None
+    )
+
+    if not sym_col or not sid_col:
+        raise RuntimeError(
+            "Dhan instrument-master format changed; "
+            "trading-symbol/Security-ID columns were not found."
+        )
+
+    clean_symbol = str(symbol).upper().replace(".NS", "").strip()
+    m = master[master[sym_col].astype(str).str.upper().eq(clean_symbol)].copy()
+
+    exch_col = cols.get("sem_exchange") or cols.get("exchange")
+    seg_col = cols.get("sem_segment") or cols.get("segment")
+
+    if exch_col and not m.empty:
+        q = m[exch_col].astype(str).str.upper().str.contains("NSE", na=False)
+        if q.any():
+            m = m[q]
+
+    if seg_col and not m.empty:
+        q = m[seg_col].astype(str).str.upper().str.contains(
+            "NSE_EQ|EQUITY", regex=True, na=False
+        )
+        if q.any():
+            m = m[q]
+
+    if m.empty:
+        return None
+
+    return str(m.iloc[0][sid_col])
+
+@st.cache_data(ttl=900, show_spinner=False)
+def dhan_daily_history(symbol, start_date, end_date):
+    """Download Dhan daily OHLCV and return the same columns used by the scanner."""
+    sid = dhan_security_id(symbol)
+    if sid is None:
+        raise ValueError(f"NSE Security ID not found for {symbol}")
+
+    payload = {
+        "securityId": str(sid),
+        "exchangeSegment": "NSE_EQ",
+        "instrument": "EQUITY",
+        "fromDate": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+        "toDate": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
+    }
+
+    r = requests.post(
+        f"{DHAN_BASE_URL}/charts/historical",
+        headers=dhan_headers(),
+        json=payload,
+        timeout=45,
+    )
+    if not r.ok:
+        raise RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:500]}")
+
+    raw = r.json()
+    if not isinstance(raw, dict) or "close" not in raw:
+        raise RuntimeError(
+            "Unexpected Dhan historical response: " + str(raw)[:500]
+        )
+
+    out = pd.DataFrame({
+        "open": raw.get("open", []),
+        "high": raw.get("high", []),
+        "low": raw.get("low", []),
+        "close": raw.get("close", []),
+        "volume": raw.get("volume", []),
+    })
+
+    timestamps = raw.get("timestamp", [])
+    if timestamps:
+        out.index = pd.to_datetime(
+            timestamps, unit="s", errors="coerce"
+        )
+        out.index.name = "date"
+
+    out = out.apply(pd.to_numeric, errors="coerce")
+    out = out.dropna(subset=["close"]).sort_index()
+    return out
+
+def dhan_test_panel():
+    """Visible connection/data test; does not affect the scanner."""
+    st.subheader("🔌 Dhan API Connection Test")
+    st.caption(
+        "Data-only test. Your access token is read from Streamlit Secrets "
+        "and is never displayed."
+    )
+
+    if not dhan_configured():
+        st.error(
+            "Dhan credentials not found. Add these to Streamlit Secrets:\n\n"
+            "DHAN_CLIENT_ID = \"your_client_id\"\n\n"
+            "DHAN_ACCESS_TOKEN = \"your_access_token\""
+        )
+        return
+
+    st.success("Dhan credentials found in Streamlit Secrets.")
+
+    if st.button("🔌 Run Dhan Data Test", type="primary", key="dhan_test_button"):
+        try:
+            with st.spinner("Loading Dhan instrument master..."):
+                master = dhan_instrument_master()
+            st.success(f"Instrument master loaded: {len(master):,} rows.")
+        except Exception as e:
+            st.error(f"Instrument master test failed: {e}")
+            return
+
+        rows = []
+        start = date.today() - timedelta(days=365)
+        end = date.today()
+
+        for symbol in ["RELIANCE", "TCS", "HDFCBANK"]:
+            try:
+                sid = dhan_security_id(symbol)
+                if sid is None:
+                    raise RuntimeError("Security ID not found")
+
+                with st.spinner(f"Downloading {symbol} history..."):
+                    d = dhan_daily_history(symbol, start, end)
+
+                rows.append({
+                    "Symbol": symbol,
+                    "Security ID": sid,
+                    "Rows": len(d),
+                    "First Date": str(d.index.min().date()) if len(d) else "—",
+                    "Last Date": str(d.index.max().date()) if len(d) else "—",
+                    "Status": "✅",
+                })
+            except Exception as e:
+                rows.append({
+                    "Symbol": symbol,
+                    "Security ID": "—",
+                    "Rows": 0,
+                    "First Date": "—",
+                    "Last Date": "—",
+                    "Status": "❌ " + str(e)[:180],
+                })
+
+        test_df = pd.DataFrame(rows)
+        st.dataframe(test_df, use_container_width=True, hide_index=True)
+
+        if not test_df.empty and (test_df["Status"] == "✅").all():
+            st.success(
+                "🎉 Dhan historical-data connection is working for all three test stocks."
+            )
+            st.info(
+                "Next stage: switch the scanner's price-data layer from Yahoo Finance "
+                "to Dhan without changing Strategy 1–4 rules."
+            )
+        else:
+            st.warning(
+                "Dhan test is not fully successful. Fix the failed row before "
+                "switching the scanner's data source."
+            )
 
 # ========================= INDICATORS =========================
 
@@ -684,7 +893,8 @@ st.caption("MTF swing research • 4 strategies • ≥85 forward-test gate • 
 
 tabs=st.tabs([
     "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
-    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety","🧪 Custom Strategy"
+    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety",
+    "🔌 Dhan API","🧪 Custom Strategy"
 ])
 
 with tabs[0]:
@@ -1178,7 +1388,11 @@ with tabs[6]:
 These checks cannot guarantee that a company is free from manipulation, governance problems or accounting risk.
 """)
 
+
 with tabs[7]:
+    dhan_test_panel()
+
+with tabs[8]:
     st.subheader("🧪 Custom Strategy Lab")
     st.text_area("Paste your strategy",height=220,key="custom_strategy",
                  placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
