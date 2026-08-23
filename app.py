@@ -440,7 +440,6 @@ with tabs[0]:
 
 **Safety engine:** Small/micro-cap liquidity and abnormal-volatility checks reduce risk but do not change the four strategies.
 """)
-
 with tabs[1]:
     st.subheader("📡 Daily High-Quality Scanner")
     a,b,c=st.columns(3)
@@ -673,4 +672,4 @@ with tabs[7]:
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
-    progress((n+
+    
