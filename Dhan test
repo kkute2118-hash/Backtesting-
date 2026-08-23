@@ -1,0 +1,109 @@
+import streamlit as st
+import requests
+import pandas as pd
+import io
+from datetime import date, timedelta
+
+st.set_page_config(page_title="Dhan API Test", page_icon="🔌", layout="wide")
+st.title("🔌 Dhan API Connection Test")
+st.caption("Reads credentials only from Streamlit Secrets.")
+
+try:
+    client_id = st.secrets["DHAN_CLIENT_ID"]
+    access_token = st.secrets["DHAN_ACCESS_TOKEN"]
+except Exception:
+    st.error("Dhan credentials not found in Streamlit Secrets.")
+    st.code('DHAN_CLIENT_ID = "your_client_id"\nDHAN_ACCESS_TOKEN = "your_access_token"')
+    st.stop()
+
+headers = {"access-token": str(access_token), "Content-Type": "application/json"}
+BASE = "https://api.dhan.co/v2"
+
+def get_master():
+    urls = [
+        "https://images.dhan.co/api-data/api-scrip-master.csv",
+        "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
+    ]
+    last = ""
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=30)
+            if r.ok and len(r.content) > 1000:
+                return pd.read_csv(io.BytesIO(r.content))
+            last = f"{r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            last = str(e)
+    raise RuntimeError("Instrument master download failed: " + last)
+
+def find_sid(master, symbol):
+    cols = {str(c).strip().lower(): c for c in master.columns}
+    sym = next((cols[k] for k in ["sem_trading_symbol","trading_symbol","sem_custom_symbol","custom_symbol"] if k in cols), None)
+    sid = next((cols[k] for k in ["sem_security_id","security_id"] if k in cols), None)
+    if not sym or not sid:
+        raise RuntimeError("Security-ID columns not found in Dhan instrument master.")
+    m = master[master[sym].astype(str).str.upper().eq(symbol.upper())].copy()
+    if "sem_exchange" in cols:
+        m = m[m[cols["sem_exchange"]].astype(str).str.upper().str.contains("NSE", na=False)]
+    if "sem_segment" in cols and not m.empty:
+        q = m[cols["sem_segment"]].astype(str).str.upper().str.contains("NSE_EQ|EQUITY", regex=True, na=False)
+        if q.any(): m = m[q]
+    return None if m.empty else str(m.iloc[0][sid])
+
+def history(sid, start, end):
+    payload = {
+        "securityId": str(sid),
+        "exchangeSegment": "NSE_EQ",
+        "instrument": "EQUITY",
+        "fromDate": start.isoformat(),
+        "toDate": end.isoformat(),
+    }
+    r = requests.post(f"{BASE}/charts/historical", headers=headers, json=payload, timeout=30)
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500]}")
+    return r.json()
+
+st.subheader("1️⃣ Credentials")
+st.success("Dhan credentials found in Streamlit Secrets.")
+st.write("Client ID:", str(client_id)[:3] + "***")
+
+if st.button("🔌 Run Dhan Test", type="primary"):
+    try:
+        st.subheader("2️⃣ Instrument Master")
+        master = get_master()
+        st.success(f"Instrument master loaded: {len(master):,} rows.")
+
+        st.subheader("3️⃣ Historical Data")
+        start = date.today() - timedelta(days=365)
+        end = date.today()
+        rows = []
+
+        for symbol in ["RELIANCE", "TCS", "HDFCBANK"]:
+            try:
+                sid = find_sid(master, symbol)
+                if sid is None:
+                    rows.append({"Symbol": symbol, "Security ID": "NOT FOUND", "Data": "❌", "Rows": 0})
+                    continue
+                raw = history(sid, start, end)
+                close = raw.get("close", []) if isinstance(raw, dict) else []
+                n = len(close) if isinstance(close, list) else 0
+                rows.append({"Symbol": symbol, "Security ID": sid, "Data": "✅" if n else "❌", "Rows": n})
+                if n:
+                    st.success(f"{symbol}: {n:,} historical rows received.")
+            except Exception as e:
+                rows.append({"Symbol": symbol, "Security ID": "—", "Data": "❌", "Rows": 0, "Error": str(e)[:180]})
+                st.error(f"{symbol}: {e}")
+
+        result = pd.DataFrame(rows)
+        st.subheader("4️⃣ Test Summary")
+        st.dataframe(result, use_container_width=True, hide_index=True)
+        if not result.empty and int((result["Data"] == "✅").sum()) == len(result):
+            st.success("🎉 Dhan historical-data connection is working.")
+            st.info("Next: replace the Yahoo data layer in the trading scanner with Dhan.")
+        else:
+            st.warning("The connection is not fully working yet. Use the error above to identify the failing step.")
+    except Exception as e:
+        st.error(f"Dhan test failed: {e}")
+        st.exception(e)
+
+st.divider()
+st.caption("Your access token is never displayed and is read only from Streamlit Secrets.")
