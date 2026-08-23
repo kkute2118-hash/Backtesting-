@@ -69,6 +69,20 @@ def rsi(s,n=14):
     rs=up/dn.replace(0,np.nan)
     return 100-100/(1+rs)
 
+def _monthly_asof(d):
+    m=d.resample("ME").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})
+    # Build a current in-progress month from daily data; this is known as of each scan date.
+    cur_key=d.index[-1].to_period("M")
+    cur=d[d.index.to_period("M")==cur_key]
+    if not cur.empty:
+        m.loc[cur.index[-1].to_period("M").end_time.normalize(),["open","high","low","close","volume"]]=[
+            cur.open.iloc[0],cur.high.max(),cur.low.min(),cur.close.iloc[-1],cur.volume.sum()
+        ]
+    return m
+
+def _weekly_asof(d):
+    return d.resample("W-FRI").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})
+
 def features(d):
     x=d.copy()
     for n in [10,20,50,200,250]:
@@ -82,40 +96,287 @@ def features(d):
                   (x.low-x.close.shift()).abs()],axis=1).max(axis=1)
     x["atr14"]=tr.rolling(14).mean()
 
-    w=x.resample("W-FRI").close.last().to_frame()
-    w["rsi"]=rsi(w["close"]); w["ema20"]=ema(w["close"],20); w["ema50"]=ema(w["close"],50)
-    w=w.shift(1).reindex(x.index,method="ffill")
-    x["wrsi14"]=w["rsi"]; x["wema20"]=w["ema20"]; x["wema50"]=w["ema50"]; x["wclose"]=w["close"]
+    w=_weekly_asof(x)
+    w["rsi14"]=rsi(w.close,14)
+    w["ema20"]=ema(w.close,20)
+    w["ema50"]=ema(w.close,50)
+    # As-of mapping: use the weekly bar containing today's date, not a future week.
+    wkvals=[]
+    for dt in x.index:
+        wk=w[w.index <= dt]
+        wkvals.append(wk.iloc[-1] if not wk.empty else pd.Series(dtype=float))
+    x["wrsi14"]=[v.get("rsi14",np.nan) for v in wkvals]
+    x["wema20"]=[v.get("ema20",np.nan) for v in wkvals]
+    x["wema50"]=[v.get("ema50",np.nan) for v in wkvals]
+    x["wclose"]=[v.get("close",np.nan) for v in wkvals]
 
-    m=x.resample("ME").agg({"close":"last","open":"first","high":"max","low":"min"})
-    m["rsi"]=rsi(m.close); m["ema10"]=ema(m.close,10); m["ema15"]=ema(m.close,15)
-    m["ema20"]=ema(m.close,20); m["mom"]=m.close.pct_change()*100
-    m=m.shift(1).reindex(x.index,method="ffill")
-    x["mclose"]=m.close; x["mrsi14"]=m.rsi; x["mema10"]=m.ema10
-    x["mema15"]=m.ema15; x["mema20"]=m.ema20; x["mmom"]=m.mom
+    m=_monthly_asof(x)
+    m["rsi14"]=rsi(m.close,14)
+    m["ema10"]=ema(m.close,10)
+    m["ema15"]=ema(m.close,15)
+    m["ema20"]=ema(m.close,20)
+    m["mom"]=m.close.pct_change()*100
+    m["prev_close"]=m.close.shift(1)
+    m["prev_high"]=m.high.shift(1)
+    m["prev_low"]=m.low.shift(1)
+
+    # Monthly max momentum over 20 months, as of the current month.
+    m["mom20max"]=m.mom.rolling(20,min_periods=1).max()
+
+    # Monthly EMA10/20 bullish cross on each month.
+    cross=(m.ema10>m.ema20)&(m.ema10.shift(1)<=m.ema20.shift(1))
+    m["cross_10_20"]=cross.astype(int)
+    m["cross_count20"]=m.cross_10_20.rolling(20,min_periods=1).sum()
+
+    # Daily rows mapped to current as-of month.
+    vals=[]
+    for dt in x.index:
+        mm=m[m.index.to_period("M") <= dt.to_period("M")]
+        vals.append(mm.iloc[-1] if not mm.empty else pd.Series(dtype=float))
+    x["mclose"]=[v.get("close",np.nan) for v in vals]
+    x["mopen"]=[v.get("open",np.nan) for v in vals]
+    x["mhigh"]=[v.get("high",np.nan) for v in vals]
+    x["mlow"]=[v.get("low",np.nan) for v in vals]
+    x["mrsi14"]=[v.get("rsi14",np.nan) for v in vals]
+    x["mema10"]=[v.get("ema10",np.nan) for v in vals]
+    x["mema15"]=[v.get("ema15",np.nan) for v in vals]
+    x["mema20"]=[v.get("ema20",np.nan) for v in vals]
+    x["mmom"]=[v.get("mom",np.nan) for v in vals]
+    x["mmax20"]= [v.get("mom20max",np.nan) for v in vals]
+    x["mprevclose"]=[v.get("prev_close",np.nan) for v in vals]
+    x["mprevhigh"]=[v.get("prev_high",np.nan) for v in vals]
+    x["mprevlow"]=[v.get("prev_low",np.nan) for v in vals]
+    x["m_cross_count20"]=[v.get("cross_count20",np.nan) for v in vals]
+    x["m_cross_10_20"]=[v.get("cross_10_20",np.nan) for v in vals]
     return x
 
 # ========================= STRATEGIES =========================
 
+def _pct_change(s):
+    return s.pct_change()*100
+
+def _cross_up(a,b):
+    return (a>b)&(a.shift(1)<=b.shift(1))
+
+def _rolling_count(condition, window, offset=1):
+    # Screener-style "count(window, offset where condition)": evaluate the
+    # previous `window` observations, excluding the current bar.
+    return condition.shift(offset).rolling(window, min_periods=1).sum()
+
 def strategy_signal(x,s):
+    if x.empty:
+        return pd.Series(False,index=x.index)
+
+    daily_ret=_pct_change(x.close)
+
     if s==1:
-        return ((x.wrsi14>=50)&(x.mrsi14>=50)&(x.mclose>=x.mema15)&
-                (x.close>=15)&(x.vol20>=15000)&
-                (((x.mclose-x.mema10)/x.mema10)<=.30))
+        monthly_open_in_prev = (x.mopen <= x.mprevhigh) & (x.mopen >= x.mprevlow)
+        monthly_close_in_prev = (x.mclose >= x.mprevlow) & (x.mclose <= x.mprevhigh)
+        near_ema10 = ((x.mclose-x.mema10)/x.mema10 <= .30)
+        return (
+            (x.wrsi14 >= 50) &
+            (x.mrsi14 >= 50) &
+            (x.mclose >= x.mema15) &
+            (x.close >= 15) &
+            (x.vol20 >= 15000) &
+            monthly_open_in_prev &
+            monthly_close_in_prev &
+            near_ema10 &
+            (x.mmax20 >= 20)
+        )
+
     if s==2:
-        cross=(x.ema20>x.ema50)&(x.ema20.shift(1)<=x.ema50.shift(1))
-        return ((x.close>=15)&(x.vol20>=10000)&(x.mrsi14>=55)&(x.wrsi14>=50)&
-                (((x.close-x.ema10)/x.ema10)<=.04)&(x.ema50>=x.ema250)&cross)
+        # ================================================================
+        # STRATEGY 2 — direct translation of the user's scanner formula
+        # ================================================================
+        #
+        # "count(20, 1 where ...)" is implemented as:
+        # previous 20 completed daily bars, excluding today's bar.
+        #
+        # Cross definitions:
+        #   EMA20 < EMA50 today AND EMA20 >= EMA50 yesterday
+        #   EMA10 < EMA20 today AND EMA10 >= EMA20 yesterday
+        #   EMA20 > EMA50 today AND EMA20 <= EMA50 yesterday
+        #   EMA50 > EMA200 today AND EMA50 <= EMA200 yesterday
+
+        ema20_below_50_cross = (
+            (x.ema20 < x.ema50) &
+            (x.ema20.shift(1) >= x.ema50.shift(1))
+        )
+        ema10_below_20_cross = (
+            (x.ema10 < x.ema20) &
+            (x.ema10.shift(1) >= x.ema20.shift(1))
+        )
+
+        ema20_above_50_cross = (
+            (x.ema20 > x.ema50) &
+            (x.ema20.shift(1) <= x.ema50.shift(1))
+        )
+        ema50_above_200_cross = (
+            (x.ema50 > x.ema200) &
+            (x.ema50.shift(1) <= x.ema200.shift(1))
+        )
+
+        # count(20,1 where condition): 20 bars immediately before today.
+        bearish_20_50_count = (
+            ema20_below_50_cross.shift(1)
+            .rolling(20, min_periods=20)
+            .sum()
+        )
+        bearish_10_20_count = (
+            ema10_below_20_cross.shift(1)
+            .rolling(10, min_periods=10)
+            .sum()
+        )
+
+        bullish_20_50_count = (
+            ema20_above_50_cross.shift(1)
+            .rolling(20, min_periods=20)
+            .sum()
+        )
+        bullish_50_200_count = (
+            ema50_above_200_cross.shift(1)
+            .rolling(20, min_periods=20)
+            .sum()
+        )
+
+        # Current candle lies within the previous day's high-low range.
+        inside_previous_day = (
+            (x.open <= x.high.shift(1)) &
+            (x.open >= x.low.shift(1)) &
+            (x.close >= x.low.shift(1)) &
+            (x.close <= x.high.shift(1))
+        )
+
+        # Returns of exactly 1 day ago and 2 days ago.
+        ret_1d_ago = daily_ret.shift(1)
+        ret_2d_ago = daily_ret.shift(2)
+
+        return (
+            # daily max(30, % change) >= 5
+            (daily_ret.rolling(30, min_periods=30).max() >= 5) &
+
+            # daily count(20,1 where EMA20 < EMA50 cross) < 1
+            (bearish_20_50_count < 1) &
+
+            # daily count(10,1 where EMA10 < EMA20 cross) < 1
+            (bearish_10_20_count < 1) &
+
+            # EMA50 >= EMA250
+            (x.ema50 >= x.ema250) &
+
+            # 20-day average volume >= 10000
+            (x.vol20 >= 10000) &
+
+            # Daily close >= 15
+            (x.close >= 15) &
+
+            # Monthly RSI(14) >= 55
+            (x.mrsi14 >= 55) &
+
+            # Weekly RSI(14) >= 50
+            (x.wrsi14 >= 50) &
+
+            # Current candle inside previous day's range
+            inside_previous_day &
+
+            # 1 day ago return <= 5 and >= -4
+            (ret_1d_ago <= 5) &
+            (ret_1d_ago >= -4) &
+
+            # 2 days ago return <= 5 and >= -4
+            (ret_2d_ago <= 5) &
+            (ret_2d_ago >= -4) &
+
+            # (daily close - daily EMA10) / daily EMA10 <= 0.04
+            # NOTE: this is NOT abs(); a close below EMA10 satisfies it.
+            (((x.close - x.ema10) / x.ema10) <= 0.04) &
+
+            # Exactly one recent bullish crossover of either pair.
+            (
+                (bullish_20_50_count == 1) |
+                (bullish_50_200_count == 1)
+            )
+        )
+
     if s==3:
         vwap=(x.close*x.volume).rolling(20).sum()/x.volume.rolling(20).sum()
-        return ((vwap*x.vol20>=150_000_000)&(x.close>=x.ema200)&(x.wrsi14>=40)&
-                (x.close>=x.ema50*.96)&(x.close<=x.ema50*1.04))
+        # The original screener expression used EMA(daily VWAP,20) * SMA(volume,20).
+        vwap_ema=ema(vwap,20)
+        liquidity=vwap_ema*x.vol20 >= 150_000_000
+        near50=(x.close <= x.ema50*1.04)&(x.close >= x.ema50*.96)
+        return (
+            liquidity &
+            (x.close >= x.ema200) &
+            (x.wrsi14 >= 40) &
+            near50
+        )
+
     if s==4:
-        cross=(x.ema10>x.ema20)&(x.ema10.shift(1)<=x.ema20.shift(1))
-        reclaim=(x.close>x.ema10)&(x.close.shift(1)<=x.ema10.shift(1))
-        return ((x.mmom>=20)&(x.mrsi14>=50)&(x.mema10>=x.mema20)&
-                (x.vol30>=50000)&(x.close>=20)&(cross|reclaim)&
-                (x.close<=x.ema20*1.03))
+        # ================================================================
+        # STRATEGY 4 — direct translation of the user's original formula
+        # ================================================================
+        #
+        # monthly return >= 20%
+        # monthly RSI(14) >= 50
+        # monthly EMA10 >= monthly EMA20
+        # daily EMA(volume,30) >= 50000
+        # daily close >= 20
+        #
+        # AND:
+        #   monthly count(20,1 where monthly EMA10 > EMA20 and
+        #                  1 month ago EMA10 <= EMA20) >= 1
+        #   OR
+        #   current monthly close > monthly EMA10 AND
+        #       1 month ago close <= 1 month ago EMA10
+        #
+        # AND daily close <= 1.03 * daily EMA20
+        #
+        # Monthly count uses completed monthly observations immediately
+        # preceding the current month, exactly like the scanner's offset=1.
+
+        monthly_bull_cross = (
+            (x.mema10 > x.mema20) &
+            (x.mema10.shift(1) <= x.mema20.shift(1))
+        )
+
+        monthly_bull_cross_count = (
+            monthly_bull_cross.shift(1)
+            .rolling(20, min_periods=20)
+            .sum()
+        )
+
+        monthly_reclaim = (
+            (x.mclose > x.mema10) &
+            (x.mprevclose <= x.mema10)
+        )
+
+        return (
+            # monthly "close - 1 candle ago close / 1 candle ago close * 100" >= 20
+            (x.mmom >= 20) &
+
+            # monthly RSI(14) >= 50
+            (x.mrsi14 >= 50) &
+
+            # monthly EMA10 >= monthly EMA20
+            (x.mema10 >= x.mema20) &
+
+            # daily EMA(daily volume,30) >= 50000
+            (x.vol30 >= 50000) &
+
+            # daily close >= 20
+            (x.close >= 20) &
+
+            # monthly count >= 1 OR monthly reclaim
+            (
+                (monthly_bull_cross_count >= 1) |
+                monthly_reclaim
+            ) &
+
+            # daily close <= 1.03 * daily EMA20
+            (x.close <= 1.03 * x.ema20)
+        )
+
     return pd.Series(False,index=x.index)
 
 # ========================= MARKET REGIME =========================
@@ -440,6 +701,7 @@ with tabs[0]:
 
 **Safety engine:** Small/micro-cap liquidity and abnormal-volatility checks reduce risk but do not change the four strategies.
 """)
+
 with tabs[1]:
     st.subheader("📡 Daily Live Scanner")
     st.caption("First audit the raw strategy signals. Then turn on the score gate. Each strategy is scanned independently.")
@@ -604,6 +866,136 @@ with tabs[1]:
                 bar.progress((n+1)/max(1,len(data)))
 
             result = pd.DataFrame(rows)
+
+            # Strategy 4 condition audit — shown only when S4 is selected.
+            if 4 in selected_strategies and stats["usable"] > 0:
+                s4_audit_rows = []
+                for ticker, df in data.items():
+                    if len(df) < 260:
+                        continue
+                    f = features(df)
+                    if f.empty:
+                        continue
+                    z = f.iloc[-1]
+                    monthly_cross = (
+                        (f.mema10 > f.mema20) &
+                        (f.mema10.shift(1) <= f.mema20.shift(1))
+                    )
+                    monthly_cross_count = (
+                        monthly_cross.shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                    )
+                    reclaim = bool(
+                        pd.notna(z.mprevclose) and pd.notna(z.mema10) and
+                        z.mclose > z.mema10 and z.mprevclose <= z.mema10
+                    )
+                    conditions = {
+                        "Monthly return >=20%": bool(pd.notna(z.mmom) and z.mmom >= 20),
+                        "Monthly RSI >=50": bool(pd.notna(z.mrsi14) and z.mrsi14 >= 50),
+                        "Monthly EMA10 >= EMA20": bool(pd.notna(z.mema10) and pd.notna(z.mema20) and z.mema10 >= z.mema20),
+                        "Daily EMA volume30 >=50000": bool(pd.notna(z.vol30) and z.vol30 >= 50000),
+                        "Daily close >=20": bool(z.close >= 20),
+                        "Monthly cross count >=1 OR reclaim": bool((pd.notna(monthly_cross_count) and monthly_cross_count >= 1) or reclaim),
+                        "Daily close <=1.03 EMA20": bool(pd.notna(z.ema20) and z.close <= 1.03*z.ema20)
+                    }
+                    s4_audit_rows.append({
+                        "Ticker": ticker.replace(".NS",""),
+                        **conditions,
+                        "S4 EXACT": all(conditions.values())
+                    })
+
+                if s4_audit_rows:
+                    s4df = pd.DataFrame(s4_audit_rows)
+                    st.subheader("🧪 Strategy 4 Condition Audit")
+                    s4counts = pd.DataFrame({
+                        "Condition": list(s4df.columns[1:-1]),
+                        "Passing stocks": [int(s4df[c].sum()) for c in s4df.columns[1:-1]]
+                    })
+                    st.dataframe(s4counts, use_container_width=True, hide_index=True)
+                    with st.expander("View S4 stock-by-stock audit"):
+                        st.dataframe(s4df, use_container_width=True, hide_index=True)
+
+            # Strategy 2 condition audit — shown only when S2 is selected.
+            if 2 in selected_strategies and stats["usable"] > 0:
+                audit_rows = []
+                for ticker, df in data.items():
+                    if len(df) < 260:
+                        continue
+                    f = features(df)
+                    if f.empty:
+                        continue
+                    z = f.iloc[-1]
+                    dr = f.close.pct_change() * 100
+
+                    c_30max = bool(dr.rolling(30, min_periods=30).max().iloc[-1] >= 5) if len(f) >= 30 else False
+                    c_ema50_250 = bool(z.ema50 >= z.ema250)
+                    c_vol = bool(z.vol20 >= 10000)
+                    c_price = bool(z.close >= 15)
+                    c_mrsi = bool(z.mrsi14 >= 55)
+                    c_wrsi = bool(z.wrsi14 >= 50)
+
+                    c_inside = bool(
+                        (z.open <= f.high.shift(1).iloc[-1]) and
+                        (z.open >= f.low.shift(1).iloc[-1]) and
+                        (z.close >= f.low.shift(1).iloc[-1]) and
+                        (z.close <= f.high.shift(1).iloc[-1])
+                    )
+
+                    r1 = dr.shift(1).iloc[-1]
+                    r2 = dr.shift(2).iloc[-1]
+                    c_r1 = bool(pd.notna(r1) and -4 <= r1 <= 5)
+                    c_r2 = bool(pd.notna(r2) and -4 <= r2 <= 5)
+
+                    c_ema10 = bool(pd.notna(z.ema10) and ((z.close-z.ema10)/z.ema10 <= .04))
+
+                    cross20 = (
+                        ((f.ema20 > f.ema50) & (f.ema20.shift(1) <= f.ema50.shift(1)))
+                        .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                    )
+                    cross50 = (
+                        ((f.ema50 > f.ema200) & (f.ema50.shift(1) <= f.ema200.shift(1)))
+                        .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                    )
+                    c_bull = bool((cross20 == 1) or (cross50 == 1))
+
+                    bear20 = (
+                        ((f.ema20 < f.ema50) & (f.ema20.shift(1) >= f.ema50.shift(1)))
+                        .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                    )
+                    bear10 = (
+                        ((f.ema10 < f.ema20) & (f.ema10.shift(1) >= f.ema20.shift(1)))
+                        .shift(1).rolling(10, min_periods=10).sum().iloc[-1]
+                    )
+                    c_bear20 = bool(bear20 < 1)
+                    c_bear10 = bool(bear10 < 1)
+
+                    audit_rows.append({
+                        "Ticker": ticker.replace(".NS",""),
+                        "30D Max ≥5": c_30max,
+                        "Bearish EMA20/50 count <1": c_bear20,
+                        "Bearish EMA10/20 count <1": c_bear10,
+                        "EMA50 ≥ EMA250": c_ema50_250,
+                        "Vol20 ≥10000": c_vol,
+                        "Price ≥15": c_price,
+                        "Monthly RSI ≥55": c_mrsi,
+                        "Weekly RSI ≥50": c_wrsi,
+                        "Inside previous day": c_inside,
+                        "Prev day return -4..5": c_r1,
+                        "2D ago return -4..5": c_r2,
+                        "Close ≤4% above EMA10": c_ema10,
+                        "Bullish cross count =1": c_bull,
+                        "S2 EXACT": all([c_30max,c_bear20,c_bear10,c_ema50_250,c_vol,c_price,c_mrsi,c_wrsi,c_inside,c_r1,c_r2,c_ema10,c_bull])
+                    })
+
+                if audit_rows:
+                    audit_df = pd.DataFrame(audit_rows)
+                    st.subheader("🧪 Strategy 2 Condition Audit")
+                    counts = pd.DataFrame({
+                        "Condition": list(audit_df.columns[1:]),
+                        "Passing stocks": [int(audit_df[c].sum()) for c in audit_df.columns[1:]]
+                    })
+                    st.dataframe(counts, use_container_width=True, hide_index=True)
+                    with st.expander("View S2 stock-by-stock audit"):
+                        st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
             st.subheader("🔎 Scanner Diagnostics")
             c1,c2,c3,c4,c5,c6 = st.columns(6)
@@ -798,4 +1190,3 @@ with tabs[7]:
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
-            
