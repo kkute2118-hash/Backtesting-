@@ -1,8 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import requests
+import io
+import sqlite3
+import time
+import threading
+import queue
 from datetime import date, timedelta
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
@@ -24,38 +28,371 @@ def index_universe(name):
     col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
     return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
 
-@st.cache_data(ttl=1800)
-def download_prices(tickers, start, end):
-    tickers = tuple(tickers)
-    if not tickers:
-        return {}
-    raw = yf.download(list(tickers), start=start, end=end+timedelta(days=1),
-                      auto_adjust=False, progress=False, group_by="ticker", threads=True)
-    out = {}
-    if len(tickers) == 1:
-        if not raw.empty:
-            raw.columns = [str(c).lower() for c in raw.columns]
-            out[tickers[0]] = raw.dropna(subset=["close"])
-        return out
-    for t in tickers:
+
+# ========================= DHAN PERSISTENT DATA ENGINE =========================
+DHAN_BASE_URL="https://api.dhan.co/v2"
+DATA_DB="market_data.sqlite3"
+
+def dhan_configured():
+    try:
+        return bool(st.secrets["DHAN_CLIENT_ID"]) and bool(st.secrets["DHAN_ACCESS_TOKEN"])
+    except Exception:
+        return False
+
+def _dhan_headers():
+    return {
+        "access-token":str(st.secrets["DHAN_ACCESS_TOKEN"]),
+        "client-id":str(st.secrets["DHAN_CLIENT_ID"]),
+        "Content-Type":"application/json","Accept":"application/json"
+    }
+
+def _db():
+    con=sqlite3.connect(DATA_DB,timeout=60,check_same_thread=False)
+    con.execute("""CREATE TABLE IF NOT EXISTS candles(
+        symbol TEXT NOT NULL, dt TEXT NOT NULL, open REAL, high REAL, low REAL,
+        close REAL, volume REAL, PRIMARY KEY(symbol,dt))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS forward_tests(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, symbol TEXT,
+        strategy TEXT, score REAL, regime TEXT, entry REAL, sl REAL, target REAL,
+        status TEXT DEFAULT 'ACTIVE', ltp REAL, mfe REAL DEFAULT 0,
+        mae REAL DEFAULT 0, exit_price REAL, result_r REAL, updated_at TEXT)""")
+    con.commit(); return con
+
+@st.cache_data(ttl=86400,show_spinner=False)
+def dhan_master():
+    urls=["https://images.dhan.co/api-data/api-scrip-master.csv",
+          "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"]
+    last=""
+    for u in urls:
         try:
-            d = raw[t].copy()
-            d.columns = [str(c).lower() for c in d.columns]
-            d = d.dropna(subset=["close"])
-            if not d.empty:
-                out[t] = d
-        except Exception:
-            pass
+            r=requests.get(u,timeout=45); r.raise_for_status()
+            if len(r.content)>1000:return pd.read_csv(io.BytesIO(r.content),low_memory=False)
+        except Exception as e:last=str(e)
+    raise RuntimeError("Dhan instrument master failed: "+last)
+
+@st.cache_data(ttl=86400,show_spinner=False)
+def dhan_map():
+    m=dhan_master()
+    cols={str(c).strip().lower():c for c in m.columns}
+    sym=next((cols[k] for k in ["sem_trading_symbol","trading_symbol","sem_custom_symbol","custom_symbol"] if k in cols),None)
+    sid=next((cols[k] for k in ["sem_smst_security_id","sem_security_id","security_id"] if k in cols),None)
+    ex=next((cols[k] for k in ["sem_exm_exch_id","exchange"] if k in cols),None)
+    seg=next((cols[k] for k in ["sem_segment","segment"] if k in cols),None)
+    if not sym or not sid:raise RuntimeError("Dhan symbol/Security ID columns not found")
+    keep=[sym,sid]+([ex] if ex else [])+([seg] if seg else [])
+    m=m[keep].copy()
+    names=["symbol","security_id"]+((["exchange"] if ex else [])+(["segment"] if seg else []))
+    m.columns=names
+    m.symbol=m.symbol.astype(str).str.upper().str.strip()
+    if ex:
+        m=m[m.exchange.astype(str).str.upper().isin(["NSE","NSE_EQ"])]
+    if seg:
+        sv=m.segment.astype(str).str.upper().str.strip()
+        q=sv.isin(["E","EQUITY","NSE_EQ"])
+        if q.any():m=m[q]
+    return dict(zip(m.symbol,m.security_id.astype(str)))
+
+def dhan_history(symbol,start_date,end_date):
+    clean=str(symbol).upper().replace(".NS","")
+    sid=dhan_map().get(clean)
+    if not sid:raise ValueError("Security ID not found: "+clean)
+    payload={"securityId":sid,"exchangeSegment":"NSE_EQ","instrument":"EQUITY",
+             "expiryCode":0,"oi":False,
+             "fromDate":pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+             "toDate":pd.Timestamp(end_date).strftime("%Y-%m-%d")}
+    r=requests.post(f"{DHAN_BASE_URL}/charts/historical",headers=_dhan_headers(),
+                    json=payload,timeout=45)
+    if not r.ok:raise RuntimeError(f"Dhan historical {r.status_code}: {r.text[:250]}")
+    j=r.json()
+    if "close" not in j:raise RuntimeError("Unexpected Dhan historical response")
+    d=pd.DataFrame({k:j.get(k,[]) for k in ["open","high","low","close","volume"]})
+    if j.get("timestamp"):d.index=pd.to_datetime(j["timestamp"],unit="s",errors="coerce")
+    d=d.apply(pd.to_numeric,errors="coerce").dropna(subset=["close"]).sort_index()
+    return d
+
+def _bounds(con,s):
+    return con.execute("SELECT MIN(dt),MAX(dt) FROM candles WHERE symbol=?",(s,)).fetchone()
+
+def _save(con,s,d):
+    if d.empty:return 0
+    rows=[(s,pd.Timestamp(i).strftime("%Y-%m-%d"),float(r.open),float(r.high),
+           float(r.low),float(r.close),float(r.volume)) for i,r in d.iterrows()]
+    con.executemany("INSERT OR REPLACE INTO candles VALUES(?,?,?,?,?,?,?)",rows)
+    con.commit();return len(rows)
+
+def update_dhan_symbol(symbol,start_date,end_date):
+    s=str(symbol).upper().replace(".NS","");con=_db()
+    try:
+        mn,mx=_bounds(con,s)
+        if not mn:return _save(con,s,dhan_history(s,start_date,end_date))
+        n=0;mn=pd.Timestamp(mn).date();mx=pd.Timestamp(mx).date()
+        if pd.Timestamp(start_date).date()<mn:n+=_save(con,s,dhan_history(s,start_date,mn-timedelta(days=1)))
+        if pd.Timestamp(end_date).date()>mx:n+=_save(con,s,dhan_history(s,mx+timedelta(days=1),end_date))
+        return n
+    finally:con.close()
+
+def _read_cache(con,s,start_date,end_date):
+    d=pd.read_sql_query("""SELECT dt,open,high,low,close,volume FROM candles
+        WHERE symbol=? AND dt>=? AND dt<=? ORDER BY dt""",con,
+        params=(s,pd.Timestamp(start_date).strftime("%Y-%m-%d"),pd.Timestamp(end_date).strftime("%Y-%m-%d")))
+    if d.empty:return pd.DataFrame()
+    d.dt=pd.to_datetime(d.dt);d=d.set_index("dt");d.index.name="date";return d
+
+def download_prices(tickers,start,end):
+    if not dhan_configured():raise RuntimeError("Dhan credentials are not configured")
+    dhan_map()
+    # Conservative concurrency for first-time data build; repeated scans are cache-only.
+    from concurrent.futures import ThreadPoolExecutor,as_completed
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        fs={ex.submit(update_dhan_symbol,t,start,end):t for t in tickers}
+        for f in as_completed(fs):
+            try:f.result()
+            except Exception:pass
+    con=_db();out={}
+    try:
+        for t in tickers:
+            d=_read_cache(con,str(t).upper().replace(".NS",""),start,end)
+            if not d.empty:out[t]=d
+    finally:con.close()
     return out
 
+def dhan_live_ltp(symbols):
+    mp=dhan_map()
+    pairs=[(mp[s.replace(".NS","").upper()],s.replace(".NS","").upper())
+           for s in symbols if s.replace(".NS","").upper() in mp]
+    if not pairs:return {}
+    r=requests.post(f"{DHAN_BASE_URL}/marketfeed/ltp",headers=_dhan_headers(),
+                    json={"NSE_EQ":[int(a) for a,b in pairs]},timeout=20)
+    r.raise_for_status()
+    raw=r.json().get("data",{}).get("NSE_EQ",{});rev={a:b for a,b in pairs}
+    return {rev[str(k)]:float(v["last_price"]) for k,v in raw.items()
+            if str(k) in rev and isinstance(v,dict) and v.get("last_price") is not None}
+
 @st.cache_data(ttl=3600)
+def _ensure_ws_tables():
+    con=_db()
+    con.execute("""CREATE TABLE IF NOT EXISTS live_ticks(
+        symbol TEXT NOT NULL, ts TEXT NOT NULL, ltp REAL,
+        ltt INTEGER, volume REAL, buy_qty REAL, sell_qty REAL,
+        PRIMARY KEY(symbol,ts))""")
+    con.commit(); con.close()
+
+
+# ========================= PERSISTENT DHAN WEBSOCKET =========================
+class DhanLiveManager:
+    """
+    One persistent market-hours WebSocket for the active forward-test list.
+    It runs outside the Streamlit UI thread, reconnects automatically, and
+    stores the latest tick in SQLite. The UI reads the stored latest prices.
+    """
+    def __init__(self):
+        self.thread=None
+        self.stop_event=threading.Event()
+        self.lock=threading.Lock()
+        self.symbols=()
+        self.status="STOPPED"
+        self.last_error=""
+        self.last_tick=None
+
+    def _set_status(self,status,error=""):
+        with self.lock:
+            self.status=status
+            self.last_error=error
+
+    def update_symbols(self,symbols):
+        clean=tuple(sorted({str(s).upper().replace(".NS","") for s in symbols if str(s).strip()}))
+        with self.lock:
+            changed=clean!=self.symbols
+            self.symbols=clean
+        if changed and clean and (self.thread is None or not self.thread.is_alive()):
+            self.start()
+        return changed
+
+    def start(self):
+        if self.thread and self.thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.thread=threading.Thread(
+            target=self._run,
+            name="dhan-live-feed",
+            daemon=True
+        )
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self._set_status("STOPPING")
+
+    def _run(self):
+        # The official DhanHQ-py MarketFeed handles the websocket protocol.
+        from dhanhq import DhanContext, MarketFeed
+
+        backoff=2
+        while not self.stop_event.is_set():
+            try:
+                with self.lock:
+                    symbols=list(self.symbols)
+                if not symbols:
+                    self._set_status("WAITING")
+                    self.stop_event.wait(2)
+                    continue
+
+                mp=dhan_map()
+                instruments=[]
+                reverse={}
+                for s in symbols:
+                    sid=mp.get(s)
+                    if sid:
+                        instruments.append((MarketFeed.NSE,str(sid),MarketFeed.Ticker))
+                        reverse[str(sid)]=s
+
+                if not instruments:
+                    self._set_status("WAITING","No Dhan security IDs found for active candidates")
+                    self.stop_event.wait(5)
+                    continue
+
+                self._set_status("CONNECTING")
+                ctx=DhanContext(
+                    str(st.secrets["DHAN_CLIENT_ID"]),
+                    str(st.secrets["DHAN_ACCESS_TOKEN"])
+                )
+                feed=MarketFeed(ctx,instruments,version="v2")
+                feed.run_forever()
+                self._set_status("CONNECTED")
+                backoff=2
+
+                while not self.stop_event.is_set():
+                    data=feed.get_data()
+                    if not data:
+                        time.sleep(0.05)
+                        continue
+
+                    packets=data if isinstance(data,list) else [data]
+                    for pkt in packets:
+                        if not isinstance(pkt,dict):
+                            continue
+                        sid=str(pkt.get("security_id",pkt.get("SecurityId","")))
+                        symbol=reverse.get(sid)
+                        ltp=pkt.get("LTP",pkt.get("last_price",pkt.get("LastTradedPrice")))
+                        if not symbol or ltp is None:
+                            continue
+                        self._save_tick(symbol,float(ltp),pkt)
+
+                try:
+                    feed.disconnect()
+                except Exception:
+                    pass
+
+            except Exception as e:
+                self._set_status("RECONNECTING",str(e))
+                # Automatic reconnect with capped exponential backoff.
+                self.stop_event.wait(backoff)
+                backoff=min(backoff*2,30)
+
+        self._set_status("STOPPED")
+
+    def _save_tick(self,symbol,ltp,pkt):
+        now=datetime.now().isoformat(timespec="seconds")
+        con=_db()
+        try:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS live_latest(
+                    symbol TEXT PRIMARY KEY, ts TEXT, ltp REAL,
+                    volume REAL, raw TEXT
+                )
+            """)
+            con.execute("""
+                INSERT OR REPLACE INTO live_latest(symbol,ts,ltp,volume,raw)
+                VALUES(?,?,?,?,?)
+            """,(
+                symbol,now,ltp,
+                pkt.get("volume",pkt.get("Volume")),
+                str(pkt)
+            ))
+            con.commit()
+        finally:
+            con.close()
+        with self.lock:
+            self.last_tick=now
+            self.status="LIVE"
+
+    def snapshot(self):
+        with self.lock:
+            return self.status,self.last_error,self.last_tick,list(self.symbols)
+
+@st.cache_resource
+def get_dhan_live_manager():
+    return DhanLiveManager()
+
+def start_persistent_live_feed(symbols):
+    mgr=get_dhan_live_manager()
+    mgr.update_symbols(symbols)
+    mgr.start()
+    return mgr
+
+def stop_persistent_live_feed():
+    mgr=get_dhan_live_manager()
+    mgr.stop()
+    return mgr
+
+def read_live_prices(symbols=None):
+    con=_db()
+    try:
+        if symbols:
+            clean=[str(s).upper().replace(".NS","") for s in symbols]
+            placeholders=",".join(["?"]*len(clean))
+            q=pd.read_sql_query(
+                f"SELECT symbol,ts,ltp,volume FROM live_latest WHERE symbol IN ({placeholders})",
+                con,params=clean
+            )
+        else:
+            q=pd.read_sql_query("SELECT symbol,ts,ltp,volume FROM live_latest",con)
+    except Exception:
+        q=pd.DataFrame(columns=["symbol","ts","ltp","volume"])
+    finally:
+        con.close()
+    return q
+
+def live_forward_test_table():
+    con=_db()
+    try:
+        q=pd.read_sql_query(
+            "SELECT * FROM forward_tests WHERE status='ACTIVE' ORDER BY score DESC",con
+        )
+    finally:
+        con.close()
+    if q.empty:
+        return q
+
+    live=read_live_prices(q.symbol.tolist())
+    if not live.empty:
+        q=q.merge(live[["symbol","ts","ltp"]],on="symbol",how="left")
+        q["LTP"]=q["ltp"]
+        q["P/L %"]=(q["LTP"]/q["entry"]-1)*100
+        q["Live Updated"]=q["ts"]
+    return q
+
+def live_forward_test_table():
+    con=_db()
+    try:
+        q=pd.read_sql_query(
+            "SELECT * FROM forward_tests WHERE status='ACTIVE' ORDER BY score DESC",con
+        )
+    finally: con.close()
+    if q.empty:return q
+    try:
+        live=dhan_websocket_snapshot(q.symbol.tolist(),seconds=3,mode="Ticker")
+        if not live.empty:
+            q=q.merge(live[["symbol","ltp"]],on="symbol",how="left",suffixes=("","_ws"))
+            q["LTP"]=q["ltp_ws"].combine_first(q["ltp"])
+            q.drop(columns=["ltp_ws"],inplace=True)
+            q["P/L %"]=(q["LTP"]/q["entry"]-1)*100
+    except Exception as e:
+        q["WebSocket Error"]=str(e)
+    return q
+
 def company_info(ticker):
-    t = yf.Ticker(ticker)
-    try: info = t.info
-    except Exception: info = {}
-    try: news = t.news[:10]
-    except Exception: news = []
-    return info, news
+    return {}, []
 
 # ========================= INDICATORS =========================
 
@@ -684,7 +1021,8 @@ st.caption("MTF swing research • 4 strategies • ≥85 forward-test gate • 
 
 tabs=st.tabs([
     "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
-    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety","🧪 Custom Strategy"
+    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety",
+    "⚡ Live Monitor","💾 Dhan Data Manager","🧪 Custom Strategy"
 ])
 
 with tabs[0]:
@@ -747,6 +1085,9 @@ with tabs[1]:
 
     if st.button("🔄 Scan Market Now", type="primary", key="scan_button_v4"):
         try:
+            if not dhan_configured():
+                st.error("Dhan is not configured. Add DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN to Streamlit Secrets.")
+                st.stop()
             if not selected_strategies:
                 st.warning("Select at least one strategy.")
                 st.stop()
@@ -1126,6 +1467,69 @@ with tabs[1]:
             st.error(f"Scanner error: {e}")
 
 with tabs[7]:
+    st.subheader("⚡ Live Forward-Test Monitor — Persistent Dhan WebSocket")
+    st.caption(
+        "The WebSocket stays connected in the Streamlit process, automatically reconnects "
+        "after disconnects, and monitors only active ≥85 forward-test candidates."
+    )
+
+    con=_db()
+    try:
+        active=pd.read_sql_query(
+            "SELECT symbol,strategy,score,entry,sl,target,status "
+            "FROM forward_tests WHERE status='ACTIVE' ORDER BY score DESC",con
+        )
+    finally:
+        con.close()
+
+    if active.empty:
+        st.info("No active ≥85 forward-test candidates yet.")
+        mgr=get_dhan_live_manager()
+        mgr.stop()
+    else:
+        mgr=start_persistent_live_feed(active.symbol.tolist())
+        status,error,last_tick,subscribed=mgr.snapshot()
+
+        a,b,c,d=st.columns(4)
+        a.metric("WebSocket",status)
+        b.metric("Active setups",len(active))
+        c.metric("Subscribed",len(subscribed))
+        d.metric("Last tick",last_tick or "—")
+
+        if error:
+            st.warning(f"Last WebSocket error: {error}")
+
+        q=live_forward_test_table()
+        if q.empty:
+            st.info("Waiting for the first Dhan WebSocket ticks...")
+        else:
+            st.dataframe(q,use_container_width=True,hide_index=True)
+
+        st.caption(
+            "The feed is persistent only while this Streamlit application process is running. "
+            "If the app sleeps/restarts, the manager reconnects automatically when the app resumes."
+        )
+
+with tabs[8]:
+    st.subheader("💾 Dhan Data Manager")
+    st.caption("First run builds history. Later scans request only missing candles.")
+    con=_db()
+    try:
+        ns=con.execute("SELECT COUNT(DISTINCT symbol) FROM candles").fetchone()[0]
+        nc=con.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
+        latest=con.execute("SELECT MAX(dt) FROM candles").fetchone()[0]
+    finally:con.close()
+    a,b,c=st.columns(3)
+    a.metric("Cached stocks",ns);b.metric("Cached candles",f"{nc:,}");c.metric("Latest candle",latest or "—")
+    st.info(
+        "Daily Scanner updates missing historical candles. Repeated scans use the persistent cache. "
+        "Live Forward Testing uses a persistent Dhan WebSocket for the active candidate list."
+    )
+    if st.button("⛔ Stop Live WebSocket",key="stop_ws"):
+        stop_persistent_live_feed()
+        st.success("Dhan WebSocket stop requested.")
+
+with tabs[9]:
     st.subheader("🧪 Custom Strategy Lab")
     st.text_area("Paste your strategy",height=220,key="custom_strategy",
                  placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
