@@ -432,8 +432,8 @@ The system will also learn whether 85–89, 90–94 and 95–100 actually have d
 """)
 
 with tabs[5]:
-    st.subheader("💎 Long-Term Fundamental Scan
-                st.warning("Completely separate from Strategies 1–4. This is for finding long-term investment candidates in the wider Indian cash market.")
+    st.subheader("💎 Long-Term Fundamental Scanner")
+    st.warning("Completely separate from Strategies 1–4. This is for finding long-term investment candidates in the wider Indian cash market.")
     model=st.radio("Model",["Model A — Quality / Value","Model B — Growth / Piotroski"],horizontal=True,key="fund_model")
     limit=st.number_input("Stocks to analyse this run",value=100,min_value=10,max_value=500,key="fund_limit")
     st.caption("Yahoo Finance does not reliably expose every Screener.in field. Missing fields are shown as unavailable rather than guessed.")
