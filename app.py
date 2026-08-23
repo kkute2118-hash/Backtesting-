@@ -157,23 +157,187 @@ def safety(info,d):
     status="ELIGIBLE" if score>=70 else ("CAUTION" if score>=50 else "REJECT")
     return score,status,flags
 
+
+# ========================= HTF DEMAND + FOOTPRINT =========================
+
+def _zone_score(x, lookback, tolerance=0.035):
+    """Approximate demand/support quality from historical swing lows.
+    This is a research heuristic, not a claim of institutional order-flow data."""
+    if len(x) < lookback + 10:
+        return 0, {"fresh": False, "reaction": 0, "tests": 0}
+    recent = x.tail(lookback).copy()
+    low = float(recent.low.min())
+    price = float(x.close.iloc[-1])
+    distance = abs(price / low - 1)
+    near = distance <= tolerance
+    # Strong departure from the lowest area.
+    reaction = (float(recent.close.max()) / low - 1) if low > 0 else 0
+    tests = int(((recent.low <= low * (1 + tolerance)).sum()))
+    fresh = tests <= 2
+    points = 0
+    if near: points += 5
+    if reaction >= .20: points += 4
+    elif reaction >= .10: points += 2
+    if fresh: points += 2
+    elif tests <= 4: points += 1
+    return min(points, 11), {"fresh": fresh, "reaction": reaction, "tests": tests, "distance": distance}
+
+def htf_confluence(x):
+    """20-point higher-timeframe support/demand score."""
+    # Quarterly approximation from rolling 63 trading days.
+    q = _zone_score(x, 252, .06)[0]
+    m = _zone_score(x, 126, .045)[0]
+    w = _zone_score(x, 60, .035)[0]
+    # Cap the combined score at 20.
+    total = min(20, q * 0.75 + m * 0.75 + w * 0.5)
+    return int(round(total))
+
+def footprint_score(x):
+    """20-point price/volume footprint heuristic using only information known at the scan date."""
+    if len(x) < 60:
+        return 0
+    z = x.iloc[-1]
+    score = 0
+
+    # Base/compression: lower recent range than earlier range.
+    recent_range = ((x.high - x.low) / x.close).tail(10).mean()
+    prior_range = ((x.high - x.low) / x.close).tail(40).head(30).mean()
+    if pd.notna(recent_range) and pd.notna(prior_range) and recent_range < prior_range * .8:
+        score += 4
+
+    # Volume contraction in the base.
+    v_recent = x.volume.tail(10).mean()
+    v_prior = x.volume.tail(40).head(30).mean()
+    if pd.notna(v_recent) and pd.notna(v_prior) and v_recent < v_prior * .9:
+        score += 3
+
+    # Expansion on the current move.
+    if pd.notna(z.relvol) and z.relvol >= 1.5:
+        score += 4
+    elif pd.notna(z.relvol) and z.relvol >= 1.2:
+        score += 2
+
+    # Close near the high of the day.
+    day_range = float(z.high - z.low)
+    if day_range > 0:
+        close_location = (float(z.close) - float(z.low)) / day_range
+        if close_location >= .75:
+            score += 3
+        elif close_location >= .60:
+            score += 1
+
+    # Controlled distance from EMA20, avoiding extreme extension.
+    extension = float(z.close / z.ema20 - 1) if pd.notna(z.ema20) else np.nan
+    if np.isfinite(extension) and 0 <= extension <= .04:
+        score += 3
+
+    # Relative-strength proxy versus own 50-day trend.
+    if pd.notna(z.ema50) and z.close > z.ema50:
+        score += 3
+
+    return int(min(20, score))
+
+def strategy_quality_score(x, s):
+    """30-point strategy-specific quality score. Does not apply other strategies."""
+    z = x.iloc[-1]
+    p = 0
+    if s == 1:
+        p += 10 if z.wrsi14 >= 60 else 7 if z.wrsi14 >= 55 else 4 if z.wrsi14 >= 50 else 0
+        p += 10 if z.mrsi14 >= 60 else 7 if z.mrsi14 >= 55 else 4 if z.mrsi14 >= 50 else 0
+        p += 10 if z.mclose >= z.mema15 else 0
+    elif s == 2:
+        p += 10 if z.ema20 > z.ema50 else 0
+        p += 10 if z.ema50 > z.ema200 else 0
+        p += 10 if z.relvol >= 1.2 else 5 if z.relvol >= 1 else 0
+    elif s == 3:
+        dist = abs(z.close / z.ema50 - 1)
+        p += 10 if dist <= .015 else 7 if dist <= .025 else 4 if dist <= .04 else 0
+        p += 10 if z.close > z.ema200 else 0
+        p += 10 if z.wrsi14 >= 55 else 6 if z.wrsi14 >= 45 else 0
+    elif s == 4:
+        p += 10 if z.mmom >= 30 else 7 if z.mmom >= 25 else 4 if z.mmom >= 20 else 0
+        p += 10 if z.mema10 > z.mema20 else 0
+        p += 10 if z.close <= z.ema20 * 1.02 else 5 if z.close <= z.ema20 * 1.03 else 0
+    return int(min(30, p))
+
+def final_setup_score(x, s, regime, safety_score):
+    """100-point ranking score. Most components rank quality rather than hard-reject."""
+    z = x.iloc[-1]
+    strategy = strategy_quality_score(x, s)       # 30
+    htf = htf_confluence(x)                       # 20
+    footprint = footprint_score(x)                # 20
+
+    trend = 0
+    trend += 4 if z.close > z.ema50 else 0
+    trend += 3 if z.close > z.ema200 else 0
+    trend += 3 if z.rsi14 >= 50 else 0             # 10
+
+    entry = 0
+    ext = z.close / z.ema20 - 1 if pd.notna(z.ema20) else np.nan
+    if np.isfinite(ext):
+        entry = 10 if 0 <= ext <= .025 else 7 if ext <= .04 else 3 if ext <= .07 else 0
+
+    rel = 5 if (pd.notna(z.ema50) and z.close > z.ema50) else 0
+
+    market = 5 if regime == "STRONG BULL" else 4 if regime == "BULL" else 2 if regime == "RECOVERY / SIDEWAYS" else 0
+    safety_points = 5 if safety_score >= 90 else 4 if safety_score >= 80 else 3 if safety_score >= 70 else 0
+
+    total = strategy + htf + footprint + trend + entry + rel + market + safety_points
+    return int(max(0, min(100, total))), {
+        "Strategy": strategy,
+        "HTF Demand": htf,
+        "Footprint": footprint,
+        "Trend": trend,
+        "Entry Quality": entry,
+        "Relative Strength": rel,
+        "Market Regime": market,
+        "Safety": safety_points
+    }
+
 # ========================= SCORE =========================
 
-def setup_score(x,s,regime,safety_score):
-    z=x.iloc[-1]
-    score=0
-    score += 15 if regime in ("STRONG BULL","BULL") else (8 if regime=="RECOVERY / SIDEWAYS" else 0)
-    score += 8 if z.close>z.ema50 else 0
-    score += 7 if z.wrsi14>=50 else 0
-    score += 5 if z.mrsi14>=50 else 0
-    score += 5 if z.mema10>=z.mema20 else 0
-    score += 5 if z.relvol>=1.2 else 0
-    score += 5 if 0 <= z.close/z.ema20-1 <= .03 else 0
-    score += 5 if z.rsi14>=50 else 0
-    score += 5 if z.close>=z.ema50 else 0
-    score += 15 if safety_score>=85 else (10 if safety_score>=70 else 0)
-    score += 15 if s==4 else 12
-    return int(max(0,min(100,score)))
+def setup_score(x, s, regime, safety_score):
+    """Strategy-specific quality score. This does NOT add other strategy rules."""
+    z = x.iloc[-1]
+    score = 0
+
+    # Market regime support: 15
+    score += 15 if regime == "STRONG BULL" else 12 if regime == "BULL" else 7 if regime == "RECOVERY / SIDEWAYS" else 2
+
+    # MTF alignment: 25
+    score += 5 if z.close > z.ema50 else 0
+    score += 5 if z.close > z.ema200 else 0
+    score += 5 if z.wrsi14 >= 50 else 0
+    score += 5 if z.mrsi14 >= 50 else 0
+    score += 5 if z.mema10 >= z.mema20 else 0
+
+    # Technical quality: 25
+    score += 5 if z.rsi14 >= 50 else 0
+    score += 5 if z.relvol >= 1.0 else 0
+    score += 5 if z.relvol >= 1.5 else 0
+    score += 5 if z.close >= z.ema20 else 0
+    score += 5 if z.close >= z.ema50 else 0
+
+    # Safety: 15
+    score += 15 if safety_score >= 90 else 12 if safety_score >= 80 else 8 if safety_score >= 70 else 0
+
+    # Strategy-specific signal quality: 20.
+    # These are conditions belonging to the selected strategy only.
+    if s == 1:
+        score += 10 if z.wrsi14 >= 55 else 5 if z.wrsi14 >= 50 else 0
+        score += 10 if z.mrsi14 >= 55 else 5 if z.mrsi14 >= 50 else 0
+    elif s == 2:
+        score += 10 if z.ema20 > z.ema50 else 0
+        score += 10 if z.ema50 > z.ema200 else 0
+    elif s == 3:
+        dist = abs(z.close / z.ema50 - 1)
+        score += 10 if dist <= .02 else 5 if dist <= .04 else 0
+        score += 10 if z.close > z.ema200 else 0
+    elif s == 4:
+        score += 10 if z.mmom >= 25 else 5 if z.mmom >= 20 else 0
+        score += 10 if z.mema10 > z.mema20 else 0
+
+    return int(max(0, min(100, score)))
 
 # ========================= FUNDAMENTAL SCORING =========================
 
@@ -304,8 +468,16 @@ with tabs[1]:
             tickers=sorted(universe)
             data=download_prices(tuple(tickers),date.today()-timedelta(days=450),date.today())
             rows=[]; bar=st.progress(0)
+            scanned_count = 0
+            data_count = 0
+            signal_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+            score_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+            rejected_safety = 0
 
             for n,(ticker,df) in enumerate(data.items()):
+                scanned_count += 1
+                if df is not None and not df.empty:
+                    data_count += 1
                 if len(df)<260:
                     bar.progress((n+1)/max(1,len(data))); continue
                 f=features(df).dropna()
@@ -317,7 +489,7 @@ with tabs[1]:
                 for s in [1,2,3,4]:
                     sig=strategy_signal(f,s)
                     if bool(sig.iloc[-1]) and safe_status!="REJECT":
-                        score=setup_score(f,s,regime,safe)
+                        score, score_parts = final_setup_score(f,s,regime,safe)
                         if score>=min_score:
                             z=f.iloc[-1]; entry=float(z.close); stop=entry*.93; target=entry+3*(entry-stop)
                             rows.append({
@@ -326,13 +498,36 @@ with tabs[1]:
                                 "Entry":round(entry,2),"SL":round(stop,2),"Target 3R":round(target,2),
                                 "R:R":"1:3","RSI":round(float(z.rsi14),1),
                                 "RelVol":round(float(z.relvol),2),"Daily EMA20":round(float(z.ema20),2),
-                                "Safety Score":safe,"Safety Flags":", ".join(flags)
+                                "Safety Score":safe,"Safety Flags":", ".join(flags),
+                                "HTF Score":score_parts["HTF Demand"],
+                                "Footprint Score":score_parts["Footprint"],
+                                "Strategy Score":score_parts["Strategy"],
+                                "Entry Quality":score_parts["Entry Quality"],
+                                "Relative Strength":score_parts["Relative Strength"]
                             })
                 bar.progress((n+1)/max(1,len(data)))
 
             result=pd.DataFrame(rows)
+
+            st.subheader("🔎 Scanner Diagnostics")
+            dc1,dc2,dc3,dc4,dc5 = st.columns(5)
+            dc1.metric("Stocks scanned", scanned_count)
+            dc2.metric("Price data available", data_count)
+            dc3.metric("S1 signals", signal_counts[1])
+            dc4.metric("S2 signals", signal_counts[2])
+            dc5.metric("S3/S4 signals", signal_counts[3] + signal_counts[4])
+            st.caption(
+                f"Score ≥ {min_score}: S1={score_counts[1]}, S2={score_counts[2]}, "
+                f"S3={score_counts[3]}, S4={score_counts[4]}. "
+                f"Safety rejections: {rejected_safety}."
+            )
+
             if result.empty:
-                st.warning("No setup scored 85+ today. No trade is a valid decision.")
+                st.warning(
+                    f"No setup reached score ≥ {min_score}. "
+                    "Check the diagnostics above. The scanner did scan the selected universe; "
+                    "a zero-result day is not treated as a trade."
+                )
             else:
                 result=result.sort_values(["Score","Strategy"],ascending=[False,True]).head(int(max_candidates))
                 st.session_state["forward_queue"]=result
@@ -403,6 +598,17 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("🧠 Market-Cycle Learning")
+    st.markdown("### Evidence confidence")
+    st.caption("Confidence is based on the number of comparable forward-test observations. It is not a probability of winning.")
+    rr = st.session_state.get("forward_results", pd.DataFrame())
+    if not rr.empty and "R" in rr.columns:
+        nobs = len(rr)
+        conf = "LOW" if nobs < 30 else "MEDIUM" if nobs < 75 else "HIGH"
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Comparable observations", nobs)
+        c2.metric("Evidence confidence", conf)
+        c3.metric("Observed expectancy", f"{rr.R.mean():.3f}R")
+
     st.warning("The learning layer records evidence and compares performance. It does not rewrite Strategy 1–4 rules.")
     r=st.session_state.get("forward_results",pd.DataFrame())
     if r.empty:
@@ -467,3 +673,4 @@ with tabs[7]:
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
+    progress((n+
