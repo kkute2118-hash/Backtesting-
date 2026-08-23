@@ -3,11 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
-import io
-import sqlite3
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
 
@@ -28,364 +24,29 @@ def index_universe(name):
     col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
     return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
 
-# ========================= FAST PERSISTENT DHAN DATA LAYER =========================
-DHAN_BASE_URL = "https://api.dhan.co/v2"
-DATA_DB = "market_data.sqlite3"
-DATA_DAYS = 800
-
-def dhan_configured():
-    try:
-        return bool(st.secrets.get("DHAN_CLIENT_ID")) and bool(st.secrets.get("DHAN_ACCESS_TOKEN"))
-    except Exception:
-        return False
-
-def dhan_headers(quote=False):
-    h = {
-        "access-token": str(st.secrets["DHAN_ACCESS_TOKEN"]),
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if quote:
-        h["client-id"] = str(st.secrets["DHAN_CLIENT_ID"])
-    return h
-
-def db_connect():
-    con = sqlite3.connect(DATA_DB, timeout=30, check_same_thread=False)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS candles (
-            symbol TEXT NOT NULL,
-            dt TEXT NOT NULL,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
-            volume REAL,
-            PRIMARY KEY(symbol, dt)
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS watchlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT,
-            symbol TEXT,
-            strategy TEXT,
-            score REAL,
-            regime TEXT,
-            entry REAL,
-            sl REAL,
-            target REAL,
-            status TEXT DEFAULT 'ACTIVE',
-            last_price REAL,
-            mfe_pct REAL DEFAULT 0,
-            mae_pct REAL DEFAULT 0,
-            last_update TEXT,
-            UNIQUE(symbol, strategy, created_at)
-        )
-    """)
-    con.commit()
-    return con
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def dhan_instrument_master():
-    urls = [
-        "https://images.dhan.co/api-data/api-scrip-master.csv",
-        "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
-    ]
-    last = ""
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=45)
-            r.raise_for_status()
-            if len(r.content) > 1000:
-                return pd.read_csv(io.BytesIO(r.content), low_memory=False)
-        except Exception as e:
-            last = str(e)
-    raise RuntimeError("Dhan instrument master download failed: " + last)
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def dhan_symbol_map():
-    m = dhan_instrument_master()
-    cols = {str(c).strip().lower(): c for c in m.columns}
-    sym_col = next((cols[k] for k in [
-        "sem_trading_symbol","trading_symbol","sem_custom_symbol","custom_symbol"
-    ] if k in cols), None)
-    sid_col = next((cols[k] for k in [
-        "sem_smst_security_id","sem_security_id","security_id"
-    ] if k in cols), None)
-    if not sym_col or not sid_col:
-        raise RuntimeError("Dhan symbol/Security ID columns not found.")
-    x = m[[sym_col, sid_col]].copy()
-    x.columns = ["symbol","security_id"]
-    x["symbol"] = x["symbol"].astype(str).str.upper().str.strip()
-    x["security_id"] = x["security_id"].astype(str)
-    return dict(zip(x.symbol, x.security_id))
-
-def dhan_security_id(symbol):
-    return dhan_symbol_map().get(str(symbol).upper().replace(".NS","").strip())
-
-def dhan_fetch_history(symbol, start_date, end_date):
-    sid = dhan_security_id(symbol)
-    if not sid:
-        raise ValueError(f"Security ID not found: {symbol}")
-    payload = {
-        "securityId": str(sid),
-        "exchangeSegment": "NSE_EQ",
-        "instrument": "EQUITY",
-        "expiryCode": 0,
-        "oi": False,
-        "fromDate": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
-        "toDate": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
-    }
-    r = requests.post(
-        f"{DHAN_BASE_URL}/charts/historical",
-        headers=dhan_headers(),
-        json=payload,
-        timeout=45,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Dhan {r.status_code}: {r.text[:300]}")
-    raw = r.json()
-    if not isinstance(raw, dict) or "close" not in raw:
-        raise RuntimeError("Unexpected Dhan historical response.")
-    d = pd.DataFrame({
-        "open": raw.get("open", []),
-        "high": raw.get("high", []),
-        "low": raw.get("low", []),
-        "close": raw.get("close", []),
-        "volume": raw.get("volume", []),
-    })
-    ts = raw.get("timestamp", [])
-    if ts:
-        d.index = pd.to_datetime(ts, unit="s", errors="coerce")
-        d.index.name = "date"
-    d = d.apply(pd.to_numeric, errors="coerce").dropna(subset=["close"]).sort_index()
-    return d
-
-def _db_bounds(con, symbol):
-    row = con.execute(
-        "SELECT MIN(dt), MAX(dt) FROM candles WHERE symbol=?",
-        (symbol,)
-    ).fetchone()
-    return row if row else (None, None)
-
-def _db_read(con, symbol, start_date, end_date):
-    q = """
-        SELECT dt, open, high, low, close, volume
-        FROM candles
-        WHERE symbol=? AND dt>=? AND dt<=?
-        ORDER BY dt
-    """
-    d = pd.read_sql_query(
-        q, con,
-        params=(symbol, pd.Timestamp(start_date).strftime("%Y-%m-%d"),
-                pd.Timestamp(end_date).strftime("%Y-%m-%d"))
-    )
-    if d.empty:
-        return pd.DataFrame()
-    d["dt"] = pd.to_datetime(d["dt"])
-    d = d.set_index("dt")
-    d.index.name = "date"
-    return d
-
-def _db_upsert(con, symbol, d):
-    if d is None or d.empty:
-        return 0
-    rows = []
-    for idx, r in d.iterrows():
-        rows.append((
-            symbol,
-            pd.Timestamp(idx).strftime("%Y-%m-%d"),
-            float(r.open), float(r.high), float(r.low),
-            float(r.close), float(r.volume)
-        ))
-    con.executemany("""
-        INSERT OR REPLACE INTO candles
-        (symbol, dt, open, high, low, close, volume)
-        VALUES (?,?,?,?,?,?,?)
-    """, rows)
-    con.commit()
-    return len(rows)
-
-def update_one_symbol(symbol, start_date, end_date):
-    """Incrementally update one stock. Existing candles are never re-downloaded."""
-    clean = str(symbol).upper().replace(".NS","")
-    con = db_connect()
-    try:
-        mn, mx = _db_bounds(con, clean)
-        requested_start = pd.Timestamp(start_date).date()
-        requested_end = pd.Timestamp(end_date).date()
-
-        # First run: get the full warm-up window.
-        if mn is None:
-            d = dhan_fetch_history(clean, requested_start, requested_end)
-            return _db_upsert(con, clean, d), "initial"
-
-        existing_min = pd.Timestamp(mn).date()
-        existing_max = pd.Timestamp(mx).date()
-        fetched = 0
-
-        # Fetch only missing data on either side.
-        if requested_start < existing_min:
-            d = dhan_fetch_history(clean, requested_start, existing_min - timedelta(days=1))
-            fetched += _db_upsert(con, clean, d)
-
-        if requested_end > existing_max:
-            d = dhan_fetch_history(clean, existing_max + timedelta(days=1), requested_end)
-            fetched += _db_upsert(con, clean, d)
-
-        return fetched, "incremental"
-    finally:
-        con.close()
-
+@st.cache_data(ttl=1800)
 def download_prices(tickers, start, end):
-    """
-    Compatibility wrapper used by the existing scanner/backtester.
-    Dhan + SQLite persistent cache replaces Yahoo.
-    Only missing candles are requested.
-    """
     tickers = tuple(tickers)
     if not tickers:
         return {}
-    if not dhan_configured():
-        raise RuntimeError("Dhan is not configured in Streamlit Secrets.")
-
-    # One-time instrument master load.
-    dhan_symbol_map()
-
-    # Parallelize a small number of independent first-time downloads.
-    # Keep this conservative because Dhan Data APIs are rate limited.
-    results = {}
-    jobs = {}
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        for t in tickers:
-            jobs[ex.submit(update_one_symbol, t, start, end)] = t
-        for fut in as_completed(jobs):
-            t = jobs[fut]
-            try:
-                fut.result()
-            except Exception:
-                # One failed stock must not stop the whole universe scan.
-                pass
-
-    con = db_connect()
-    try:
-        for t in tickers:
-            clean = str(t).upper().replace(".NS","")
-            d = _db_read(con, clean, start, end)
-            if not d.empty:
-                results[t] = d
-    finally:
-        con.close()
-    return results
-
-def dhan_ltp(symbols):
-    """Fetch LTP for up to 1000 NSE cash instruments in one Dhan request."""
-    clean = [str(s).upper().replace(".NS","") for s in symbols]
-    mapping = dhan_symbol_map()
-    ids = {mapping[s]: s for s in clean if s in mapping}
-    if not ids:
-        return {}
-
-    payload = {"NSE_EQ": [int(x) for x in ids.keys()]}
-    r = requests.post(
-        f"{DHAN_BASE_URL}/marketfeed/ltp",
-        headers=dhan_headers(quote=True),
-        json=payload,
-        timeout=20,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Dhan LTP {r.status_code}: {r.text[:300]}")
-    raw = r.json()
-    data = raw.get("data", {}).get("NSE_EQ", {})
-    return {
-        ids[str(sid)]: float(v["last_price"])
-        for sid, v in data.items()
-        if isinstance(v, dict) and v.get("last_price") is not None
-    }
-
-def add_forward_candidates(df):
-    if df is None or df.empty:
-        return 0
-    con = db_connect()
-    now = datetime.now().isoformat(timespec="seconds")
-    added = 0
-    for _, r in df.iterrows():
+    raw = yf.download(list(tickers), start=start, end=end+timedelta(days=1),
+                      auto_adjust=False, progress=False, group_by="ticker", threads=True)
+    out = {}
+    if len(tickers) == 1:
+        if not raw.empty:
+            raw.columns = [str(c).lower() for c in raw.columns]
+            out[tickers[0]] = raw.dropna(subset=["close"])
+        return out
+    for t in tickers:
         try:
-            ticker = str(r["Ticker"]).upper().replace(".NS","")
-            strategy = str(r["Strategy"])
-            score = float(r["Score"])
-            con.execute("""
-                INSERT OR IGNORE INTO watchlist
-                (created_at,symbol,strategy,score,regime,entry,sl,target,status,last_update)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
-            """, (
-                now, ticker, strategy, score, str(r["Regime"]),
-                float(r["Entry"]), float(r["SL 7%"]), float(r["Target 3R"]),
-                "ACTIVE", now
-            ))
-            added += 1
+            d = raw[t].copy()
+            d.columns = [str(c).lower() for c in d.columns]
+            d = d.dropna(subset=["close"])
+            if not d.empty:
+                out[t] = d
         except Exception:
             pass
-    con.commit()
-    con.close()
-    return added
-
-def active_watchlist():
-    con = db_connect()
-    try:
-        return pd.read_sql_query(
-            "SELECT * FROM watchlist WHERE status='ACTIVE' ORDER BY score DESC, id DESC",
-            con
-        )
-    finally:
-        con.close()
-
-def update_watchlist_prices():
-    q = active_watchlist()
-    if q.empty:
-        return q
-    prices = dhan_ltp(q["symbol"].tolist())
-    con = db_connect()
-    now = datetime.now().isoformat(timespec="seconds")
-
-    for _, r in q.iterrows():
-        sym = r["symbol"]
-        px = prices.get(sym)
-        if px is None:
-            continue
-
-        entry = float(r["entry"])
-        sl = float(r["sl"])
-        target = float(r["target"])
-        mfe = max(float(r["mfe_pct"] or 0), (px/entry - 1) * 100)
-        mae = min(float(r["mae_pct"] or 0), (px/entry - 1) * 100)
-
-        status = "ACTIVE"
-        if px <= sl:
-            status = "STOP"
-        elif px >= target:
-            status = "TARGET"
-
-        con.execute("""
-            UPDATE watchlist
-            SET last_price=?, mfe_pct=?, mae_pct=?, status=?, last_update=?
-            WHERE id=?
-        """, (px, mfe, mae, status, now, int(r["id"])))
-
-    con.commit()
-    con.close()
-    return active_watchlist()
-
-def data_health():
-    con = db_connect()
-    try:
-        n = con.execute("SELECT COUNT(DISTINCT symbol) FROM candles").fetchone()[0]
-        rows = con.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
-        last = con.execute("SELECT MAX(dt) FROM candles").fetchone()[0]
-        active = con.execute("SELECT COUNT(*) FROM watchlist WHERE status='ACTIVE'").fetchone()[0]
-        return int(n), int(rows), last or "—", int(active)
-    finally:
-        con.close()
+    return out
 
 @st.cache_data(ttl=3600)
 def company_info(ticker):
@@ -1023,8 +684,7 @@ st.caption("MTF swing research • 4 strategies • ≥85 forward-test gate • 
 
 tabs=st.tabs([
     "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
-    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety",
-    "⚡ Live Monitor","💾 Data Manager","🧪 Custom Strategy"
+    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety","🧪 Custom Strategy"
 ])
 
 with tabs[0]:
@@ -1050,12 +710,12 @@ with tabs[1]:
     universes = a.multiselect(
         "Trading universes",
         ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
-        ["Nifty 500","Nifty Smallcap 250"],
+        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
         key="scan_universes"
     )
     scan_mode = b.selectbox(
         "Scan mode",
-        ["Raw strategy signals (audit)", "Scored candidates (forward test)"],
+        ["All qualifying setups + scores", "Exact raw signals (audit)"],
         key="scan_mode_v4"
     )
     min_score = c.number_input(
@@ -1080,8 +740,9 @@ with tabs[1]:
     )
 
     st.info(
-        "RAW mode shows every stock/strategy signal before score filtering. "
-        "Use RAW first to verify that the strategy engine is actually producing candidates."
+        "Every selected stock is tested independently against every selected strategy. "
+        "A stock appears under a strategy only when ALL rules of that strategy pass. "
+        "Scores rank qualifying setups; the ≥85 gate is used only for forward testing."
     )
 
     if st.button("🔄 Scan Market Now", type="primary", key="scan_button_v4"):
@@ -1101,7 +762,7 @@ with tabs[1]:
             )
 
             if not idx_data:
-                st.error("No Nifty 500 Dhan price data returned. Check Dhan authentication/data subscription.")
+                st.error("No Nifty 500 price data returned by Yahoo Finance. This is a data-source problem.")
                 st.stop()
 
             proxy = max(idx_data.values(), key=len)
@@ -1120,7 +781,7 @@ with tabs[1]:
 
             if not data:
                 st.error(
-                    "Dhan returned no price data for the selected universe. "
+                    "Yahoo Finance returned no price data for the selected universe. "
                     "The scanner cannot generate signals until price data is available."
                 )
                 st.stop()
@@ -1144,47 +805,33 @@ with tabs[1]:
 
                 f = features(df)
                 # Keep the latest row even when some long-term indicators are unavailable.
+                # Individual strategy conditions will evaluate NaNs as False.
                 f = f.replace([np.inf, -np.inf], np.nan)
                 if len(f) < 260:
                     bar.progress((n+1)/max(1,len(data)))
                     continue
 
                 stats["usable"] += 1
-
-                # Evaluate all four strategy signals first. This avoids slow company-info
-                # calls for hundreds of non-candidates.
-                signals_for_stock = {}
-                any_signal = False
-                for s in selected_strategies:
-                    sig = strategy_signal(f,s)
-                    signals_for_stock[s] = bool(sig.iloc[-1])
-                    if signals_for_stock[s]:
-                        stats["signals"][s] += 1
-                        any_signal = True
-
-                if not any_signal:
-                    bar.progress((n+1)/max(1,len(data)))
-                    continue
-
-                # Safety/fundamental metadata is fetched only for actual strategy candidates.
                 info,_ = company_info(ticker)
                 safe,safe_status,flags = safety(info,df)
 
                 for s in selected_strategies:
-                    signal = signals_for_stock[s]
+                    sig = strategy_signal(f,s)
+                    signal = bool(sig.iloc[-1])
+
+                    if signal:
+                        stats["signals"][s] += 1
+
                     if not signal:
                         continue
 
                     score, parts = final_setup_score(f,s,regime,safe)
 
                     # RAW mode is deliberately not blocked by score or safety.
-                    if scan_mode == "Scored candidates (forward test)":
-                        if safe_status == "REJECT":
-                            stats["safety_reject"] += 1
-                            continue
-                        if score < min_score:
-                            continue
-
+                    # IMPORTANT: a setup is created only when ALL rules of this
+                    # individual strategy pass. Score/safety never suppress a
+                    # strategy-qualified setup; they are used for ranking and
+                    # the >=85 forward-test gate only.
                     stats["qualified"][s] += 1
 
                     z = f.iloc[-1]
@@ -1196,7 +843,7 @@ with tabs[1]:
                         "Score": score,
                         "Ticker": ticker.replace(".NS",""),
                         "Strategy": f"S{s}",
-                        "Signal": "RAW" if scan_mode.startswith("Raw") else "FORWARD TEST",
+                        "Signal": "ALL RULES PASS",
                         "Regime": regime,
                         "Safety": safe_status,
                         "Entry": round(entry,2),
@@ -1357,8 +1004,8 @@ with tabs[1]:
             c5.metric("S3/S4 signals", stats["signals"][3]+stats["signals"][4])
             c6.metric("Safety rejects", stats["safety_reject"])
             st.caption(
-                "Dhan data is stored persistently in market_data.sqlite3. "
-                "After the first download, only missing/new candles are requested."
+                "Warm-up history: 1000 calendar days. This is required for EMA250 and monthly EMA20; "
+                "the previous 450-day window could leave the feature table with zero valid rows."
             )
 
             diag = pd.DataFrame({
@@ -1375,223 +1022,110 @@ with tabs[1]:
                 )
                 st.stop()
 
-            result = result.sort_values(["Score","Strategy","Ticker"],ascending=[False,True,True])
-
-            if result_mode != "ALL qualifying setups":
-                result = result.head(int(result_mode.split()[1]))
-
-            st.subheader("📋 Scanner Results")
-            st.dataframe(result,use_container_width=True,hide_index=True)
-
-            if scan_mode == "Scored candidates (forward test)":
-                st.session_state["forward_queue"] = result
-                added = add_forward_candidates(result[result["Score"] >= 85])
-                st.success(
-                    f"{len(result)} setups entered the forward-test queue. "
-                    f"{added} candidates added to the persistent active monitor."
-                )
-            else:
-                st.caption("RAW mode is an audit. No raw signal is automatically treated as a high-conviction trade.")
-
-            st.download_button(
-                "⬇️ Download scan CSV",
-                result.to_csv(index=False).encode(),
-                "scanner_results.csv",
-                "text/csv",
-                key="scanner_download_v4"
+            result = result.sort_values(
+                ["Score","Strategy","Ticker"],
+                ascending=[False,True,True]
             )
+            full_result = result.copy()
 
-            st.subheader("📊 Strategy Opportunity Count")
-            chart_df = diag.set_index("Strategy")
-            st.bar_chart(chart_df[["Raw signals"]])
+            st.subheader("📊 Strategy Coverage")
+            cov=[]
+            for s in selected_strategies:
+                sr=full_result[full_result["Strategy"]==f"S{s}"] if not full_result.empty else pd.DataFrame()
+                cov.append({
+                    "Strategy":f"S{s}",
+                    "ALL rules pass":len(sr),
+                    f"≥{min_score}":int((sr["Score"]>=min_score).sum()) if not sr.empty else 0,
+                    "Best":int(sr["Score"].max()) if not sr.empty else 0,
+                    "Average":round(float(sr["Score"].mean()),1) if not sr.empty else 0
+                })
+            st.dataframe(pd.DataFrame(cov),use_container_width=True,hide_index=True)
+
+            if full_result.empty:
+                st.warning("No stock passed ALL rules of the selected strategies.")
+            else:
+                # Four-column board: one independent column per strategy.
+                st.subheader("🏆 Strategy Board — Best to Average")
+                cols=st.columns(4)
+                for idx,s in enumerate([1,2,3,4]):
+                    with cols[idx]:
+                        sr=full_result[full_result["Strategy"]==f"S{s}"].copy()
+                        sr=sr.sort_values("Score",ascending=False)
+                        st.markdown(f"### S{s}")
+                        if sr.empty:
+                            st.caption("No complete-rule setups")
+                        else:
+                            for rank,(_,r) in enumerate(sr.iterrows(),1):
+                                score=float(r["Score"])
+                                if score>=85:
+                                    st.success(f"**{rank}. {r['Ticker']} — {score:.0f}**")
+                                elif score>=75:
+                                    st.warning(f"**{rank}. {r['Ticker']} — {score:.0f}**")
+                                else:
+                                    st.info(f"**{rank}. {r['Ticker']} — {score:.0f}**")
+                                st.caption(
+                                    f"HTF {r.get('HTF Demand','-')} | "
+                                    f"Footprint {r.get('Footprint','-')} | "
+                                    f"Safety {r.get('Safety','-')} | {r.get('Regime','-')}"
+                                )
+
+                # Same stock in 2+ strategies = confluence, but only from
+                # complete independent strategy passes.
+                st.subheader("⭐ Multi-Strategy Confluence")
+                pivot=full_result.pivot_table(
+                    index="Ticker",columns="Strategy",values="Score",aggfunc="max"
+                )
+                for sname in ["S1","S2","S3","S4"]:
+                    if sname not in pivot.columns:
+                        pivot[sname]=np.nan
+                pivot=pivot[["S1","S2","S3","S4"]]
+                pivot["Strategies Passed"]=pivot.notna().sum(axis=1)
+                pivot["Best Score"]=pivot[["S1","S2","S3","S4"]].max(axis=1)
+                conf=pivot[pivot["Strategies Passed"]>=2].sort_values(
+                    ["Strategies Passed","Best Score"],ascending=[False,False]
+                ).reset_index()
+                if conf.empty:
+                    st.info("No stock currently passes the complete rules of 2 or more strategies.")
+                else:
+                    st.dataframe(conf,use_container_width=True,hide_index=True)
+
+                st.subheader("📋 All Qualifying Setups")
+                st.dataframe(full_result,use_container_width=True,hide_index=True)
+
+                forward=full_result[
+                    (full_result["Score"]>=min_score) &
+                    (full_result["Safety"]!="REJECT")
+                ].copy()
+                st.subheader(f"🚀 Forward-Test Queue — Score ≥ {min_score}")
+                if forward.empty:
+                    st.info("No complete-rule setup currently meets the forward-test gate.")
+                else:
+                    st.dataframe(forward,use_container_width=True,hide_index=True)
+                    st.session_state["forward_queue"]=forward
+                    added=add_forward_candidates(forward)
+                    st.success(
+                        f"{len(forward)} setups qualify for forward testing; "
+                        f"{added} added to active monitoring."
+                    )
+
+                st.subheader("🔎 Individual Strategy Results")
+                stabs=st.tabs(["S1","S2","S3","S4"])
+                for tab,s in zip(stabs,[1,2,3,4]):
+                    with tab:
+                        sr=full_result[full_result["Strategy"]==f"S{s}"]
+                        if sr.empty:
+                            st.warning(f"S{s}: no stock passed ALL S{s} rules.")
+                        else:
+                            st.dataframe(
+                                sr.sort_values("Score",ascending=False),
+                                use_container_width=True,
+                                hide_index=True
+                            )
 
         except Exception as e:
             st.error(f"Scanner error: {e}")
-            st.exception(e)
-
-with tabs[2]:
-    st.subheader("📊 Backtest Strategies 1–4")
-    a,b,c=st.columns(3)
-    uni=a.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="bt_universe")
-    start=b.date_input("Start",date.today()-timedelta(days=730),key="bt_start")
-    end=c.date_input("End",date.today(),key="bt_end")
-    a,b,c,d=st.columns(4)
-    capital=a.number_input("Capital ₹",value=1_000_000,step=100_000,key="bt_capital")
-    risk=b.number_input("Risk %",value=1.0,step=.25,key="bt_risk")
-    sl=b.number_input("SL %",value=7.0,step=.5,key="bt_sl")
-    rr=d.selectbox("Target R",[2,2.5,3,3.5,4,5],index=2,key="bt_rr")
-    selected=st.multiselect("Strategies",[1,2,3,4],[1,2,3,4],key="bt_strategies")
-    if st.button("🚀 Run Backtest",type="primary",key="bt_run"):
-        try:
-            tickers=index_universe(uni); data=download_prices(tuple(tickers),start,end)
-            logs=[]; summary=[]; bar=st.progress(0)
-            for n,(ticker,df) in enumerate(data.items()):
-                if len(df)>=260:
-                    f=features(df)
-                    for s in selected:
-                        try:
-                            tr,_=run_backtest(df,strategy_signal(f,s),capital,risk/100,sl/100,rr)
-                            if not tr.empty:
-                                tr["Ticker"]=ticker; tr["Strategy"]=f"S{s}"; logs.append(tr)
-                                m=stats(tr);m["Strategy"]=f"S{s}";summary.append(m)
-                        except Exception: pass
-                bar.progress((n+1)/max(1,len(data)))
-            if summary:
-                alltrades=pd.concat(logs,ignore_index=True)
-                board=pd.DataFrame(summary).groupby("Strategy").mean(numeric_only=True).sort_values("Expectancy R",ascending=False)
-                st.subheader("🏆 Strategy comparison");st.dataframe(board,use_container_width=True)
-                st.dataframe(alltrades,use_container_width=True,hide_index=True)
-                st.download_button("⬇️ Download backtest",alltrades.to_csv(index=False).encode(),"backtest.csv",key="bt_download")
-            else: st.warning("No qualifying trades.")
-        except Exception as e: st.error(f"Backtest error: {e}")
-
-with tabs[3]:
-    st.subheader("🔬 Forward Testing — Score ≥85")
-    q=st.session_state.get("forward_queue",pd.DataFrame())
-    if q.empty: st.info("Run the Daily Scanner first.")
-    else:
-        st.dataframe(q,use_container_width=True,hide_index=True)
-        st.download_button("⬇️ Export forward queue",q.to_csv(index=False).encode(),"forward_queue.csv",key="forward_queue_download")
-
-    st.markdown("### Record completed paper trade")
-    a,b,c,d=st.columns(4)
-    ticker=a.text_input("Ticker",key="ft_ticker")
-    entry=b.number_input("Entry",min_value=0.0,key="ft_entry")
-    exitp=c.number_input("Exit",min_value=0.0,key="ft_exit")
-    rres=d.number_input("R result",value=0.0,step=.25,key="ft_r")
-    reason=st.selectbox("Exit reason",["Target","Stop","Trailing stop","Time exit","Invalidated"],key="ft_reason")
-    notes=st.text_area("Notes / mistake",key="ft_notes")
-    if st.button("💾 Save Forward Result",key="ft_save"):
-        row=pd.DataFrame([{"Date":str(date.today()),"Ticker":ticker,"Entry":entry,"Exit":exitp,"R":rres,"Reason":reason,"Notes":notes}])
-        st.session_state["forward_results"]=pd.concat([st.session_state.get("forward_results",pd.DataFrame()),row],ignore_index=True)
-        st.success("Forward result recorded.")
-    if "forward_results" in st.session_state:
-        st.dataframe(st.session_state["forward_results"],use_container_width=True,hide_index=True)
-
-with tabs[4]:
-    st.subheader("🧠 Market-Cycle Learning")
-    st.markdown("### Evidence confidence")
-    st.caption("Confidence is based on the number of comparable forward-test observations. It is not a probability of winning.")
-    rr = st.session_state.get("forward_results", pd.DataFrame())
-    if not rr.empty and "R" in rr.columns:
-        nobs = len(rr)
-        conf = "LOW" if nobs < 30 else "MEDIUM" if nobs < 75 else "HIGH"
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Comparable observations", nobs)
-        c2.metric("Evidence confidence", conf)
-        c3.metric("Observed expectancy", f"{rr.R.mean():.3f}R")
-
-    st.warning("The learning layer records evidence and compares performance. It does not rewrite Strategy 1–4 rules.")
-    r=st.session_state.get("forward_results",pd.DataFrame())
-    if r.empty:
-        st.info("No forward-test results yet.")
-    else:
-        a,b=st.columns(2)
-        a.metric("Forward expectancy",f"{r.R.mean():.3f}R")
-        b.metric("Total R",f"{r.R.sum():.2f}R")
-        st.dataframe(r,use_container_width=True,hide_index=True)
-    st.markdown("""
-### Strategy × Market Cycle
-After enough forward trades, the dashboard will populate:
-
-| Market cycle | S1 | S2 | S3 | S4 |
-|---|---:|---:|---:|---:|
-| Strong Bull | — | — | — | — |
-| Bull | — | — | — | — |
-| Recovery | — | — | — | — |
-| Sideways | — | — | — | — |
-| Early Bear | — | — | — | — |
-| Bear | — | — | — | — |
-
-The numbers must be earned from forward/out-of-sample results.
-
-### Score calibration
-The system will also learn whether 85–89, 90–94 and 95–100 actually have different historical outcomes. A score is not called a probability until enough forward data proves it is calibrated.
-""")
-
-with tabs[5]:
-    st.subheader("💎 Long-Term Fundamental Scanner")
-    st.warning("Completely separate from Strategies 1–4. This is for finding long-term investment candidates in the wider Indian cash market.")
-    model=st.radio("Model",["Model A — Quality / Value","Model B — Growth / Piotroski"],horizontal=True,key="fund_model")
-    limit=st.number_input("Stocks to analyse this run",value=100,min_value=10,max_value=500,key="fund_limit")
-    st.caption("Yahoo Finance does not reliably expose every Screener.in field. Missing fields are shown as unavailable rather than guessed.")
-    if st.button("🔎 Run Fundamental Scan",type="primary",key="fund_scan"):
-        st.warning("Fundamental API is intentionally paused for now. We will connect a dedicated fundamental-data API after the live trading scanner is fully validated. No Yahoo field is being substituted for your Screener.in rules.")
-
-with tabs[6]:
-    st.subheader("🏢 Small/Micro-Cap Safety")
-    st.write("These are risk controls only. They do not change the four strategy rules.")
-    st.markdown("""
-- Minimum traded-value check
-- Very-low-liquidity warning
-- Abnormal-volatility warning
-- Debt/equity warning where available
-- Insider/promoter holding warning where available
-
-**🟢 Eligible / 🟡 Caution / 🔴 Reject**
-
-These checks cannot guarantee that a company is free from manipulation, governance problems or accounting risk.
-""")
 
 with tabs[7]:
-    st.subheader("⚡ Live Forward-Test Monitor")
-    st.caption(
-        "Only persistent ≥85 candidates are monitored here. "
-        "Dhan LTP is refreshed automatically; strategy rules are not changed."
-    )
-
-    def _live_monitor_body():
-        try:
-            q = update_watchlist_prices()
-            if q.empty:
-                st.info("No active ≥85 forward-test candidates yet. Run the scanner in Scored candidates mode.")
-                return
-            c1,c2,c3 = st.columns(3)
-            c1.metric("Active setups", int((q.status=="ACTIVE").sum()))
-            c2.metric("Targets", int((q.status=="TARGET").sum()))
-            c3.metric("Stops", int((q.status=="STOP").sum()))
-            show = q[[
-                "symbol","strategy","score","regime","entry","sl","target",
-                "status","last_price","mfe_pct","mae_pct","last_update"
-            ]].copy()
-            show.columns = [
-                "Stock","Strategy","Score","Regime","Entry","SL","Target",
-                "Status","LTP","MFE %","MAE %","Updated"
-            ]
-            st.dataframe(show,use_container_width=True,hide_index=True)
-        except Exception as e:
-            st.error(f"Live monitor error: {e}")
-
-    if hasattr(st, "fragment"):
-        @st.fragment(run_every="60s")
-        def live_monitor_fragment():
-            _live_monitor_body()
-        live_monitor_fragment()
-    else:
-        if st.button("🔄 Refresh active tests", key="live_manual_refresh"):
-            st.rerun()
-        _live_monitor_body()
-
-with tabs[8]:
-    st.subheader("💾 Dhan Data Manager")
-    st.caption("Persistent local cache: first run downloads history; later scans request only missing candles.")
-    if not dhan_configured():
-        st.error("Dhan credentials are not configured.")
-    else:
-        try:
-            ns, nrows, last_dt, active = data_health()
-            a,b,c,d = st.columns(4)
-            a.metric("Cached stocks", ns)
-            b.metric("Cached candles", f"{nrows:,}")
-            c.metric("Latest candle", last_dt)
-            d.metric("Active ≥85 tests", active)
-
-            if st.button("🔄 Update selected data now", key="data_manager_update"):
-                st.info("Use Daily Scanner → Scan Market Now to update the selected universe incrementally.")
-        except Exception as e:
-            st.error(f"Data manager error: {e}")
-
-with tabs[9]:
     st.subheader("🧪 Custom Strategy Lab")
     st.text_area("Paste your strategy",height=220,key="custom_strategy",
                  placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
@@ -1602,4 +1136,4 @@ with tabs[9]:
         st.success("Strategy received. Convert ambiguous language into explicit testable rules before backtesting.")
 
 st.markdown("---")
-st.caption("Research / paper-testing system. Dhan market data is enabled; real-money Dhan order execution remains intentionally disabled.")
+st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
