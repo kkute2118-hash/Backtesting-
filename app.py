@@ -1083,6 +1083,8 @@ with tabs[1]:
         "Scores rank qualifying setups; the ≥85 gate is used only for forward testing."
     )
 
+    best_top_placeholder = st.empty()
+
     if st.button("🔄 Scan Market Now", type="primary", key="scan_button_v4"):
         try:
             if not dhan_configured():
@@ -1206,135 +1208,151 @@ with tabs[1]:
 
             result = pd.DataFrame(rows)
 
-            # Strategy 4 condition audit — shown only when S4 is selected.
-            if 4 in selected_strategies and stats["usable"] > 0:
-                s4_audit_rows = []
-                for ticker, df in data.items():
-                    if len(df) < 260:
-                        continue
-                    f = features(df)
-                    if f.empty:
-                        continue
-                    z = f.iloc[-1]
-                    monthly_cross = (
-                        (f.mema10 > f.mema20) &
-                        (f.mema10.shift(1) <= f.mema20.shift(1))
-                    )
-                    monthly_cross_count = (
-                        monthly_cross.shift(1).rolling(20, min_periods=20).sum().iloc[-1]
-                    )
-                    reclaim = bool(
-                        pd.notna(z.mprevclose) and pd.notna(z.mema10) and
-                        z.mclose > z.mema10 and z.mprevclose <= z.mema10
-                    )
-                    conditions = {
-                        "Monthly return >=20%": bool(pd.notna(z.mmom) and z.mmom >= 20),
-                        "Monthly RSI >=50": bool(pd.notna(z.mrsi14) and z.mrsi14 >= 50),
-                        "Monthly EMA10 >= EMA20": bool(pd.notna(z.mema10) and pd.notna(z.mema20) and z.mema10 >= z.mema20),
-                        "Daily EMA volume30 >=50000": bool(pd.notna(z.vol30) and z.vol30 >= 50000),
-                        "Daily close >=20": bool(z.close >= 20),
-                        "Monthly cross count >=1 OR reclaim": bool((pd.notna(monthly_cross_count) and monthly_cross_count >= 1) or reclaim),
-                        "Daily close <=1.03 EMA20": bool(pd.notna(z.ema20) and z.close <= 1.03*z.ema20)
-                    }
-                    s4_audit_rows.append({
-                        "Ticker": ticker.replace(".NS",""),
-                        **conditions,
-                        "S4 EXACT": all(conditions.values())
-                    })
+            with best_top_placeholder.container():
+                st.subheader("🏆 BEST SETUPS — Score Highest First")
+                if result.empty:
+                    st.warning("No complete-rule setups found in this scan.")
+                else:
+                    _top=result.sort_values(["Score","Strategy","Ticker"],ascending=[False,True,True])
+                    _best=_top[_top["Score"]>=min_score]
+                    if _best.empty:
+                        st.info(f"No complete-rule setup currently meets the ≥{min_score} forward-test gate.")
+                    else:
+                        st.dataframe(_best,use_container_width=True,hide_index=True)
+                    st.caption("Every displayed setup has already passed ALL rules of its own strategy. Score only ranks valid setups.")
 
-                if s4_audit_rows:
-                    s4df = pd.DataFrame(s4_audit_rows)
-                    st.subheader("🧪 Strategy 4 Condition Audit")
-                    s4counts = pd.DataFrame({
-                        "Condition": list(s4df.columns[1:-1]),
-                        "Passing stocks": [int(s4df[c].sum()) for c in s4df.columns[1:-1]]
-                    })
-                    st.dataframe(s4counts, use_container_width=True, hide_index=True)
-                    with st.expander("View S4 stock-by-stock audit"):
-                        st.dataframe(s4df, use_container_width=True, hide_index=True)
 
-            # Strategy 2 condition audit — shown only when S2 is selected.
-            if 2 in selected_strategies and stats["usable"] > 0:
-                audit_rows = []
-                for ticker, df in data.items():
-                    if len(df) < 260:
-                        continue
-                    f = features(df)
-                    if f.empty:
-                        continue
-                    z = f.iloc[-1]
-                    dr = f.close.pct_change() * 100
+            with st.expander("🔧 Advanced Diagnostics — S2/S4 audits", expanded=False):
+                # Strategy 4 condition audit — shown only when S4 is selected.
+                if 4 in selected_strategies and stats["usable"] > 0:
+                    s4_audit_rows = []
+                    for ticker, df in data.items():
+                        if len(df) < 260:
+                            continue
+                        f = features(df)
+                        if f.empty:
+                            continue
+                        z = f.iloc[-1]
+                        monthly_cross = (
+                            (f.mema10 > f.mema20) &
+                            (f.mema10.shift(1) <= f.mema20.shift(1))
+                        )
+                        monthly_cross_count = (
+                            monthly_cross.shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                        )
+                        reclaim = bool(
+                            pd.notna(z.mprevclose) and pd.notna(z.mema10) and
+                            z.mclose > z.mema10 and z.mprevclose <= z.mema10
+                        )
+                        conditions = {
+                            "Monthly return >=20%": bool(pd.notna(z.mmom) and z.mmom >= 20),
+                            "Monthly RSI >=50": bool(pd.notna(z.mrsi14) and z.mrsi14 >= 50),
+                            "Monthly EMA10 >= EMA20": bool(pd.notna(z.mema10) and pd.notna(z.mema20) and z.mema10 >= z.mema20),
+                            "Daily EMA volume30 >=50000": bool(pd.notna(z.vol30) and z.vol30 >= 50000),
+                            "Daily close >=20": bool(z.close >= 20),
+                            "Monthly cross count >=1 OR reclaim": bool((pd.notna(monthly_cross_count) and monthly_cross_count >= 1) or reclaim),
+                            "Daily close <=1.03 EMA20": bool(pd.notna(z.ema20) and z.close <= 1.03*z.ema20)
+                        }
+                        s4_audit_rows.append({
+                            "Ticker": ticker.replace(".NS",""),
+                            **conditions,
+                            "S4 EXACT": all(conditions.values())
+                        })
 
-                    c_30max = bool(dr.rolling(30, min_periods=30).max().iloc[-1] >= 5) if len(f) >= 30 else False
-                    c_ema50_250 = bool(z.ema50 >= z.ema250)
-                    c_vol = bool(z.vol20 >= 10000)
-                    c_price = bool(z.close >= 15)
-                    c_mrsi = bool(z.mrsi14 >= 55)
-                    c_wrsi = bool(z.wrsi14 >= 50)
+                    if s4_audit_rows:
+                        s4df = pd.DataFrame(s4_audit_rows)
+                        st.subheader("🧪 Strategy 4 Condition Audit")
+                        s4counts = pd.DataFrame({
+                            "Condition": list(s4df.columns[1:-1]),
+                            "Passing stocks": [int(s4df[c].sum()) for c in s4df.columns[1:-1]]
+                        })
+                        st.dataframe(s4counts, use_container_width=True, hide_index=True)
+                        with st.expander("View S4 stock-by-stock audit"):
+                            st.dataframe(s4df, use_container_width=True, hide_index=True)
 
-                    c_inside = bool(
-                        (z.open <= f.high.shift(1).iloc[-1]) and
-                        (z.open >= f.low.shift(1).iloc[-1]) and
-                        (z.close >= f.low.shift(1).iloc[-1]) and
-                        (z.close <= f.high.shift(1).iloc[-1])
-                    )
+                # Strategy 2 condition audit — shown only when S2 is selected.
+                if 2 in selected_strategies and stats["usable"] > 0:
+                    audit_rows = []
+                    for ticker, df in data.items():
+                        if len(df) < 260:
+                            continue
+                        f = features(df)
+                        if f.empty:
+                            continue
+                        z = f.iloc[-1]
+                        dr = f.close.pct_change() * 100
 
-                    r1 = dr.shift(1).iloc[-1]
-                    r2 = dr.shift(2).iloc[-1]
-                    c_r1 = bool(pd.notna(r1) and -4 <= r1 <= 5)
-                    c_r2 = bool(pd.notna(r2) and -4 <= r2 <= 5)
+                        c_30max = bool(dr.rolling(30, min_periods=30).max().iloc[-1] >= 5) if len(f) >= 30 else False
+                        c_ema50_250 = bool(z.ema50 >= z.ema250)
+                        c_vol = bool(z.vol20 >= 10000)
+                        c_price = bool(z.close >= 15)
+                        c_mrsi = bool(z.mrsi14 >= 55)
+                        c_wrsi = bool(z.wrsi14 >= 50)
 
-                    c_ema10 = bool(pd.notna(z.ema10) and ((z.close-z.ema10)/z.ema10 <= .04))
+                        c_inside = bool(
+                            (z.open <= f.high.shift(1).iloc[-1]) and
+                            (z.open >= f.low.shift(1).iloc[-1]) and
+                            (z.close >= f.low.shift(1).iloc[-1]) and
+                            (z.close <= f.high.shift(1).iloc[-1])
+                        )
 
-                    cross20 = (
-                        ((f.ema20 > f.ema50) & (f.ema20.shift(1) <= f.ema50.shift(1)))
-                        .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
-                    )
-                    cross50 = (
-                        ((f.ema50 > f.ema200) & (f.ema50.shift(1) <= f.ema200.shift(1)))
-                        .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
-                    )
-                    c_bull = bool((cross20 == 1) or (cross50 == 1))
+                        r1 = dr.shift(1).iloc[-1]
+                        r2 = dr.shift(2).iloc[-1]
+                        c_r1 = bool(pd.notna(r1) and -4 <= r1 <= 5)
+                        c_r2 = bool(pd.notna(r2) and -4 <= r2 <= 5)
 
-                    bear20 = (
-                        ((f.ema20 < f.ema50) & (f.ema20.shift(1) >= f.ema50.shift(1)))
-                        .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
-                    )
-                    bear10 = (
-                        ((f.ema10 < f.ema20) & (f.ema10.shift(1) >= f.ema20.shift(1)))
-                        .shift(1).rolling(10, min_periods=10).sum().iloc[-1]
-                    )
-                    c_bear20 = bool(bear20 < 1)
-                    c_bear10 = bool(bear10 < 1)
+                        c_ema10 = bool(pd.notna(z.ema10) and ((z.close-z.ema10)/z.ema10 <= .04))
 
-                    audit_rows.append({
-                        "Ticker": ticker.replace(".NS",""),
-                        "30D Max ≥5": c_30max,
-                        "Bearish EMA20/50 count <1": c_bear20,
-                        "Bearish EMA10/20 count <1": c_bear10,
-                        "EMA50 ≥ EMA250": c_ema50_250,
-                        "Vol20 ≥10000": c_vol,
-                        "Price ≥15": c_price,
-                        "Monthly RSI ≥55": c_mrsi,
-                        "Weekly RSI ≥50": c_wrsi,
-                        "Inside previous day": c_inside,
-                        "Prev day return -4..5": c_r1,
-                        "2D ago return -4..5": c_r2,
-                        "Close ≤4% above EMA10": c_ema10,
-                        "Bullish cross count =1": c_bull,
-                        "S2 EXACT": all([c_30max,c_bear20,c_bear10,c_ema50_250,c_vol,c_price,c_mrsi,c_wrsi,c_inside,c_r1,c_r2,c_ema10,c_bull])
-                    })
+                        cross20 = (
+                            ((f.ema20 > f.ema50) & (f.ema20.shift(1) <= f.ema50.shift(1)))
+                            .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                        )
+                        cross50 = (
+                            ((f.ema50 > f.ema200) & (f.ema50.shift(1) <= f.ema200.shift(1)))
+                            .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                        )
+                        c_bull = bool((cross20 == 1) or (cross50 == 1))
 
-                if audit_rows:
-                    audit_df = pd.DataFrame(audit_rows)
-                    st.subheader("🧪 Strategy 2 Condition Audit")
-                    counts = pd.DataFrame({
-                        "Condition": list(audit_df.columns[1:]),
-                        "Passing stocks": [int(audit_df[c].sum()) for c in audit_df.columns[1:]]
-                    })
-                    st.dataframe(counts, use_container_width=True, hide_index=True)
-                    with st.expander("View S2 stock-by-stock audit"):
-                        st.dataframe(audit_df, use_container_width=True, hide_index=True)
+                        bear20 = (
+                            ((f.ema20 < f.ema50) & (f.ema20.shift(1) >= f.ema50.shift(1)))
+                            .shift(1).rolling(20, min_periods=20).sum().iloc[-1]
+                        )
+                        bear10 = (
+                            ((f.ema10 < f.ema20) & (f.ema10.shift(1) >= f.ema20.shift(1)))
+                            .shift(1).rolling(10, min_periods=10).sum().iloc[-1]
+                        )
+                        c_bear20 = bool(bear20 < 1)
+                        c_bear10 = bool(bear10 < 1)
+
+                        audit_rows.append({
+                            "Ticker": ticker.replace(".NS",""),
+                            "30D Max ≥5": c_30max,
+                            "Bearish EMA20/50 count <1": c_bear20,
+                            "Bearish EMA10/20 count <1": c_bear10,
+                            "EMA50 ≥ EMA250": c_ema50_250,
+                            "Vol20 ≥10000": c_vol,
+                            "Price ≥15": c_price,
+                            "Monthly RSI ≥55": c_mrsi,
+                            "Weekly RSI ≥50": c_wrsi,
+                            "Inside previous day": c_inside,
+                            "Prev day return -4..5": c_r1,
+                            "2D ago return -4..5": c_r2,
+                            "Close ≤4% above EMA10": c_ema10,
+                            "Bullish cross count =1": c_bull,
+                            "S2 EXACT": all([c_30max,c_bear20,c_bear10,c_ema50_250,c_vol,c_price,c_mrsi,c_wrsi,c_inside,c_r1,c_r2,c_ema10,c_bull])
+                        })
+
+                    if audit_rows:
+                        audit_df = pd.DataFrame(audit_rows)
+                        st.subheader("🧪 Strategy 2 Condition Audit")
+                        counts = pd.DataFrame({
+                            "Condition": list(audit_df.columns[1:]),
+                            "Passing stocks": [int(audit_df[c].sum()) for c in audit_df.columns[1:]]
+                        })
+                        st.dataframe(counts, use_container_width=True, hide_index=True)
+                        with st.expander("View S2 stock-by-stock audit"):
+                            st.dataframe(audit_df, use_container_width=True, hide_index=True)
+
 
             st.subheader("🔎 Scanner Diagnostics")
             c1,c2,c3,c4,c5,c6 = st.columns(6)
@@ -1465,6 +1483,121 @@ with tabs[1]:
 
         except Exception as e:
             st.error(f"Scanner error: {e}")
+
+# ========================= RESEARCH MODULES =========================
+def _two_year_backtest(data, strategies, threshold=85):
+    rows=[]; end=pd.Timestamp.today().normalize(); start=end-pd.DateOffset(years=2)
+    for ticker,df in data.items():
+        if df is None or len(df)<300: continue
+        df=df.sort_index()
+        for dt in df.index[(df.index>=start)&(df.index<=end)][::5]:
+            hist=df.loc[:dt]
+            if len(hist)<260: continue
+            f=features(hist).replace([np.inf,-np.inf],np.nan)
+            if f.empty: continue
+            regime,_=regime_from_index(hist); safe,_,_=safety({},hist)
+            for s in strategies:
+                if not bool(strategy_signal(f,s).iloc[-1]): continue
+                score,parts=final_setup_score(f,s,regime,safe)
+                if score<threshold: continue
+                entry=float(hist.close.iloc[-1]); sl=entry*.93; target=entry+3*(entry-sl)
+                future=df[df.index>dt]
+                if future.empty: continue
+                outcome="OPEN"; exit_price=float(future.close.iloc[-1])
+                for _,bar in future.iterrows():
+                    if bar.low<=sl: outcome="LOSS"; exit_price=sl; break
+                    if bar.high>=target: outcome="WIN"; exit_price=target; break
+                rows.append({"Date":dt.date(),"Ticker":ticker.replace(".NS",""),
+                             "Strategy":f"S{s}","Score":score,"Entry":round(entry,2),
+                             "SL":round(sl,2),"Target":round(target,2),"Outcome":outcome,
+                             "R":round((exit_price-entry)/(entry-sl),2),
+                             "Strategy Score":parts["Strategy"],"HTF":parts["HTF Demand"],
+                             "Footprint":parts["Footprint"],"Regime":regime,"Safety":safe})
+    return pd.DataFrame(rows)
+
+def _learning_summary(bt):
+    if bt.empty:return pd.DataFrame()
+    x=bt.copy();x["Win"]=(x.Outcome=="WIN").astype(int)
+    y=x.groupby("Strategy").agg(Signals=("Ticker","count"),Wins=("Win","sum"),
+        WinRate=("Win","mean"),AvgR=("R","mean"),BestScore=("Score","max")).reset_index()
+    y["WinRate"]=(y.WinRate*100).round(1); y["AvgR"]=y.AvgR.round(2)
+    return y
+
+with tabs[2]:
+    st.subheader("📊 Two-Year Backtest + Marking Learning")
+    threshold=st.number_input("Score threshold",0,100,85,1,key="bt_threshold_v19")
+    if st.button("▶ Run 2-Year Backtest",key="run_bt_v19"):
+        if not dhan_configured(): st.error("Dhan credentials are not configured.")
+        else:
+            try:
+                tickers=sorted(set(sum([index_universe(u) for u in ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"]],[])))
+                with st.spinner("Updating Dhan history and running 2-year backtest..."):
+                    bd=download_prices(tickers,date.today()-timedelta(days=365*3),date.today())
+                    st.session_state["backtest_v19"]=_two_year_backtest(bd,[1,2,3,4],int(threshold))
+            except Exception as e: st.error(f"Backtest error: {e}")
+    bt=st.session_state.get("backtest_v19",pd.DataFrame())
+    if bt.empty: st.info("Run the 2-Year Backtest to generate results.")
+    else:
+        st.subheader(f"🏆 Score ≥{int(threshold)} — Best Historical Setups")
+        st.dataframe(bt.sort_values(["Score","Date"],ascending=[False,False]).head(100),use_container_width=True,hide_index=True)
+        st.subheader("📈 Strategy Performance")
+        st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
+        st.subheader("🧠 Marking / Score-Band Learning")
+        bands=pd.cut(bt.Score,[84,89,94,100],labels=["85–89","90–94","95–100"],include_lowest=True)
+        bx=bt.assign(Band=bands,Win=(bt.Outcome=="WIN").astype(int))
+        learn=bx.groupby("Band",observed=True).agg(Signals=("Ticker","count"),Wins=("Win","sum"),WinRate=("Win","mean"),AvgR=("R","mean")).reset_index()
+        learn["WinRate"]=(learn.WinRate*100).round(1); learn["AvgR"]=learn.AvgR.round(2)
+        st.dataframe(learn,use_container_width=True,hide_index=True)
+        stabs=st.tabs(["S1","S2","S3","S4"])
+        for tab,s in zip(stabs,[1,2,3,4]):
+            with tab:
+                sr=bt[bt.Strategy==f"S{s}"].sort_values(["Score","Date"],ascending=[False,False])
+                if sr.empty: st.info(f"S{s}: no ≥{int(threshold)} historical setups.")
+                else: st.dataframe(sr,use_container_width=True,hide_index=True)
+
+with tabs[3]:
+    st.subheader("🔬 Forward Testing")
+    con=_db()
+    try: ft=pd.read_sql_query("SELECT * FROM forward_tests ORDER BY created_at DESC",con)
+    finally: con.close()
+    if ft.empty: st.info("No forward-test records yet. Complete-rule ≥85 setups will appear here.")
+    else:
+        a,b,c,d=st.columns(4); a.metric("Total",len(ft)); b.metric("Active",int((ft.status=="ACTIVE").sum()))
+        c.metric("Positive R",int((ft.result_r>0).sum())); d.metric("Average R",round(float(ft.result_r.dropna().mean()),2) if ft.result_r.notna().any() else 0)
+        st.dataframe(ft.sort_values("score",ascending=False),use_container_width=True,hide_index=True)
+
+with tabs[4]:
+    st.subheader("🧠 Market Learning")
+    bt=st.session_state.get("backtest_v19",pd.DataFrame())
+    if bt.empty: st.info("Run the 2-Year Backtest first.")
+    else:
+        st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
+        rows=[]
+        for c in ["HTF","Footprint","Strategy Score","Safety"]:
+            if c in bt:
+                med=bt[c].median(); hi=bt[bt[c]>=med]; lo=bt[bt[c]<med]
+                rows.append({"Component":c,"High Avg R":round(float(hi.R.mean()),2) if len(hi) else 0,"Low Avg R":round(float(lo.R.mean()),2) if len(lo) else 0,"High Win %":round(float((hi.Outcome=="WIN").mean()*100),1) if len(hi) else 0})
+        st.subheader("Marking Component Learning"); st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+
+with tabs[5]:
+    st.subheader("💎 Long-Term Fundamentals")
+    st.warning("Fundamental API is not connected yet. Dhan price/volume data is intentionally kept separate from fundamentals.")
+    st.write("This tab is ready for the future fundamental API: quality filters, growth, ROE/ROCE, debt, cash flow and valuation.")
+
+with tabs[6]:
+    st.subheader("🏢 Small/Micro Safety")
+    st.caption("Independent risk layer; it never changes S1–S4 qualification.")
+    con=_db()
+    try: syms=pd.read_sql_query("SELECT DISTINCT symbol FROM forward_tests WHERE status='ACTIVE'",con)
+    finally: con.close()
+    if syms.empty: st.info("No active forward-test stocks yet.")
+    else:
+        rows=[]
+        for sym in syms.symbol:
+            d=download_prices([sym],date.today()-timedelta(days=90),date.today()).get(sym,pd.DataFrame())
+            sc,status,flags=safety({},d); rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"Flags":", ".join(flags)})
+        st.dataframe(pd.DataFrame(rows).sort_values("Safety Score",ascending=False),use_container_width=True,hide_index=True)
+
 
 with tabs[7]:
     st.subheader("⚡ Live Forward-Test Monitor — Persistent Dhan WebSocket")
