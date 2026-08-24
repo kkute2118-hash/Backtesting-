@@ -7,7 +7,8 @@ import sqlite3
 import time
 import threading
 import queue
-from datetime import date, timedelta
+import json
+from datetime import date, timedelta, datetime
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
 
@@ -393,6 +394,62 @@ def live_forward_test_table():
 
 def company_info(ticker):
     return {}, []
+
+
+# ========================= FOREX + CRYPTO DATA ENGINE =========================
+TWELVE_BASE="https://api.twelvedata.com"
+
+def twelvedata_configured():
+    try:
+        return bool(st.secrets["TWELVEDATA_API_KEY"])
+    except Exception:
+        return False
+
+def _td_headers():
+    return {"Authorization":f"apikey {str(st.secrets['TWELVEDATA_API_KEY'])}"}
+
+@st.cache_data(ttl=86400,show_spinner=False)
+def td_history(symbol, interval="1day", start_date=None, end_date=None, outputsize=5000):
+    """Historical OHLCV for Forex and Crypto through Twelve Data."""
+    if not twelvedata_configured():
+        raise RuntimeError("TWELVEDATA_API_KEY is not configured in Streamlit Secrets.")
+    params={"symbol":symbol,"interval":interval,"outputsize":int(outputsize)}
+    if start_date is not None: params["start_date"]=pd.Timestamp(start_date).strftime("%Y-%m-%d")
+    if end_date is not None: params["end_date"]=pd.Timestamp(end_date).strftime("%Y-%m-%d")
+    r=requests.get(f"{TWELVE_BASE}/time_series",headers=_td_headers(),params=params,timeout=45)
+    if not r.ok: raise RuntimeError(f"Twelve Data {r.status_code}: {r.text[:300]}")
+    j=r.json()
+    if j.get("status")=="error": raise RuntimeError(j.get("message","Twelve Data error"))
+    vals=j.get("values",[])
+    if not vals: return pd.DataFrame(columns=["open","high","low","close","volume"])
+    d=pd.DataFrame(vals)
+    d["datetime"]=pd.to_datetime(d["datetime"],errors="coerce")
+    d=d.set_index("datetime").sort_index()
+    for c in ["open","high","low","close","volume"]:
+        if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+        else:d[c]=np.nan
+    return d[["open","high","low","close","volume"]].dropna(subset=["close"])
+
+@st.cache_data(ttl=30,show_spinner=False)
+def td_price(symbol):
+    if not twelvedata_configured():
+        raise RuntimeError("TWELVEDATA_API_KEY is not configured in Streamlit Secrets.")
+    r=requests.get(f"{TWELVE_BASE}/price",headers=_td_headers(),params={"symbol":symbol},timeout=20)
+    if not r.ok: raise RuntimeError(f"Twelve Data price {r.status_code}: {r.text[:250]}")
+    j=r.json()
+    if j.get("status")=="error": raise RuntimeError(j.get("message","Twelve Data price error"))
+    return float(j["price"])
+
+def td_market_history(symbol, market, interval="1day", years=2):
+    start=date.today()-timedelta(days=365*years)
+    return td_history(symbol,interval,start,date.today(),5000)
+
+def td_validate_symbol(symbol,market):
+    try:
+        d=td_history(symbol,"1day",date.today()-timedelta(days=30),date.today(),100)
+        return (not d.empty),len(d),"OK" if not d.empty else "No data"
+    except Exception as e:
+        return False,0,str(e)
 
 # ========================= INDICATORS =========================
 
@@ -977,6 +1034,307 @@ def model_b(info):
     if not np.isfinite(val(info,"piotroskiScore")): unavailable.append("Piotroski score")
     return checks,unavailable
 
+
+# ========================= V21 FAST EXECUTION + LEARNING =========================
+# V21 principle:
+#   - Build expensive features once per symbol.
+#   - Keep historical scans vectorized.
+#   - Use WebSocket only for live 1-minute updates.
+#   - Persist learning observations so the model improves from completed trades.
+#
+# The strategy rules themselves are intentionally unchanged.
+
+FEATURE_CACHE_VERSION = "v21"
+
+def _feature_cache_key(symbol, df):
+    if df is None or df.empty:
+        return None
+    last = pd.Timestamp(df.index[-1])
+    return f"{FEATURE_CACHE_VERSION}:{str(symbol).upper()}:{last.isoformat()}:{len(df)}"
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def features_cached(symbol, df):
+    """Expensive feature calculation is cached by symbol + last candle + length."""
+    return features(df)
+
+def ensure_learning_tables():
+    con = _db()
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS learning_observations(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT,
+                market TEXT,
+                symbol TEXT,
+                strategy TEXT,
+                signal_time TEXT,
+                score REAL,
+                regime TEXT,
+                htf REAL,
+                footprint REAL,
+                strategy_score REAL,
+                entry_quality REAL,
+                relative_strength REAL,
+                safety_score REAL,
+                entry REAL,
+                exit_price REAL,
+                result_r REAL,
+                outcome TEXT,
+                holding_minutes REAL,
+                source TEXT
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS model_weights(
+                market TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                component TEXT NOT NULL,
+                weight REAL NOT NULL,
+                samples INTEGER NOT NULL DEFAULT 0,
+                avg_r REAL,
+                win_rate REAL,
+                updated_at TEXT,
+                PRIMARY KEY(market,strategy,component)
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS scan_state(
+                market TEXT PRIMARY KEY,
+                last_scan TEXT,
+                universe_size INTEGER DEFAULT 0,
+                elapsed_seconds REAL DEFAULT 0
+            )
+        """)
+        con.commit()
+    finally:
+        con.close()
+
+ensure_learning_tables()
+
+def _record_learning_trade(market, row, source="forward"):
+    """Persist one completed trade without changing the trading rules."""
+    try:
+        con = _db()
+        con.execute("""
+            INSERT INTO learning_observations(
+                created_at,market,symbol,strategy,signal_time,score,regime,
+                htf,footprint,strategy_score,entry_quality,relative_strength,
+                safety_score,entry,exit_price,result_r,outcome,holding_minutes,source
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            datetime.now().isoformat(timespec="seconds"),
+            market,
+            str(row.get("symbol", row.get("Ticker", ""))),
+            str(row.get("strategy", row.get("Strategy", ""))),
+            str(row.get("signal_time", row.get("Entry Date", ""))),
+            float(row.get("score", row.get("Score", np.nan))),
+            str(row.get("regime", row.get("Regime", ""))),
+            float(row.get("htf", row.get("HTF", row.get("HTF Demand", np.nan)))),
+            float(row.get("footprint", row.get("Footprint", np.nan))),
+            float(row.get("strategy_score", row.get("Strategy Score", np.nan))),
+            float(row.get("entry_quality", row.get("Entry Quality", np.nan))),
+            float(row.get("relative_strength", row.get("Relative Strength", np.nan))),
+            float(row.get("safety_score", row.get("Safety", row.get("Safety Score", np.nan)))),
+            float(row.get("entry", row.get("Entry", np.nan))),
+            float(row.get("exit_price", row.get("Exit", np.nan))),
+            float(row.get("result_r", row.get("R", np.nan))),
+            str(row.get("outcome", row.get("Outcome", ""))),
+            float(row.get("holding_minutes", np.nan)),
+            source
+        ))
+        con.commit()
+    except Exception:
+        # Learning must never break scanning/forward monitoring.
+        pass
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+def learning_snapshot(market="INDIA"):
+    ensure_learning_tables()
+    con = _db()
+    try:
+        q = pd.read_sql_query("""
+            SELECT * FROM learning_observations
+            WHERE market=?
+            ORDER BY id DESC
+        """, con, params=(market,))
+    finally:
+        con.close()
+    return q
+
+def adaptive_component_weights(market="INDIA", strategy=None):
+    """
+    Data-driven weights from completed observations.
+    This does not alter raw strategy qualification.
+    Components with insufficient evidence retain neutral weights.
+    """
+    q = learning_snapshot(market)
+    if q.empty:
+        return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
+
+    if strategy is not None:
+        q = q[q.strategy == f"S{strategy}"]
+    if q.empty:
+        return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
+
+    components = [
+        ("score", "Score"), ("htf", "HTF"), ("footprint", "Footprint"),
+        ("strategy_score", "Strategy Score"), ("entry_quality", "Entry Quality"),
+        ("relative_strength", "Relative Strength"), ("safety_score", "Safety")
+    ]
+    rows = []
+    for s, sg in q.groupby("strategy"):
+        base = sg.result_r.mean()
+        for col, label in components:
+            if col not in sg:
+                continue
+            med = sg[col].median()
+            hi = sg[sg[col] >= med]
+            lo = sg[sg[col] < med]
+            if len(hi) < 5 or len(lo) < 5:
+                weight = 1.0
+            else:
+                edge = float(hi.result_r.mean() - lo.result_r.mean())
+                weight = float(np.clip(1.0 + edge * 0.25, 0.70, 1.35))
+            rows.append({
+                "Strategy": s, "Component": label, "Weight": round(weight, 3),
+                "Samples": len(sg), "Avg R": round(float(base), 3),
+                "Win %": round(float((sg.result_r > 0).mean() * 100), 1)
+            })
+    return pd.DataFrame(rows)
+
+def adaptive_candidate_score(base_score, market="INDIA", strategy="S1", parts=None):
+    """
+    Learning overlay only. Raw strategy rules remain authoritative.
+    With <20 observations, return the original score.
+    """
+    q = learning_snapshot(market)
+    if q.empty or len(q) < 20 or parts is None:
+        return float(base_score)
+
+    q = q[q.strategy == strategy]
+    if len(q) < 20:
+        return float(base_score)
+
+    weights = adaptive_component_weights(market, int(strategy[-1]))
+    if weights.empty:
+        return float(base_score)
+
+    vals = {
+        "Score": float(base_score),
+        "HTF": float(parts.get("HTF Demand", 0)),
+        "Footprint": float(parts.get("Footprint", 0)),
+        "Strategy Score": float(parts.get("Strategy", 0)),
+        "Entry Quality": float(parts.get("Entry Quality", 0)),
+        "Relative Strength": float(parts.get("Relative Strength", 0)),
+        "Safety": float(parts.get("Safety", 0)),
+    }
+    total = 0.0
+    wsum = 0.0
+    for _, r in weights.iterrows():
+        comp = r["Component"]
+        if comp in vals:
+            w = float(r["Weight"])
+            total += vals[comp] * w
+            wsum += w
+    if not wsum:
+        return float(base_score)
+    # Blend gently so the learned overlay cannot overpower the deterministic score.
+    learned = total / wsum
+    return float(np.clip(base_score * 0.70 + learned * 0.30, 0, 100))
+
+def _fast_historical_candidates(data, strategies):
+    """Vectorized candidate discovery: features once, then boolean signals."""
+    rows = []
+    for ticker, df in data.items():
+        if df is None or len(df) < 260:
+            continue
+        try:
+            f = features_cached(str(ticker), df.sort_index())
+            f = f.replace([np.inf, -np.inf], np.nan)
+            for s in strategies:
+                sig = strategy_signal(f, s)
+                idx = np.flatnonzero(sig.fillna(False).to_numpy())
+                for i in idx:
+                    rows.append((ticker, s, i))
+        except Exception:
+            continue
+    return rows
+
+def run_fast_backtest(data, strategies, capital=1000000, risk=0.01, sl=0.07, rr=3.0):
+    """
+    Faster research backtest:
+      * features are calculated once per symbol;
+      * signal dates are discovered vectorially;
+      * only actual candidate dates enter the trade loop.
+    """
+    rows = []
+    for ticker, df in data.items():
+        if df is None or len(df) < 300:
+            continue
+        try:
+            df = df.sort_index()
+            x = features_cached(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            for s in strategies:
+                sig = strategy_signal(x, s).fillna(False).to_numpy()
+                signal_idx = np.flatnonzero(sig)
+                for i in signal_idx:
+                    if i >= len(x) - 2:
+                        continue
+                    ei = i + 1
+                    entry = float(x.close.iloc[ei])
+                    stop = entry * (1 - sl)
+                    one_r = entry - stop
+                    qty = max(1, int(capital * risk / one_r))
+                    target = entry + rr * one_r
+                    ex = None
+                    ep = None
+                    reason = "End"
+                    for j in range(ei, len(x)):
+                        lo = float(x.low.iloc[j]); hi = float(x.high.iloc[j])
+                        if lo <= stop:
+                            ex, ep, reason = j, stop, "SL"
+                            break
+                        if hi >= target:
+                            ex, ep, reason = j, target, f"{rr}R"
+                            break
+                    if ex is None:
+                        ex = len(x) - 1
+                        ep = float(x.close.iloc[-1])
+                    pnl = (ep - entry) * qty
+                    rows.append({
+                        "Entry Date": x.index[ei].date(),
+                        "Exit Date": x.index[ex].date(),
+                        "Ticker": str(ticker).replace(".NS",""),
+                        "Strategy": f"S{s}",
+                        "Entry": entry,
+                        "Exit": ep,
+                        "Return %": (ep / entry - 1) * 100,
+                        "R": pnl / (one_r * qty),
+                        "PnL ₹": pnl,
+                        "Holding Days": (x.index[ex] - x.index[ei]).days,
+                        "Reason": reason
+                    })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+def save_scan_state(market, universe_size, elapsed):
+    con = _db()
+    try:
+        con.execute("""
+            INSERT OR REPLACE INTO scan_state(market,last_scan,universe_size,elapsed_seconds)
+            VALUES(?,?,?,?)
+        """, (market, datetime.now().isoformat(timespec="seconds"),
+              int(universe_size), float(elapsed)))
+        con.commit()
+    finally:
+        con.close()
+
+
 # ========================= BACKTEST =========================
 
 def run_backtest(d,sig,capital,risk,sl,rr,slip=.001):
@@ -1017,7 +1375,7 @@ def stats(t):
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab")
-st.caption("MTF swing research • 4 strategies • ≥85 forward-test gate • market-cycle learning • separate long-term investment engine")
+st.caption("V21 • Fast cached scanner • 1-minute live layer • 4 deterministic strategies • adaptive historical + forward learning • crypto research engine")
 
 tabs=st.tabs([
     "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
@@ -1486,33 +1844,90 @@ with tabs[1]:
 
 # ========================= RESEARCH MODULES =========================
 def _two_year_backtest(data, strategies, threshold=85):
-    rows=[]; end=pd.Timestamp.today().normalize(); start=end-pd.DateOffset(years=2)
-    for ticker,df in data.items():
-        if df is None or len(df)<300: continue
-        df=df.sort_index()
-        for dt in df.index[(df.index>=start)&(df.index<=end)][::5]:
-            hist=df.loc[:dt]
-            if len(hist)<260: continue
-            f=features(hist).replace([np.inf,-np.inf],np.nan)
-            if f.empty: continue
-            regime,_=regime_from_index(hist); safe,_,_=safety({},hist)
+    """
+    V21 fast backtest.
+    Signal discovery is vectorized after a single feature build per stock.
+    The threshold is applied after the deterministic signal is found.
+    """
+    rows = []
+    end = pd.Timestamp.today().normalize()
+    start_date = end - pd.DateOffset(years=2)
+
+    for ticker, df in data.items():
+        if df is None or len(df) < 300:
+            continue
+        try:
+            df = df.sort_index()
+            f = features_cached(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            if f.empty:
+                continue
+
+            # Historical signal indices are generated once.
             for s in strategies:
-                if not bool(strategy_signal(f,s).iloc[-1]): continue
-                score,parts=final_setup_score(f,s,regime,safe)
-                if score<threshold: continue
-                entry=float(hist.close.iloc[-1]); sl=entry*.93; target=entry+3*(entry-sl)
-                future=df[df.index>dt]
-                if future.empty: continue
-                outcome="OPEN"; exit_price=float(future.close.iloc[-1])
-                for _,bar in future.iterrows():
-                    if bar.low<=sl: outcome="LOSS"; exit_price=sl; break
-                    if bar.high>=target: outcome="WIN"; exit_price=target; break
-                rows.append({"Date":dt.date(),"Ticker":ticker.replace(".NS",""),
-                             "Strategy":f"S{s}","Score":score,"Entry":round(entry,2),
-                             "SL":round(sl,2),"Target":round(target,2),"Outcome":outcome,
-                             "R":round((exit_price-entry)/(entry-sl),2),
-                             "Strategy Score":parts["Strategy"],"HTF":parts["HTF Demand"],
-                             "Footprint":parts["Footprint"],"Regime":regime,"Safety":safe})
+                sig = strategy_signal(f, s).fillna(False).to_numpy()
+                indices = np.flatnonzero(sig)
+                for i in indices:
+                    dt = f.index[i]
+                    if dt < start_date or dt > end:
+                        continue
+                    if i >= len(f) - 1:
+                        continue
+
+                    # Score is evaluated only on an actual historical signal.
+                    hist = f.iloc[:i+1]
+                    try:
+                        regime, _ = regime_from_index(hist)
+                    except Exception:
+                        regime = "UNKNOWN"
+                    safe, _, _ = safety({}, df.iloc[:i+1])
+                    score, parts = final_setup_score(hist, s, regime, safe)
+                    if score < threshold:
+                        continue
+
+                    entry_i = i + 1
+                    entry = float(f.close.iloc[entry_i])
+                    sl = entry * 0.93
+                    target = entry + 3 * (entry - sl)
+                    future = df.iloc[entry_i+1:]
+
+                    outcome = "OPEN"
+                    exit_price = float(future.close.iloc[-1]) if not future.empty else entry
+                    exit_idx = future.index[-1] if not future.empty else f.index[entry_i]
+
+                    for future_dt, bar in future.iterrows():
+                        if float(bar.low) <= sl:
+                            outcome = "LOSS"
+                            exit_price = sl
+                            exit_idx = future_dt
+                            break
+                        if float(bar.high) >= target:
+                            outcome = "WIN"
+                            exit_price = target
+                            exit_idx = future_dt
+                            break
+
+                    r = (exit_price - entry) / (entry - sl)
+                    rows.append({
+                        "Date": dt.date(),
+                        "Ticker": str(ticker).replace(".NS",""),
+                        "Strategy": f"S{s}",
+                        "Score": score,
+                        "Entry": round(entry,2),
+                        "SL": round(sl,2),
+                        "Target": round(target,2),
+                        "Outcome": outcome,
+                        "R": round(r,2),
+                        "Strategy Score": parts["Strategy"],
+                        "HTF": parts["HTF Demand"],
+                        "Footprint": parts["Footprint"],
+                        "Entry Quality": parts["Entry Quality"],
+                        "Relative Strength": parts["Relative Strength"],
+                        "Regime": regime,
+                        "Safety": safe,
+                        "Exit Date": exit_idx.date() if hasattr(exit_idx, "date") else exit_idx
+                    })
+        except Exception:
+            continue
     return pd.DataFrame(rows)
 
 def _learning_summary(bt):
@@ -1524,18 +1939,23 @@ def _learning_summary(bt):
     return y
 
 with tabs[2]:
-    st.subheader("📊 Two-Year Backtest + Marking Learning")
-    threshold=st.number_input("Score threshold",0,100,85,1,key="bt_threshold_v19")
-    if st.button("▶ Run 2-Year Backtest",key="run_bt_v19"):
+    st.subheader("📊 V21 Fast Backtest + Adaptive Learning")
+    threshold=st.number_input("Score threshold",0,100,85,1,key="bt_threshold_v21")
+    st.caption("Features are cached once per symbol; historical signal discovery is vectorized.")
+    if st.button("⚡ Run FAST 2-Year Backtest",key="run_bt_v21"):
         if not dhan_configured(): st.error("Dhan credentials are not configured.")
         else:
             try:
                 tickers=sorted(set(sum([index_universe(u) for u in ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"]],[])))
-                with st.spinner("Updating Dhan history and running 2-year backtest..."):
+                t0=time.perf_counter()
+                with st.spinner("Loading cached Dhan history + running vectorized backtest..."):
                     bd=download_prices(tickers,date.today()-timedelta(days=365*3),date.today())
-                    st.session_state["backtest_v19"]=_two_year_backtest(bd,[1,2,3,4],int(threshold))
+                    st.session_state["backtest_v21"]=_two_year_backtest(bd,[1,2,3,4],int(threshold))
+                elapsed=time.perf_counter()-t0
+                save_scan_state("INDIA-BACKTEST",len(tickers),elapsed)
+                st.success(f"Completed in {elapsed:.1f} seconds.")
             except Exception as e: st.error(f"Backtest error: {e}")
-    bt=st.session_state.get("backtest_v19",pd.DataFrame())
+    bt=st.session_state.get("backtest_v21",pd.DataFrame())
     if bt.empty: st.info("Run the 2-Year Backtest to generate results.")
     else:
         st.subheader(f"🏆 Score ≥{int(threshold)} — Best Historical Setups")
@@ -1567,8 +1987,8 @@ with tabs[3]:
         st.dataframe(ft.sort_values("score",ascending=False),use_container_width=True,hide_index=True)
 
 with tabs[4]:
-    st.subheader("🧠 Market Learning")
-    bt=st.session_state.get("backtest_v19",pd.DataFrame())
+    st.subheader("🧠 V21 Adaptive Market Learning")
+    bt=st.session_state.get("backtest_v21",pd.DataFrame())
     if bt.empty: st.info("Run the 2-Year Backtest first.")
     else:
         st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
@@ -1578,6 +1998,20 @@ with tabs[4]:
                 med=bt[c].median(); hi=bt[bt[c]>=med]; lo=bt[bt[c]<med]
                 rows.append({"Component":c,"High Avg R":round(float(hi.R.mean()),2) if len(hi) else 0,"Low Avg R":round(float(lo.R.mean()),2) if len(lo) else 0,"High Win %":round(float((hi.Outcome=="WIN").mean()*100),1) if len(hi) else 0})
         st.subheader("Marking Component Learning"); st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+
+        st.divider()
+        st.subheader("🔁 Adaptive Learning Database")
+        learn_db = learning_snapshot("INDIA")
+        if learn_db.empty:
+            st.info("No completed learning observations yet. Forward-test results will automatically feed the learning engine.")
+        else:
+            st.metric("Completed learning observations", len(learn_db))
+            st.dataframe(
+                adaptive_component_weights("INDIA"),
+                use_container_width=True,
+                hide_index=True
+            )
+            st.caption("Learning adjusts candidate ranking only after sufficient evidence; it never changes the deterministic S1–S4 rules.")
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals")
@@ -1664,11 +2098,59 @@ with tabs[8]:
 
 with tabs[9]:
     st.subheader("🧪 Custom Strategy Lab")
-    st.text_area("Paste your strategy",height=220,key="custom_strategy",
+    st.caption("Indian Stocks use Dhan. Forex and Crypto use Twelve Data for historical OHLCV and live price.")
+
+    market=st.selectbox("Market",["Indian Stocks","Forex","Crypto"],key="custom_market")
+    if market=="Indian Stocks":
+        st.info("Indian Stocks → Dhan historical API + Dhan WebSocket.")
+        symbol=st.text_input("Dhan symbol","RELIANCE",key="custom_symbol_stock")
+    elif market=="Forex":
+        st.info("Forex → Twelve Data composite FX feed. Example: EUR/USD, GBP/USD, USD/JPY.")
+        symbol=st.text_input("Forex pair","EUR/USD",key="custom_symbol_fx")
+    else:
+        st.info("Crypto → Twelve Data digital-asset market data. Example: BTC/USD, ETH/USD.")
+        symbol=st.text_input("Crypto pair","BTC/USD",key="custom_symbol_crypto")
+
+    style=st.selectbox("Style",["Intraday","Swing","Positional"],key="custom_style")
+    tf=st.selectbox("Timeframe",["5min","15min","1h","4h","1day","1week","1month"],index=4,key="custom_tf")
+
+    if market!="Indian Stocks":
+        if not twelvedata_configured():
+            st.warning("Add TWELVEDATA_API_KEY to Streamlit Secrets to activate Forex/Crypto data.")
+            st.markdown("Twelve Data provides historical OHLC/time-series data and real-time WebSocket quotes for Forex and Crypto.")
+        else:
+            c1,c2,c3=st.columns(3)
+            if st.button("📥 Fetch Historical Data",key="td_fetch"):
+                try:
+                    years=2 if style!="Intraday" else 1
+                    with st.spinner(f"Fetching {symbol} from Twelve Data..."):
+                        d=td_market_history(symbol,market,tf,years)
+                    st.session_state["td_custom_data"]=d
+                    st.success(f"Fetched {len(d):,} candles.")
+                except Exception as e:
+                    st.error(str(e))
+            if st.button("⚡ Get Live Price",key="td_live_price"):
+                try:
+                    px=td_price(symbol)
+                    st.session_state["td_live_px"]=px
+                except Exception as e:
+                    st.error(str(e))
+            if st.button("🧪 Test Symbol",key="td_test_symbol"):
+                ok,n,msg=td_validate_symbol(symbol,market)
+                if ok: st.success(f"Working: {symbol} — {n} recent daily candles available.")
+                else: st.error(f"Symbol test failed: {msg}")
+
+            if "td_live_px" in st.session_state:
+                st.metric("Live Price",st.session_state["td_live_px"])
+            d=st.session_state.get("td_custom_data",pd.DataFrame())
+            if not d.empty:
+                st.dataframe(d.tail(200),use_container_width=True)
+                st.caption(f"Data source: Twelve Data | {market} | {symbol} | {tf}")
+
+    st.divider()
+    st.subheader("Strategy Rules")
+    st.text_area("Paste your strategy",height=180,key="custom_strategy",
                  placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
-    st.selectbox("Market",["Indian Stocks","Forex","Crypto"],key="custom_market")
-    st.selectbox("Style",["Intraday","Swing","Positional"],key="custom_style")
-    st.selectbox("Timeframe",["5m","15m","1h","4h","Daily","Weekly"],key="custom_tf")
     if st.button("🔍 Validate Strategy",key="custom_validate"):
         st.success("Strategy received. Convert ambiguous language into explicit testable rules before backtesting.")
 
