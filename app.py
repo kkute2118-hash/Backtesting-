@@ -8,7 +8,8 @@ import time
 import threading
 import queue
 import json
-from datetime import date, timedelta, datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta, datetime, datetime
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab", page_icon="🧠", layout="wide")
 
@@ -355,42 +356,26 @@ def read_live_prices(symbols=None):
     return q
 
 def live_forward_test_table():
-    con=_db()
+    con = _db()
     try:
-        q=pd.read_sql_query(
-            "SELECT * FROM forward_tests WHERE status='ACTIVE' ORDER BY score DESC",con
+        q = pd.read_sql_query(
+            "SELECT * FROM forward_tests WHERE status='ACTIVE' ORDER BY score DESC",
+            con
         )
     finally:
         con.close()
+
     if q.empty:
         return q
 
-    live=read_live_prices(q.symbol.tolist())
+    live = read_live_prices(q.symbol.tolist())
     if not live.empty:
-        q=q.merge(live[["symbol","ts","ltp"]],on="symbol",how="left")
-        q["LTP"]=q["ltp"]
-        q["P/L %"]=(q["LTP"]/q["entry"]-1)*100
-        q["Live Updated"]=q["ts"]
+        q = q.merge(live[["symbol", "ts", "ltp"]], on="symbol", how="left")
+        q["LTP"] = q["ltp"]
+        q["P/L %"] = (q["LTP"] / q["entry"] - 1) * 100
+        q["Live Updated"] = q["ts"]
     return q
 
-def live_forward_test_table():
-    con=_db()
-    try:
-        q=pd.read_sql_query(
-            "SELECT * FROM forward_tests WHERE status='ACTIVE' ORDER BY score DESC",con
-        )
-    finally: con.close()
-    if q.empty:return q
-    try:
-        live=dhan_websocket_snapshot(q.symbol.tolist(),seconds=3,mode="Ticker")
-        if not live.empty:
-            q=q.merge(live[["symbol","ltp"]],on="symbol",how="left",suffixes=("","_ws"))
-            q["LTP"]=q["ltp_ws"].combine_first(q["ltp"])
-            q.drop(columns=["ltp_ws"],inplace=True)
-            q["P/L %"]=(q["LTP"]/q["entry"]-1)*100
-    except Exception as e:
-        q["WebSocket Error"]=str(e)
-    return q
 
 def company_info(ticker):
     return {}, []
@@ -1335,6 +1320,368 @@ def save_scan_state(market, universe_size, elapsed):
         con.close()
 
 
+
+# ========================= LONG-LIVED FAST ENGINE =========================
+ENGINE_VERSION = "FINAL-1"
+
+def ensure_engine_tables():
+    con = _db()
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS feature_snapshots(
+                symbol TEXT PRIMARY KEY,
+                last_dt TEXT NOT NULL,
+                n_rows INTEGER NOT NULL,
+                payload BLOB NOT NULL,
+                engine_version TEXT NOT NULL
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS signal_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                signal_dt TEXT NOT NULL,
+                score REAL,
+                learned_score REAL,
+                status TEXT DEFAULT 'CANDIDATE',
+                created_at TEXT NOT NULL,
+                UNIQUE(market,symbol,strategy,signal_dt)
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS learning_observations(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                market TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                signal_dt TEXT NOT NULL,
+                score REAL,
+                learned_score REAL,
+                result_r REAL,
+                outcome TEXT,
+                holding_bars INTEGER,
+                regime TEXT,
+                htf REAL,
+                footprint REAL,
+                strategy_score REAL,
+                entry_quality REAL,
+                relative_strength REAL,
+                safety_score REAL,
+                source TEXT
+            )
+        """)
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_learning_market_strategy
+            ON learning_observations(market,strategy)
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS system_metrics(
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        con.commit()
+    finally:
+        con.close()
+
+ensure_engine_tables()
+
+def _metric_set(key, value):
+    con = _db()
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO system_metrics(key,value,updated_at) VALUES(?,?,?)",
+            (key, json.dumps(value), datetime.now().isoformat(timespec="seconds"))
+        )
+        con.commit()
+    finally:
+        con.close()
+
+def _metric_get(key, default=None):
+    con = _db()
+    try:
+        row = con.execute("SELECT value FROM system_metrics WHERE key=?", (key,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return default
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return row[0]
+
+def _save_feature_snapshot(symbol, df):
+    # Keep the feature store compact: one DataFrame per symbol.
+    if df is None or df.empty:
+        return
+    payload = pd.to_pickle(df, None)
+    con = _db()
+    try:
+        # pd.to_pickle does not support bytes in all versions, so use a bytes buffer.
+        buf = io.BytesIO()
+        df.to_pickle(buf)
+        con.execute("""
+            INSERT OR REPLACE INTO feature_snapshots
+            (symbol,last_dt,n_rows,payload,engine_version)
+            VALUES(?,?,?,?,?)
+        """, (
+            str(symbol).upper().replace(".NS",""),
+            pd.Timestamp(df.index[-1]).isoformat(),
+            len(df),
+            sqlite3.Binary(buf.getvalue()),
+            ENGINE_VERSION
+        ))
+        con.commit()
+    finally:
+        con.close()
+
+def _load_feature_snapshot(symbol):
+    con = _db()
+    try:
+        row = con.execute(
+            "SELECT payload FROM feature_snapshots WHERE symbol=? AND engine_version=?",
+            (str(symbol).upper().replace(".NS",""), ENGINE_VERSION)
+        ).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return None
+    try:
+        return pd.read_pickle(io.BytesIO(row[0]))
+    except Exception:
+        return None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def features_fast(symbol, df):
+    # Streamlit cache + SQLite persistence.
+    key = _load_feature_snapshot(symbol)
+    last_dt = pd.Timestamp(df.index[-1]).isoformat() if not df.empty else ""
+    if key is not None and not key.empty and pd.Timestamp(key.index[-1]).isoformat() == last_dt:
+        return key
+    f = features(df.sort_index()).replace([np.inf, -np.inf], np.nan)
+    try:
+        _save_feature_snapshot(symbol, f)
+    except Exception:
+        pass
+    return f
+
+def build_fast_data_cache(tickers, start, end, max_workers=12):
+    """
+    First run: populate Dhan history.
+    Later runs: fetch only missing ranges and read locally.
+    Concurrency is bounded to respect Dhan Data API limits while avoiding
+    serial per-symbol waits. Dhan documents Data APIs at 5 req/sec and
+    100,000/day; this engine uses a conservative worker pool. 
+    """
+    if not dhan_configured():
+        raise RuntimeError("Dhan credentials are not configured")
+    tickers = list(dict.fromkeys(tickers))
+    results, errors = {}, []
+
+    def worker(symbol):
+        try:
+            update_dhan_symbol(symbol, start, end)
+            con = _db()
+            try:
+                d = _read_cache(
+                    con, str(symbol).upper().replace(".NS",""), start, end
+                )
+            finally:
+                con.close()
+            return symbol, d, None
+        except Exception as e:
+            return symbol, pd.DataFrame(), str(e)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(worker, s): s for s in tickers}
+        for fut in as_completed(futures):
+            symbol, d, err = fut.result()
+            if err:
+                errors.append(f"{symbol}: {err}")
+            elif not d.empty:
+                results[symbol] = d
+
+    if errors:
+        _metric_set("last_dhan_errors", errors[:50])
+    _metric_set("last_cache_symbols", len(results))
+    return results
+
+def _row_score(f, i, strategy, regime, safety_score):
+    """
+    Fast historical score from the precomputed feature matrix.
+    Used by the learning/backtest engine so it doesn't rebuild features
+    for every historical date.
+    """
+    if i < 0 or i >= len(f):
+        return 0, {}
+    hist = f.iloc[:i+1]
+    return final_setup_score(hist, strategy, regime, safety_score)
+
+def _fast_trade_outcome(df, entry_i, stop, target, max_bars=250):
+    future = df.iloc[entry_i+1:entry_i+1+max_bars]
+    if future.empty:
+        return "OPEN", float(df.close.iloc[entry_i]), len(future)
+
+    for n, (_, bar) in enumerate(future.iterrows(), start=1):
+        # Conservative: if both stop and target are touched in one bar,
+        # count the stop first.
+        if float(bar.low) <= stop:
+            return "LOSS", float(stop), n
+        if float(bar.high) >= target:
+            return "WIN", float(target), n
+    return "OPEN", float(future.close.iloc[-1]), len(future)
+
+def _fast_score_learning_backtest(data, strategies, threshold=85):
+    rows = []
+    start = pd.Timestamp.today().normalize() - pd.DateOffset(years=2)
+
+    for ticker, df in data.items():
+        if df is None or len(df) < 320:
+            continue
+        try:
+            df = df.sort_index()
+            f = features_fast(str(ticker), df)
+            if f.empty:
+                continue
+
+            # Market regime is evaluated once at each candidate using only data
+            # known up to the candidate date. To keep execution sharp, use the
+            # precomputed daily regime columns where possible.
+            for s in strategies:
+                sig = strategy_signal(f, s).fillna(False).to_numpy()
+                idxs = np.flatnonzero(sig)
+
+                for i in idxs:
+                    dt = pd.Timestamp(f.index[i])
+                    if dt < start or i >= len(f)-1:
+                        continue
+
+                    hist = f.iloc[:i+1]
+                    regime, _ = regime_from_index(hist)
+                    safe, _, _ = safety({}, df.iloc[:i+1])
+                    score, parts = _row_score(f, i, s, regime, safe)
+
+                    if score < threshold:
+                        continue
+
+                    entry_i = i + 1
+                    entry = float(df.close.iloc[entry_i])
+                    stop = entry * 0.93
+                    target = entry + 3 * (entry-stop)
+
+                    outcome, exit_price, holding = _fast_trade_outcome(
+                        df, entry_i, stop, target
+                    )
+                    result_r = (exit_price-entry) / (entry-stop)
+
+                    rows.append({
+                        "Date": dt.date(),
+                        "Ticker": str(ticker).replace(".NS",""),
+                        "Strategy": f"S{s}",
+                        "Score": score,
+                        "Entry": round(entry,2),
+                        "SL": round(stop,2),
+                        "Target": round(target,2),
+                        "Outcome": outcome,
+                        "R": round(float(result_r),2),
+                        "Holding Bars": holding,
+                        "Strategy Score": parts["Strategy"],
+                        "HTF": parts["HTF Demand"],
+                        "Footprint": parts["Footprint"],
+                        "Entry Quality": parts["Entry Quality"],
+                        "Relative Strength": parts["Relative Strength"],
+                        "Regime": regime,
+                        "Safety": safe
+                    })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+def _learn_from_backtest(bt):
+    if bt is None or bt.empty:
+        return
+
+    con = _db()
+    try:
+        for _, r in bt.iterrows():
+            con.execute("""
+                INSERT INTO learning_observations(
+                    created_at,market,symbol,strategy,signal_dt,score,learned_score,
+                    result_r,outcome,holding_bars,regime,htf,footprint,strategy_score,
+                    entry_quality,relative_strength,safety_score,source
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                datetime.now().isoformat(timespec="seconds"),
+                "INDIA",
+                r["Ticker"],
+                r["Strategy"],
+                str(r["Date"]),
+                float(r["Score"]),
+                float(r["Score"]),
+                float(r["R"]),
+                str(r["Outcome"]),
+                int(r.get("Holding Bars", 0)),
+                str(r.get("Regime","")),
+                float(r.get("HTF", np.nan)),
+                float(r.get("Footprint", np.nan)),
+                float(r.get("Strategy Score", np.nan)),
+                float(r.get("Entry Quality", np.nan)),
+                float(r.get("Relative Strength", np.nan)),
+                float(r.get("Safety", np.nan)),
+                "backtest"
+            ))
+        con.commit()
+    finally:
+        con.close()
+
+def adaptive_edge_table(market="INDIA"):
+    q = learning_snapshot(market)
+    if q.empty:
+        return pd.DataFrame()
+
+    # Empirical-Bayes style shrinkage toward 50% / 0R for small samples.
+    rows = []
+    for (strategy, band), g in q.assign(
+        ScoreBand=pd.cut(
+            q.score, bins=[-np.inf,84,89,94,np.inf],
+            labels=["<85","85-89","90-94","95-100"]
+        )
+    ).groupby(["strategy","ScoreBand"], observed=True):
+        n = len(g)
+        wins = int((g.result_r > 0).sum())
+        alpha, beta = 2.0, 2.0
+        shrunk_win = (wins + alpha) / (n + alpha + beta)
+        shrink_r = (g.result_r.mean() * n) / max(n + 10, 1)
+        rows.append({
+            "Strategy": strategy,
+            "Score Band": str(band),
+            "Samples": n,
+            "Win % (shrunk)": round(shrunk_win*100,1),
+            "Avg R (shrunk)": round(shrink_r,3)
+        })
+    return pd.DataFrame(rows).sort_values(
+        ["Strategy","Score Band"]
+    )
+
+def current_candidate_edge(market, strategy, score):
+    q = adaptive_edge_table(market)
+    if q.empty:
+        return 0.0, "NO LEARNING DATA"
+
+    band = "85-89" if 85 <= score <= 89 else "90-94" if score <= 94 else "95-100" if score >= 95 else "<85"
+    row = q[(q.Strategy == strategy) & (q["Score Band"] == band)]
+    if row.empty or int(row.iloc[0]["Samples"]) < 20:
+        return 0.0, "INSUFFICIENT SAMPLE"
+    r = float(row.iloc[0]["Avg R (shrunk)"])
+    conf = "HIGH" if int(row.iloc[0]["Samples"]) >= 100 else "MEDIUM"
+    return r, conf
+
+
 # ========================= BACKTEST =========================
 
 def run_backtest(d,sig,capital,risk,sl,rr,slip=.001):
@@ -1443,6 +1790,17 @@ with tabs[1]:
 
     best_top_placeholder = st.empty()
 
+    st.subheader("⚡ Continuous Scan Mode")
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.metric("Historical cache", "ON")
+    cc2.metric("Feature cache", "ON")
+    cc3.metric("Live layer", "Dhan WebSocket")
+    st.caption(
+        "Daily/weekly/monthly strategy state is cached. The live layer tracks only candidates and "
+        "re-ranks them from the Dhan feed instead of rebuilding the entire market every minute."
+    )
+
+
     if st.button("🔄 Scan Market Now", type="primary", key="scan_button_v4"):
         try:
             if not dhan_configured():
@@ -1456,10 +1814,11 @@ with tabs[1]:
                 st.stop()
 
             idx_tickers = index_universe("Nifty 500")
-            idx_data = download_prices(
+            idx_data = build_fast_data_cache(
                 tuple(idx_tickers),
                 date.today()-timedelta(days=1000),
-                date.today()
+                date.today(),
+                max_workers=10
             )
 
             if not idx_data:
@@ -1474,11 +1833,14 @@ with tabs[1]:
                 universe.update(index_universe(u))
             tickers = sorted(universe)
 
-            data = download_prices(
+            t0 = time.perf_counter()
+            data = build_fast_data_cache(
                 tuple(tickers),
                 date.today()-timedelta(days=1000),
-                date.today()
+                date.today(),
+                max_workers=10
             )
+            scan_load_seconds = time.perf_counter() - t0
 
             if not data:
                 st.error(
@@ -1504,7 +1866,7 @@ with tabs[1]:
                     bar.progress((n+1)/max(1,len(data)))
                     continue
 
-                f = features(df)
+                f = features_fast(str(ticker), df)
                 # Keep the latest row even when some long-term indicators are unavailable.
                 # Individual strategy conditions will evaluate NaNs as False.
                 f = f.replace([np.inf, -np.inf], np.nan)
@@ -1540,8 +1902,15 @@ with tabs[1]:
                     stop = entry * .93
                     target = entry + 3*(entry-stop)
 
+                    edge_r, learn_conf = current_candidate_edge(
+                        "INDIA", f"S{s}", float(score)
+                    )
+                    learned_rank = float(np.clip(score + edge_r * 2.0, 0, 100))
                     rows.append({
                         "Score": score,
+                        "Learned Rank": round(learned_rank, 2),
+                        "Historical Edge R": round(edge_r, 3),
+                        "Learning Confidence": learn_conf,
                         "Ticker": ticker.replace(".NS",""),
                         "Strategy": f"S{s}",
                         "Signal": "ALL RULES PASS",
@@ -1844,91 +2213,7 @@ with tabs[1]:
 
 # ========================= RESEARCH MODULES =========================
 def _two_year_backtest(data, strategies, threshold=85):
-    """
-    V21 fast backtest.
-    Signal discovery is vectorized after a single feature build per stock.
-    The threshold is applied after the deterministic signal is found.
-    """
-    rows = []
-    end = pd.Timestamp.today().normalize()
-    start_date = end - pd.DateOffset(years=2)
-
-    for ticker, df in data.items():
-        if df is None or len(df) < 300:
-            continue
-        try:
-            df = df.sort_index()
-            f = features_cached(str(ticker), df).replace([np.inf, -np.inf], np.nan)
-            if f.empty:
-                continue
-
-            # Historical signal indices are generated once.
-            for s in strategies:
-                sig = strategy_signal(f, s).fillna(False).to_numpy()
-                indices = np.flatnonzero(sig)
-                for i in indices:
-                    dt = f.index[i]
-                    if dt < start_date or dt > end:
-                        continue
-                    if i >= len(f) - 1:
-                        continue
-
-                    # Score is evaluated only on an actual historical signal.
-                    hist = f.iloc[:i+1]
-                    try:
-                        regime, _ = regime_from_index(hist)
-                    except Exception:
-                        regime = "UNKNOWN"
-                    safe, _, _ = safety({}, df.iloc[:i+1])
-                    score, parts = final_setup_score(hist, s, regime, safe)
-                    if score < threshold:
-                        continue
-
-                    entry_i = i + 1
-                    entry = float(f.close.iloc[entry_i])
-                    sl = entry * 0.93
-                    target = entry + 3 * (entry - sl)
-                    future = df.iloc[entry_i+1:]
-
-                    outcome = "OPEN"
-                    exit_price = float(future.close.iloc[-1]) if not future.empty else entry
-                    exit_idx = future.index[-1] if not future.empty else f.index[entry_i]
-
-                    for future_dt, bar in future.iterrows():
-                        if float(bar.low) <= sl:
-                            outcome = "LOSS"
-                            exit_price = sl
-                            exit_idx = future_dt
-                            break
-                        if float(bar.high) >= target:
-                            outcome = "WIN"
-                            exit_price = target
-                            exit_idx = future_dt
-                            break
-
-                    r = (exit_price - entry) / (entry - sl)
-                    rows.append({
-                        "Date": dt.date(),
-                        "Ticker": str(ticker).replace(".NS",""),
-                        "Strategy": f"S{s}",
-                        "Score": score,
-                        "Entry": round(entry,2),
-                        "SL": round(sl,2),
-                        "Target": round(target,2),
-                        "Outcome": outcome,
-                        "R": round(r,2),
-                        "Strategy Score": parts["Strategy"],
-                        "HTF": parts["HTF Demand"],
-                        "Footprint": parts["Footprint"],
-                        "Entry Quality": parts["Entry Quality"],
-                        "Relative Strength": parts["Relative Strength"],
-                        "Regime": regime,
-                        "Safety": safe,
-                        "Exit Date": exit_idx.date() if hasattr(exit_idx, "date") else exit_idx
-                    })
-        except Exception:
-            continue
-    return pd.DataFrame(rows)
+    return _fast_score_learning_backtest(data, strategies, threshold)
 
 def _learning_summary(bt):
     if bt.empty:return pd.DataFrame()
@@ -1999,6 +2284,17 @@ with tabs[4]:
                 rows.append({"Component":c,"High Avg R":round(float(hi.R.mean()),2) if len(hi) else 0,"Low Avg R":round(float(lo.R.mean()),2) if len(lo) else 0,"High Win %":round(float((hi.Outcome=="WIN").mean()*100),1) if len(hi) else 0})
         st.subheader("Marking Component Learning"); st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
 
+        st.subheader("🎯 Adaptive Score Edge")
+        edge = adaptive_edge_table("INDIA")
+        if edge.empty:
+            st.info("No completed learning sample yet.")
+        else:
+            st.dataframe(edge, use_container_width=True, hide_index=True)
+            st.caption(
+                "The learned edge ranks candidates; it does not change S1–S4 qualification. "
+                "Small samples are shrunk toward neutral values."
+            )
+
         st.divider()
         st.subheader("🔁 Adaptive Learning Database")
         learn_db = learning_snapshot("INDIA")
@@ -2015,7 +2311,7 @@ with tabs[4]:
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals")
-    st.warning("Fundamental API is not connected yet. Dhan price/volume data is intentionally kept separate from fundamentals.")
+    st.warning("Fundamental API is not connected yet. Dhan price/volume data remains intentionally separate from fundamentals.")
     st.write("This tab is ready for the future fundamental API: quality filters, growth, ROE/ROCE, debt, cash flow and valuation.")
 
 with tabs[6]:
@@ -2146,6 +2442,18 @@ with tabs[9]:
             if not d.empty:
                 st.dataframe(d.tail(200),use_container_width=True)
                 st.caption(f"Data source: Twelve Data | {market} | {symbol} | {tf}")
+
+                if market == "Crypto":
+                    st.subheader("🧠 Crypto Continuous Learning")
+                    cq = crypto_learning_summary(symbol)
+                    if cq.empty:
+                        st.info("No completed crypto-learning observations yet.")
+                    else:
+                        ca, cb, cc = st.columns(3)
+                        ca.metric("Observations", len(cq))
+                        cb.metric("Win %", round(float((cq.result_r > 0).mean()*100), 1))
+                        cc.metric("Avg R", round(float(cq.result_r.mean()), 3))
+                        st.dataframe(cq.head(200), use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Strategy Rules")
