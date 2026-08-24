@@ -63,8 +63,10 @@ return con
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def dhan_master():
-urls = ["https://images.dhan.co/api-data/api-scrip-master.csv",
-"https://images.dhan.co/api-data/api-scrip-master-detailed.csv"]
+urls = [
+"https://images.dhan.co/api-data/api-scrip-master.csv",
+"https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
+]
 last = ""
 for u in urls:
 try:
@@ -89,14 +91,14 @@ raise RuntimeError("Dhan symbol/Security ID columns not found")
 keep = [sym, sid] + ([ex] if ex else []) + ([seg] if seg else [])
 m = m[keep].copy()
 names = ["symbol", "security_id"] + ((["exchange"] if ex else []) + (["segment"] if seg else []))
+
+Stock market:
 m.columns = names
 m.symbol = m.symbol.astype(str).str.upper().str.strip()
 if ex:
 m = m[m.exchange.astype(str).str.upper().isin(["NSE", "NSE_EQ"])]
 if seg:
 sv = m.segment.astype(str).str.upper().str.strip()
-
-Stock market:
 q = sv.isin(["E", "EQUITY", "NSE_EQ"])
 if q.any():
 m = m[q]
@@ -108,8 +110,11 @@ sid = dhan_map().get(clean)
 if not sid:
 raise ValueError("Security ID not found: " + clean)
 payload = {
-"securityId": sid, "exchangeSegment": "NSE_EQ", "instrument": "EQUITY",
-"expiryCode": 0, "oi": False,
+"securityId": sid,
+"exchangeSegment": "NSE_EQ",
+"instrument": "EQUITY",
+"expiryCode": 0,
+"oi": False,
 "fromDate": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
 "toDate": pd.Timestamp(end_date).strftime("%Y-%m-%d")
 }
@@ -156,18 +161,20 @@ finally:
 con.close()
 
 def _read_cache(con, s, start_date, end_date):
-d = pd.read_sql_query("""SELECT dt,open,high,low,close,volume FROM candles
-WHERE symbol=? AND dt>=? AND dt<=? ORDER BY dt""", con,
-params=(s, pd.Timestamp(start_date).strftime("%Y-%m-%d"), pd.Timestamp(end_date).strftime("%Y-%m-%d")))
+d = pd.read_sql_query(
+"""SELECT dt,open,high,low,close,volume FROM candles
+WHERE symbol=? AND dt>=? AND dt<=? ORDER BY dt""",
+con,
+params=(s, pd.Timestamp(start_date).strftime("%Y-%m-%d"), pd.Timestamp(end_date).strftime("%Y-%m-%d"))
+)
 if d.empty:
 return pd.DataFrame()
-d.dt = pd.to_datetime(d.dt)
+d["dt"] = pd.to_datetime(d["dt"])
 d = d.set_index("dt")
 d.index.name = "date"
 return d
 
 def download_prices(tickers, start, end, max_workers=6):
-"""Faster & more reliable download."""
 if not dhan_configured():
 raise RuntimeError("Dhan credentials are not configured")
 dhan_map()
@@ -189,6 +196,7 @@ symbol, success, err = future.result()
 if not success:
 errors.append(f"{symbol}: {err}")
 
+Stock market:
 con = _db()
 try:
 for t in tickers:
@@ -206,15 +214,16 @@ return results
 
 def dhan_live_ltp(symbols):
 mp = dhan_map()
-pairs = [(mp[s.replace(".NS", "").upper()], s.replace(
-
-Stock market:
-".NS", "").upper())
+pairs = [(mp[s.replace(".NS", "").upper()], s.replace(".NS", "").upper())
 for s in symbols if s.replace(".NS", "").upper() in mp]
 if not pairs:
 return {}
-r = requests.post(f"{DHAN_BASE_URL}/marketfeed/ltp", headers=_dhan_headers(),
-json={"NSE_EQ": [int(a) for a, b in pairs]}, timeout=20)
+r = requests.post(
+f"{DHAN_BASE_URL}/marketfeed/ltp",
+headers=_dhan_headers(),
+json={"NSE_EQ": [int(a) for a, b in pairs]},
+timeout=20
+)
 r.raise_for_status()
 raw = r.json().get("data", {}).get("NSE_EQ", {})
 rev = {a: b for a, b in pairs}
@@ -237,8 +246,11 @@ return pd.DataFrame()
 
 
 # ========================= INDICATORS =========================
-def ema(s, n): return s.ewm(span=n, adjust=False, min_periods=n).mean()
-def sma(s, n): return s.rolling(n, min_periods=n).mean()
+def ema(s, n):
+return s.ewm(span=n, adjust=False, min_periods=n).mean()
+
+def sma(s, n):
+return s.rolling(n, min_periods=n).mean()
 
 def rsi(s, n=14):
 d = s.diff()
@@ -269,8 +281,11 @@ x["vol30"] = sma(x.volume, 30)
 x["rsi14"] = rsi(x.close)
 x["relvol"] = x.volume / x.vol20
 
-tr = pd.concat([x.high - x.low, (x.high - x.close.shift()).abs(),
-(x.low - x.close.shift()).abs()], axis=1).max(axis=1)
+tr = pd.concat([
+x.high - x.low,
+(x.high - x.close.shift()).abs(),
+(x.low - x.close.shift()).abs()
+], axis=1).max(axis=1)
 x["atr14"] = tr.rolling(14).mean()
 
 w = _weekly_asof(x)
@@ -288,6 +303,8 @@ x["wclose"] = [v.get("close", np.nan) for v in wkvals]
 
 m = _monthly_asof(x)
 m["rsi14"] = rsi(m.close, 14)
+
+Stock market:
 m["ema10"] = ema(m.close, 10)
 m["ema15"] = ema(m.close, 15)
 m["ema20"] = ema(m.close, 20)
@@ -306,10 +323,7 @@ mm = m[m.index.to_period("M") <= dt.to_period("M")]
 vals.append(mm.iloc[-1] if not mm.empty else pd.Series(dtype=float))
 x["mclose"] = [v.get("close", np.nan) for v in vals]
 x["mopen"] = [v.get("open", np.nan) for v in vals]
-x["mhigh"] = [v.ge
-
-Stock market:
-t("high", np.nan) for v in vals]
+x["mhigh"] = [v.get("high", np.nan) for v in vals]
 x["mlow"] = [v.get("low", np.nan) for v in vals]
 x["mrsi14"] = [v.get("rsi14", np.nan) for v in vals]
 x["mema10"] = [v.get("ema10", np.nan) for v in vals]
@@ -373,6 +387,7 @@ return (
 ((bullish_20_50_count == 1) | (bullish_50_200_count == 1))
 )
 
+Stock market:
 if s == 3:
 vwap = (x.close * x.volume).rolling(20).sum() / x.volume.rolling(20).sum()
 vwap_ema = ema(vwap, 20)
@@ -396,10 +411,7 @@ return pd.Series(False, index=x.index)
 
 
 # ========================= REGIME + SCORING =========================
-def regime_from
-
-Stock market:
-_index(d):
+def regime_from_index(d):
 x = features(d).dropna()
 if len(x) < 30:
 return "UNKNOWN", 0
@@ -411,28 +423,39 @@ score += 15 if z.ema200 > x.ema200.iloc[-20] else 0
 score += 15 if z.rsi14 >= 55 else 0
 score += 10 if z.close > z.ema20 else 0
 score += 15 if z.relvol >= 1 else 0
-if score >= 75: return "STRONG BULL", score
-if score >= 60: return "BULL", score
-if score >= 45: return "RECOVERY / SIDEWAYS", score
-if score >= 30: return "EARLY BEAR", score
+if score >= 75:
+return "STRONG BULL", score
+if score >= 60:
+return "BULL", score
+if score >= 45:
+return "RECOVERY / SIDEWAYS", score
+if score >= 30:
+return "EARLY BEAR", score
 return "BEAR", score
 
 def safety(info, d):
 score = 100
 flags = []
 avg_value = float((d.close * d.volume).tail(20).mean()) if d is not None and not d.empty else 0
-if avg_value < 2_000_000: score -= 30; flags.append("Low traded value")
-if avg_value < 500_000: score -= 20; flags.append("Very low liquidity")
+if avg_value < 2_000_000:
+score -= 30
+flags.append("Low traded value")
+if avg_value < 500_000:
+score -= 20
+flags.append("Very low liquidity")
 if d is not None and len(d) >= 30:
 r = d.close.pct_change().tail(30)
-if (r.abs() > 0.15).sum() >= 3: score -= 15; flags.append("Abnormal volatility")
+if (r.abs() > 0.15).sum() >= 3:
+score -= 15
+flags.append("Abnormal volatility")
 score = max(0, min(100, score))
 status = "ELIGIBLE" if score >= 70 else ("CAUTION" if score >= 50 else "REJECT")
 return score, status, flags
 
 def htf_confluence(x):
 def _zone_score(x, lookback, tolerance=0.035):
-if len(x) < lookback + 10: return 0
+if len(x) < lookback + 10:
+return 0
 recent = x.tail(lookback)
 low = float(recent.low.min())
 price = float(x.close.iloc[-1])
@@ -441,11 +464,16 @@ near = distance <= tolerance
 reaction = (float(recent.close.max()) / low - 1) if low > 0 else 0
 tests = int((recent.low <= low * (1 + tolerance)).sum())
 points = 0
-if near: points += 5
-if reaction >= 0.20: points += 4
-elif reaction >= 0.10: points += 2
-if tests <= 2: points += 2
-elif tests <= 4: points += 1
+if near:
+points += 5
+if reaction >= 0.20:
+points += 4
+elif reaction >= 0.10:
+points += 2
+if tests <= 2:
+points += 2
+elif tests <= 4:
+points += 1
 return min(points, 11)
 q = _zone_score(x, 252, 0.06)
 m = _zone_score(x, 126, 0.045)
@@ -453,7 +481,8 @@ w = _zone_score(x, 60, 0.035)
 return int(round(min(20, q * 0.75 + m * 0.75 + w * 0.5)))
 
 def footprint_score(x):
-if len(x) < 60: return 0
+if len(x) < 60:
+return 0
 z = x.iloc[-1]
 score = 0
 recent_range = ((x.high - x.low) / x.close).tail(10).mean()
@@ -464,16 +493,24 @@ v_recent = x.volume.tail(10).mean()
 v_prior = x.volume.tail(40).head(30).mean()
 if pd.notna(v_recent) and pd.notna(v_prior) and v_recent < v_prior * 0.9:
 score += 3
-if pd.notna(z.relvol) and z.relvol >= 1.5: score += 4
-elif pd.notna(z.relvol) and z.relvol >= 1.2: score += 2
+if pd.notna(z.relvol) and z.relvol >= 1.5:
+
+Stock market:
+score += 4
+elif pd.notna(z.relvol) and z.relvol >= 1.2:
+score += 2
 day_range = float(z.high - z.low)
 if day_range > 0:
 close_location = (float(z.close) - float(z.low)) / day_range
-if close_location >= 0.75: score += 3
-elif close_location >= 0.60: score += 1
+if close_location >= 0.75:
+score += 3
+elif close_location >= 0.60:
+score += 1
 extension = float(z.close / z.ema20 - 1) if pd.notna(z.ema20) else np.nan
-if np.isfinite(extension) and 0 <= extension <= 0.04: score += 3
-if pd.notna(z.ema50) and z.close > z.ema50: score += 3
+if np.isfinite(extension) and 0 <= extension <= 0.04:
+score += 3
+if pd.notna(z.ema50) and z.close > z.ema50:
+score += 3
 return int(min(20, score))
 
 def strategy_quality_score(x, s):
@@ -495,10 +532,7 @@ p += 10 if z.wrsi14 >= 55 else 6 if z.wrsi14 >= 45 else 0
 elif s == 4:
 p += 10 if z.mmom >= 30 else 7 if z.mmom >= 25 else 4 if z.mmom >= 20 else 0
 p += 10 if z.mema10 > z.mema20 else 0
-p += 10 if z.close <
-
-Stock market:
-= z.ema20 * 1.02 else 5 if z.close <= z.ema20 * 1.03 else 0
+p += 10 if z.close <= z.ema20 * 1.02 else 5 if z.close <= z.ema20 * 1.03 else 0
 return int(min(30, p))
 
 def final_setup_score(x, s, regime, safety_score):
@@ -519,9 +553,14 @@ market = 5 if regime == "STRONG BULL" else 4 if regime == "BULL" else 2 if regim
 safety_points = 5 if safety_score >= 90 else 4 if safety_score >= 80 else 3 if safety_score >= 70 else 0
 total = strategy + htf + footprint + trend + entry + rel + market + safety_points
 return int(max(0, min(100, total))), {
-"Strategy": strategy, "HTF Demand": htf, "Footprint": footprint,
-"Trend": trend, "Entry Quality": entry, "Relative Strength": rel,
-"Market Regime": market, "Safety": safety_points
+"Strategy": strategy,
+"HTF Demand": htf,
+"Footprint": footprint,
+"Trend": trend,
+"Entry Quality": entry,
+"Relative Strength": rel,
+"Market Regime": market,
+"Safety": safety_points
 }
 
 
@@ -554,6 +593,8 @@ score, parts = final_setup_score(f, s, regime, safe)
 if score < threshold:
 continue
 entry = float(hist.close.iloc[-1])
+
+Stock market:
 sl = entry * 0.93
 target = entry + 3 * (entry - sl)
 future = df[df.index > dt]
@@ -571,12 +612,20 @@ outcome = "WIN"
 exit_price = target
 break
 rows.append({
-"Date": dt.date(), "Ticker": ticker.replace(".NS", ""),
-"Strategy": f"S{s}", "Score": score,
-"Entry": round(entry, 2), "SL": round(sl, 2), "Target": round(target, 2),
-"Outcome": outcome, "R": round((exit_price - entry) / (entry - sl), 2),
-"Strategy Score": parts["Strategy"], "HTF": parts["HTF Demand"],
-"Footprint": parts["Footprint"], "Regime": regime, "Safety": safe
+"Date": dt.date(),
+"Ticker": ticker.replace(".NS", ""),
+"Strategy": f"S{s}",
+"Score": score,
+"Entry": round(entry, 2),
+"SL": round(sl, 2),
+"Target": round(target, 2),
+"Outcome": outcome,
+"R": round((exit_price - entry) / (entry - sl), 2),
+"Strategy Score": parts["Strategy"],
+"HTF": parts["HTF Demand"],
+"Footprint": parts["Footprint"],
+"Regime": regime,
+"Safety": safe
 })
 return pd.DataFrame(rows)
 
@@ -587,8 +636,11 @@ return pd.DataFrame()
 x = bt.copy()
 x["Win"] = (x.Outcome == "WIN").astype(int)
 y = x.groupby("Strategy").agg(
-Signals=("Ticker", "count"), Wins=("Win", "sum"),
-WinRate=("Win", "mean"), AvgR=("R", "mean"), BestScore=("Score", "max")
+Signals=("Ticker", "count"),
+Wins=("Win", "sum"),
+WinRate=("Win", "mean"),
+AvgR=("R", "mean"),
+BestScore=("Score", "max")
 ).reset_index()
 y["WinRate"] = (y.WinRate * 100).round(1)
 y["AvgR"] = y.AvgR.round(2)
@@ -597,10 +649,7 @@ return y
 
 # ========================= UI =========================
 st.title("🧠 Adaptive Trading Intelligence Lab")
-st.caption("Faster scanning • Flexible backtesting • Multi-strategy
-
-Stock market:
-• ≥85 gate • Learning engine")
+st.caption("Faster scanning • Flexible backtesting • Multi-strategy • ≥85 gate • Learning engine")
 
 tabs = st.tabs([
 "🏠 Dashboard", "📡 Daily Scanner", "📊 Backtest", "🔬 Forward Testing",
@@ -649,6 +698,7 @@ if not selected_strategies or not universes:
 st.warning("Select at least one strategy and universe.")
 st.stop()
 
+Stock market:
 with st.spinner("Downloading data (this is the slowest part)..."):
 idx_tickers = index_universe("Nifty 500")
 idx_data = download_prices(tuple(idx_tickers), date.today() - timedelta(days=1000), date.today(), max_workers=6)
@@ -670,7 +720,6 @@ st.stop()
 
 rows = []
 bar = st.progress(0)
-stats = {"usable": 0, "signals": {1: 0, 2: 0, 3: 0, 4: 0}, "qualified": {1: 0, 2: 0, 3: 0, 4: 0}}
 
 for n, (ticker, df) in enumerate(data.items()):
 if len(df) < 260:
@@ -680,29 +729,32 @@ f = features(df).replace([np.inf, -np.inf], np.nan)
 if len(f) < 260:
 bar.progress((n + 1) / max(1, len(data)))
 continue
-stats["usable"] += 1
 safe, safe_status, flags = safety({}, df)
 
 for s in selected_strategies:
 sig = strategy_signal(f, s)
 if not bool(sig.iloc[-1]):
 continue
-stats["signals"][s] += 1
 score, parts = final_setup_score(f, s, regime, safe)
-stats["qualified"][s] += 1
 z = f.iloc[-1]
 entry = float(z.close)
 stop = entry * 0.93
 target = entry + 3 * (entry - stop)
 rows.append({
-"Score": score, "Ticker": ticker.replace(".NS", ""), "Strategy": f"S{s}",
-
-Stock market:
-"Regime": regime, "Safety": safe_status,
-"Entry": round(entry, 2), "SL 7%": round(stop, 2), "Target 3R": round(target, 2),
-"RSI": round(float(z.rsi14), 1), "RelVol": round(float(z.relvol), 2),
-"HTF Score": parts["HTF Demand"], "Footprint Score": parts["Footprint"],
-"Strategy Score": parts["Strategy"], "Entry Quality": parts["Entry Quality"],
+"Score": score,
+"Ticker": ticker.replace(".NS", ""),
+"Strategy": f"S{s}",
+"Regime": regime,
+"Safety": safe_status,
+"Entry": round(entry, 2),
+"SL 7%": round(stop, 2),
+"Target 3R": round(target, 2),
+"RSI": round(float(z.rsi14), 1),
+"RelVol": round(float(z.relvol), 2),
+"HTF Score": parts["HTF Demand"],
+"Footprint Score": parts["Footprint"],
+"Strategy Score": parts["Strategy"],
+"Entry Quality": parts["Entry Quality"],
 "Safety Score": safe
 })
 bar.progress((n + 1) / max(1, len(data)))
@@ -712,7 +764,7 @@ if result.empty:
 st.warning("No setups found today.")
 else:
 result = result.sort_values(["Score", "Strategy"], ascending=[False, True])
-st.subheader("🏆 High Quality Setups (Score ≥ " + str(min_score) + ")")
+st.subheader(f"🏆 High Quality Setups (Score ≥ {min_score})")
 high = result[result["Score"] >= min_score]
 if high.empty:
 st.info("No setup currently meets the score gate.")
@@ -734,6 +786,7 @@ f"≥{min_score}": int((sr["Score"] >= min_score).sum()) if not sr.empty else 0,
 })
 st.dataframe(pd.DataFrame(cov), use_container_width=True, hide_index=True)
 
+Stock market:
 except Exception as e:
 st.error(f"Scanner error: {e}")
 
@@ -783,4 +836,43 @@ con.close()
 if ft.empty:
 st.info("No forward-test records yet.")
 else:
-a, b, c, d
+a, b, c, d = st.columns(4)
+a.metric("Total", len(ft))
+b.metric("Active", int((ft.status == "ACTIVE").sum()))
+c.metric("Positive R", int((ft.result_r > 0).sum()))
+d.metric("Avg R", round(float(ft.result_r.dropna().mean()), 2) if ft.result_r.notna().any() else 0)
+st.dataframe(ft.sort_values("score", ascending=False), use_container_width=True, hide_index=True)
+
+with tabs[4]:
+st.subheader("🧠 Market Learning")
+bt = st.session_state.get("backtest_v19", pd.DataFrame())
+if bt.empty:
+st.info("Run a backtest first.")
+else:
+st.dataframe(_learning_summary(bt), use_container_width=True, hide_index=True)
+st.subheader("Component Importance")
+rows = []
+for c in ["HTF", "Footprint", "Strategy Score", "Safety"]:
+if c in bt.columns:
+med = bt[c].median()
+hi = bt[bt[c] >= med]
+lo = bt[bt[c] < med]
+rows.append({
+"Component": c,
+"High Avg R": round(float(hi.R.mean()), 2) if len(hi) else 0,
+"Low Avg R": round(float(lo.R.mean()), 2) if len(lo) else 0,
+"High Win %": round(float((hi.Outcome == "WIN").mean() * 100), 1) if len(hi) else 0
+})
+st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+with tabs[5]:
+st.subheader("💎 Long-Term Fundamentals")
+st.warning("Fundamental API not connected yet.")
+
+with tabs[6]:
+st.subheader("🏢 Small/Micro Safety")
+st.caption("Independent risk layer.")
+
+with tabs[7]:
+st.subheader("⚡ Live Monitor")
+st.info("WebSocket live monitoring (uses existing Dhan feed).")
