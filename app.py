@@ -2010,14 +2010,14 @@ def _bt_file(symbol):
     return BT_CACHE_DIR/(str(symbol).upper().replace('.NS','').replace('/','_')+'.pkl')
 
 def build_local_backtest_dataset(tickers,start_date,end_date):
-    """Build a reusable local dataset with indicator warm-up history.
+    """Materialise the backtest dataset from LOCAL candles only.
 
-    The requested backtest window is preserved, but additional history is
-    downloaded before the window so EMA250/weekly/monthly features have enough
-    information. This dataset is then reused by scanner/backtest/research.
+    IMPORTANT: this function NEVER calls Dhan.  Historical data acquisition is
+    owned exclusively by sync_missing_backtest_data().  If candles already
+    exist in market_data.sqlite3, they are copied into the per-symbol research
+    cache without any network request.
     """
     data_start=_bt_required_data_start(start_date)
-    download_prices(tuple(tickers),data_start,end_date,max_workers=8)
     con=_db(); ready=0; missing=[]
     try:
         for t in tickers:
@@ -2029,19 +2029,52 @@ def build_local_backtest_dataset(tickers,start_date,end_date):
     finally: con.close()
     return ready,missing
 
+def sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5):
+    """EXPLICIT DATA SYNC: the only backtest function allowed to call Dhan.
+
+    It first checks the persistent candle database. Dhan is contacted only for
+    symbols whose local range is missing/incomplete. After sync, the local
+    backtest cache is materialised from SQLite.
+    """
+    data_start=_bt_required_data_start(start_date)
+    # update_dhan_symbol() itself performs range-aware missing-range downloads.
+    return download_prices(tuple(tickers),data_start,end_date,max_workers=max_workers)
+
 def local_backtest_status(tickers,start_date,end_date):
+    """Readiness check from the persistent LOCAL candle database.
+
+    This check never contacts Dhan and never downloads anything.  It also
+    materialises a missing per-symbol pickle from SQLite when sufficient local
+    candles already exist, eliminating the old repeated-download behaviour.
+    """
     data_start=_bt_required_data_start(start_date)
     rows=[]
-    for t in tickers:
-        f=_bt_file(t); ok=False; n=0; a=None; b=None
-        if f.exists():
-            try:
-                d=pd.read_pickle(f); d.index=pd.to_datetime(d.index)
-                d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))]
-                n=len(d); ok=n>=260
-                if not d.empty:a=d.index.min().date();b=d.index.max().date()
-            except Exception:pass
-        rows.append({'Ticker':str(t).replace('.NS',''),'Bars':n,'Ready':ok,'Start':a,'End':b})
+    con=_db()
+    try:
+        for t in tickers:
+            s=str(t).upper().replace('.NS','')
+            d=_read_cache(con,s,data_start,end_date)
+            n=len(d) if d is not None else 0
+            ok=n>=260
+            a=d.index.min().date() if ok and not d.empty else None
+            b=d.index.max().date() if ok and not d.empty else None
+            if ok:
+                f=_bt_file(s)
+                try:
+                    # Re-materialise only when absent/stale; still LOCAL ONLY.
+                    if (not f.exists()) or f.stat().st_mtime < 0:
+                        d.sort_index().to_pickle(f)
+                    else:
+                        # Verify the cached file covers the same requested range.
+                        cached=pd.read_pickle(f)
+                        cached.index=pd.to_datetime(cached.index)
+                        if len(cached)<260 or cached.index.min()>pd.Timestamp(data_start) or cached.index.max()<pd.Timestamp(end_date):
+                            d.sort_index().to_pickle(f)
+                except Exception:
+                    d.sort_index().to_pickle(f)
+            rows.append({'Ticker':str(t).replace('.NS',''),'Bars':n,'Ready':ok,'Start':a,'End':b})
+    finally:
+        con.close()
     return pd.DataFrame(rows)
 
 def load_local_backtest_data(tickers,start_date,end_date):
@@ -2105,15 +2138,9 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
     return pd.DataFrame(rows)
 
 def run_local_backtest(tickers,start_date,end_date,threshold=85):
+    # HARD GUARANTEE: this function contains no Dhan/data-download call.
     status=local_backtest_status(tickers,start_date,end_date)
     if status.empty or not bool(status.Ready.all()):raise RuntimeError('LOCAL_DATA_NOT_READY')
-    data=load_local_backtest_data(tickers,start_date,end_date)
-    return _professional_bt(data,[1,2,3,4],threshold,start_date,end_date)
-
-def run_local_backtest(tickers,start_date,end_date,threshold=85):
-    status=local_backtest_status(tickers,start_date,end_date)
-    if status.empty or not bool(status.Ready.all()):
-        raise RuntimeError('LOCAL_DATA_NOT_READY')
     data=load_local_backtest_data(tickers,start_date,end_date)
     return _professional_bt(data,[1,2,3,4],threshold,start_date,end_date)
 
@@ -2931,7 +2958,7 @@ def _learning_summary(bt):
 
 with tabs[2]:
     st.subheader("📊 Professional Walk-Forward Backtest")
-    st.caption("Historical data is built once from Dhan. Backtest calculations use only the local dataset and never call Dhan.")
+    st.caption("Dhan is used ONLY by the explicit SYNC button. Backtest readiness and backtest execution are strictly local-only and make ZERO Dhan/API calls.")
     c1,c2,c3=st.columns(3)
     period=c1.selectbox("Time Span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="bt_period_final")
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
@@ -2945,14 +2972,15 @@ with tabs[2]:
     ready=int(status.Ready.sum()) if not status.empty else 0;total=len(status)
     a,b,c,d=st.columns(4);a.metric("Stocks ready",f"{ready:,}");b.metric("Missing",f"{total-ready:,}");c.metric("Local bars",f"{int(status.Bars.sum()):,}" if not status.empty else "0");d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
     if total and ready<total:
-        st.warning("Some stocks need historical warm-up data. Build it once; the same data is reused by every research module.")
+        st.warning("Some stocks do not have enough local historical warm-up data. Use SYNC once; after that, all backtests reuse the local dataset with ZERO Dhan calls.")
         if st.button("⬇️ BUILD / UPDATE LOCAL DATASET",type="primary",key="build_local_bt"):
             t0=time.perf_counter()
             try:
-                with st.spinner("Downloading only missing Dhan history and materialising the local dataset..."):
+                with st.spinner("Syncing ONLY missing historical ranges from Dhan..."):
+                    sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5)
                     rdy,missing=build_local_backtest_dataset(tickers,start_date,end_date)
                 elapsed=time.perf_counter()-t0
-                st.success(f"Dataset build finished in {elapsed:.1f}s. Ready {rdy:,}/{total:,}; missing {len(missing):,}.")
+                st.success(f"Data sync finished in {elapsed:.1f}s. Local dataset ready {rdy:,}/{total:,}; missing {len(missing):,}.")
                 if _DHAN_LAST_DATA_ERRORS:st.warning("Recent Dhan errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
                 st.rerun()
             except Exception as ex:st.error(f"Dataset build error: {ex}")
@@ -2974,7 +3002,7 @@ with tabs[2]:
                 st.success(f"Completed in {elapsed:.2f}s — {len(bt):,} qualifying trades; {learned:,} learning observations saved.")
             except Exception as ex:st.error(f"Backtest error: {ex}")
     else:
-        st.info("Build the local dataset first. 6-month backtests still require warm-up history for EMA250 and MTF calculations.")
+        st.info("Local historical data is not complete for this universe. Use the explicit SYNC button once; the Backtest button itself never downloads data.")
 
     bt=st.session_state.get("backtest_final",pd.DataFrame())
     if bt.empty:
