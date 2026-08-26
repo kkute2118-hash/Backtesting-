@@ -1,6 +1,6 @@
-streamlit
-pandas
-numpy
-requests
-dhanhq
-ccxt
+streamlit>=1.40,<2
+pandas>=2.0,<3
+numpy>=1.24,<3
+requests>=2.31,<3
+dhanhq>=2.1.0,<3
+ccxt>=4,<5
