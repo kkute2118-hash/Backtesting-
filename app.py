@@ -15,7 +15,7 @@ import math
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
-APP_VERSION = "PROFESSIONAL FINAL — Dhan + Local Research Engine"
+APP_VERSION = "STABLE LOCAL-FIRST — Dhan Sync / Local Scan / Local Backtest"
 ARCHITECTURE_STANDARD = "Deterministic rules • no-lookahead • persistent data • adaptive ranking • human approval"
 
 # ========================= DATA =========================
@@ -2139,9 +2139,14 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
 
 def run_local_backtest(tickers,start_date,end_date,threshold=85):
     # HARD GUARANTEE: this function contains no Dhan/data-download call.
+    # It runs on whatever LOCAL historical data is currently available.
+    # Missing symbols are reported by the UI and never trigger a Dhan request.
     status=local_backtest_status(tickers,start_date,end_date)
-    if status.empty or not bool(status.Ready.all()):raise RuntimeError('LOCAL_DATA_NOT_READY')
+    if status.empty:
+        raise RuntimeError('NO_LOCAL_DATA')
     data=load_local_backtest_data(tickers,start_date,end_date)
+    if not data:
+        raise RuntimeError('NO_LOCAL_DATA')
     return _professional_bt(data,[1,2,3,4],threshold,start_date,end_date)
 
 def _bt_period(period):
@@ -2969,40 +2974,48 @@ with tabs[2]:
 
     st.markdown("### 1️⃣ Local Dataset")
     status=local_backtest_status(tickers,start_date,end_date) if tickers else pd.DataFrame()
-    ready=int(status.Ready.sum()) if not status.empty else 0;total=len(status)
-    a,b,c,d=st.columns(4);a.metric("Stocks ready",f"{ready:,}");b.metric("Missing",f"{total-ready:,}");c.metric("Local bars",f"{int(status.Bars.sum()):,}" if not status.empty else "0");d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
-    if total and ready<total:
-        st.warning("Some stocks do not have enough local historical warm-up data. Use SYNC once; after that, all backtests reuse the local dataset with ZERO Dhan calls.")
-        if st.button("⬇️ BUILD / UPDATE LOCAL DATASET",type="primary",key="build_local_bt"):
-            t0=time.perf_counter()
-            try:
-                with st.spinner("Syncing ONLY missing historical ranges from Dhan..."):
-                    sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5)
-                    rdy,missing=build_local_backtest_dataset(tickers,start_date,end_date)
-                elapsed=time.perf_counter()-t0
-                st.success(f"Data sync finished in {elapsed:.1f}s. Local dataset ready {rdy:,}/{total:,}; missing {len(missing):,}.")
-                if _DHAN_LAST_DATA_ERRORS:st.warning("Recent Dhan errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
-                st.rerun()
-            except Exception as ex:st.error(f"Dataset build error: {ex}")
+    ready=int(status.Ready.sum()) if not status.empty else 0
+    total=len(status)
+    a,b,c,d=st.columns(4)
+    a.metric("Stocks ready",f"{ready:,}")
+    b.metric("Missing",f"{total-ready:,}")
+    a.caption("Only locally cached candles are counted.")
+    c.metric("Local bars",f"{int(status.Bars.sum()):,}" if not status.empty else "0")
+    d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
+
+    if total and ready==total:
+        st.success("✅ Local dataset ready. Backtest will make ZERO Dhan/API calls.")
     elif total:
-        st.success("✅ Local dataset ready. No Dhan/API calls are made during backtesting.")
+        st.warning(
+            f"⚠️ {total-ready:,} stocks are missing required local history. "
+            f"The backtest button remains available and will run ONLY on the {ready:,} stocks already cached."
+        )
+    else:
+        st.error("No local universe data is available.")
 
     st.markdown("### 2️⃣ Run Backtest")
-    if total and ready==total:
-        if st.button("⚡ RUN LOCAL S1–S4 BACKTEST",type="primary",key="run_local_bt"):
-            t0=time.perf_counter()
-            try:
-                with st.spinner("Replaying all qualifying S1–S4 signals from local candles..."):
-                    bt=run_local_backtest(tickers,start_date,end_date,int(threshold))
-                elapsed=time.perf_counter()-t0
-                _persist_backtest(bt,period,start_date,end_date,int(threshold),len(tickers),elapsed)
-                learned=_learn_from_backtest(bt)
-                st.session_state["backtest_final"]=bt
-                st.session_state["backtest_learning_added"]=learned
-                st.success(f"Completed in {elapsed:.2f}s — {len(bt):,} qualifying trades; {learned:,} learning observations saved.")
-            except Exception as ex:st.error(f"Backtest error: {ex}")
-    else:
-        st.info("Local historical data is not complete for this universe. Use the explicit SYNC button once; the Backtest button itself never downloads data.")
+    st.caption(
+        "🔒 HARD RULE: this button never synchronizes data and never calls Dhan. "
+        "Use Data Manager → SYNC ONLY MISSING DATA when you deliberately want to acquire history."
+    )
+
+    # ALWAYS visible. Missing stocks must never hide the backtest.
+    if st.button("⚡ RUN LOCAL S1–S4 BACKTEST",type="primary",key="run_local_bt"):
+        t0=time.perf_counter()
+        try:
+            with st.spinner(f"Replaying local data for {ready:,}/{total:,} available stocks..."):
+                bt=run_local_backtest(tickers,start_date,end_date,int(threshold))
+            elapsed=time.perf_counter()-t0
+            _persist_backtest(bt,period,start_date,end_date,int(threshold),len(tickers),elapsed)
+            learned=_learn_from_backtest(bt)
+            st.session_state["backtest_final"]=bt
+            st.session_state["backtest_learning_added"]=learned
+            st.success(
+                f"Completed locally in {elapsed:.2f}s — {len(bt):,} qualifying trades; "
+                f"{learned:,} learning observations saved. Dhan/API calls: 0."
+            )
+        except Exception as ex:
+            st.error(f"Local backtest error: {ex}")
 
     bt=st.session_state.get("backtest_final",pd.DataFrame())
     if bt.empty:
@@ -3204,6 +3217,36 @@ with tabs[8]:
             st.write("•",msg)
 
     st.markdown("### 📦 Local Dataset")
+    st.caption("Historical acquisition is controlled ONLY from this section. Backtest and scanner never synchronize historical data.")
+    sync_universe=st.selectbox(
+        "Sync universe",
+        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        key="dm_sync_universe"
+    )
+    sync_days=st.selectbox(
+        "Historical range to maintain",
+        [730,1000,1500,2000],
+        index=1,
+        format_func=lambda x: f"{x} calendar days",
+        key="dm_sync_days"
+    )
+    if st.button("🔄 SYNC ONLY MISSING DATA",type="primary",key="dm_sync_missing"):
+        try:
+            sync_tickers=index_universe(sync_universe)
+            with st.spinner(f"Checking local ranges and downloading ONLY missing data for {len(sync_tickers):,} stocks..."):
+                sync_missing_backtest_data(
+                    sync_tickers,
+                    date.today()-timedelta(days=int(sync_days)),
+                    date.today(),
+                    max_workers=5
+                )
+            st.success("Sync completed. Existing local candles were reused; only missing ranges were requested from Dhan.")
+            if _DHAN_LAST_DATA_ERRORS:
+                st.warning("Recent Dhan data errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
+            st.rerun()
+        except Exception as ex:
+            st.error(f"Data sync error: {ex}")
+
     con=_db()
     try:
         ns=con.execute("SELECT COUNT(DISTINCT symbol) FROM candles").fetchone()[0]
@@ -3218,7 +3261,7 @@ with tabs[8]:
     c.metric("Latest candle",latest or "—")
 
     if ns==0:
-        st.warning("⚠️ Cache is empty. Run the Dhan Connection Test first, then use the Build/Verify Local Dataset section in Backtest.")
+        st.warning("⚠️ Cache is empty. Run the Dhan Connection Test first, then use SYNC ONLY MISSING DATA in this Data Manager.")
     else:
         st.success(f"🟢 Local Dhan dataset contains {ns:,} stocks and {nc:,} candles.")
 
