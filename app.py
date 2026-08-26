@@ -1945,19 +1945,84 @@ def _fast_trade_outcome(df, entry_i, stop, target, max_bars=250):
 # calls an API. Dhan is used only by the explicit dataset-builder stage.
 BT_CACHE_DIR=Path("backtest_cache")
 BT_CACHE_DIR.mkdir(exist_ok=True)
+BT_WARMUP_DAYS=900  # enough history for EMA250 + weekly/monthly features
+BT_COST_PCT=0.23   # conservative round-trip cost assumption (%)
+
+def _bt_required_data_start(start_date):
+    return pd.Timestamp(start_date).date() - timedelta(days=BT_WARMUP_DAYS)
+
+def _ensure_backtest_tables():
+    con=_db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS backtest_runs(
+            run_id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, market TEXT,
+            period TEXT, start_date TEXT, end_date TEXT, threshold REAL,
+            universe_size INTEGER, trades INTEGER, elapsed_seconds REAL, status TEXT
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS backtest_trades(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, created_at TEXT,
+            ticker TEXT, strategy TEXT, signal_date TEXT, entry_date TEXT, exit_date TEXT,
+            score REAL, gate85 INTEGER, outcome TEXT, entry REAL, stop REAL, target REAL,
+            exit_price REAL, return_pct REAL, r_multiple REAL, pnl_pct REAL, holding_bars INTEGER,
+            mfe_pct REAL, mae_pct REAL, strategy_score REAL, htf REAL, footprint REAL,
+            trend REAL, entry_quality REAL, relative_strength REAL, market_regime TEXT, safety REAL,
+            source TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+_ensure_backtest_tables()
+
+def _persist_backtest(bt, period, start_date, end_date, threshold, universe_size, elapsed, status="COMPLETED"):
+    _ensure_backtest_tables()
+    con=_db()
+    try:
+        cur=con.execute("""INSERT INTO backtest_runs(created_at,market,period,start_date,end_date,threshold,universe_size,trades,elapsed_seconds,status)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (datetime.now().isoformat(timespec="seconds"),"INDIA",period,str(start_date),str(end_date),float(threshold),int(universe_size),int(len(bt) if bt is not None else 0),float(elapsed),status))
+        run_id=cur.lastrowid
+        if bt is not None and not bt.empty:
+            rows=[]
+            for _,r in bt.iterrows():
+                rows.append((run_id,datetime.now().isoformat(timespec="seconds"),str(r.get("Ticker","")),str(r.get("Strategy","")),str(r.get("Date","")),str(r.get("Entry Date",r.get("Date",""))),str(r.get("Exit Date","")),
+                    float(r.get("Score",0)),int(float(r.get("Score",0))>=85),str(r.get("Outcome","")),float(r.get("Entry",np.nan)),float(r.get("SL",np.nan)),float(r.get("Target",np.nan)),float(r.get("Exit",np.nan)),float(r.get("Return %",np.nan)),float(r.get("R",np.nan)),float(r.get("Return %",np.nan)),int(r.get("Holding Bars",0)),float(r.get("MFE %",np.nan)),float(r.get("MAE %",np.nan)),float(r.get("Strategy Score",np.nan)),float(r.get("HTF",np.nan)),float(r.get("Footprint",np.nan)),float(r.get("Trend",np.nan)),float(r.get("Entry Quality",np.nan)),float(r.get("Relative Strength",np.nan)),str(r.get("Regime","")),float(r.get("Safety",np.nan)),"backtest"))
+            con.executemany("""INSERT INTO backtest_trades(run_id,created_at,ticker,strategy,signal_date,entry_date,exit_date,score,gate85,outcome,entry,stop,target,exit_price,return_pct,r_multiple,pnl_pct,holding_bars,mfe_pct,mae_pct,strategy_score,htf,footprint,trend,entry_quality,relative_strength,market_regime,safety,source)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",rows)
+        con.commit()
+        return run_id
+    finally:
+        con.close()
+
+def _load_latest_backtest():
+    _ensure_backtest_tables()
+    con=_db()
+    try:
+        run=con.execute("SELECT * FROM backtest_runs ORDER BY run_id DESC LIMIT 1").fetchone()
+        if not run:return pd.DataFrame(),None
+        rid=run[0]
+        bt=pd.read_sql_query("SELECT ticker AS Ticker,strategy AS Strategy,signal_date AS Date,entry_date AS \"Entry Date\",exit_date AS \"Exit Date\",score AS Score,gate85 AS \"≥85 Gate\",outcome AS Outcome,entry AS Entry,stop AS SL,target AS Target,exit_price AS Exit,return_pct AS \"Return %\",r_multiple AS R,holding_bars AS \"Holding Bars\",mfe_pct AS \"MFE %\",mae_pct AS \"MAE %\",strategy_score AS \"Strategy Score\",htf AS HTF,footprint AS Footprint,trend AS Trend,entry_quality AS \"Entry Quality\",relative_strength AS \"Relative Strength\",market_regime AS Regime,safety AS Safety FROM backtest_trades WHERE run_id=? ORDER BY score DESC",con,params=(rid,))
+        return bt,run
+    finally:
+        con.close()
 
 def _bt_file(symbol):
     return BT_CACHE_DIR/(str(symbol).upper().replace('.NS','').replace('/','_')+'.pkl')
 
 def build_local_backtest_dataset(tickers,start_date,end_date):
-    """Download only missing history, then materialize local per-symbol snapshots."""
-    # Dhan is touched ONLY here, never from the backtest runner.
-    download_prices(tuple(tickers),start_date,end_date,max_workers=8)
+    """Build a reusable local dataset with indicator warm-up history.
+
+    The requested backtest window is preserved, but additional history is
+    downloaded before the window so EMA250/weekly/monthly features have enough
+    information. This dataset is then reused by scanner/backtest/research.
+    """
+    data_start=_bt_required_data_start(start_date)
+    download_prices(tuple(tickers),data_start,end_date,max_workers=8)
     con=_db(); ready=0; missing=[]
     try:
         for t in tickers:
             s=str(t).upper().replace('.NS','')
-            d=_read_cache(con,s,start_date,end_date)
+            d=_read_cache(con,s,data_start,end_date)
             if d is None or d.empty or len(d)<260:
                 missing.append(s); continue
             d.sort_index().to_pickle(_bt_file(s)); ready+=1
@@ -1965,77 +2030,85 @@ def build_local_backtest_dataset(tickers,start_date,end_date):
     return ready,missing
 
 def local_backtest_status(tickers,start_date,end_date):
+    data_start=_bt_required_data_start(start_date)
     rows=[]
     for t in tickers:
-        f=_bt_file(t)
-        ok=False; n=0; a=None; b=None
+        f=_bt_file(t); ok=False; n=0; a=None; b=None
         if f.exists():
             try:
-                d=pd.read_pickle(f)
-                d.index=pd.to_datetime(d.index)
-                d=d.loc[(d.index>=pd.Timestamp(start_date))&(d.index<=pd.Timestamp(end_date))]
+                d=pd.read_pickle(f); d.index=pd.to_datetime(d.index)
+                d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))]
                 n=len(d); ok=n>=260
-                if not d.empty: a=d.index.min().date(); b=d.index.max().date()
-            except Exception: pass
+                if not d.empty:a=d.index.min().date();b=d.index.max().date()
+            except Exception:pass
         rows.append({'Ticker':str(t).replace('.NS',''),'Bars':n,'Ready':ok,'Start':a,'End':b})
     return pd.DataFrame(rows)
 
 def load_local_backtest_data(tickers,start_date,end_date):
+    data_start=_bt_required_data_start(start_date)
     out={}
     for t in tickers:
         f=_bt_file(t)
-        if not f.exists(): continue
+        if not f.exists():continue
         try:
-            d=pd.read_pickle(f); d.index=pd.to_datetime(d.index)
-            d=d.loc[(d.index>=pd.Timestamp(start_date))&(d.index<=pd.Timestamp(end_date))].sort_index()
-            if len(d)>=260: out[t]=d
-        except Exception: pass
+            d=pd.read_pickle(f);d.index=pd.to_datetime(d.index)
+            d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))].sort_index()
+            if len(d)>=260:out[t]=d
+        except Exception:pass
     return out
 
 def _professional_bt(data,strategies,threshold,start_date,end_date):
-    """Local-only vectorized signal replay; no API/network calls."""
-    rows=[]; start=pd.Timestamp(start_date); end=pd.Timestamp(end_date)
+    """Local-only walk-forward replay with rich learning fields."""
+    rows=[];start=pd.Timestamp(start_date);end=pd.Timestamp(end_date)
     for ticker,df in data.items():
-        if len(df)<260: continue
+        if len(df)<260:continue
         try:
-            f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
-            # Precompute regime/safety once for the entire stock.
-            rs=((f.close>f.ema200).astype(int)*25+(f.ema50>f.ema200).astype(int)*20+
-                (f.ema200>f.ema200.shift(20)).astype(int)*15+(f.rsi14>=55).astype(int)*15+
-                (f.close>f.ema20).astype(int)*10+(f.relvol>=1).astype(int)*15)
-            regimes=np.select([rs>=75,rs>=60,rs>=45,rs>=30],
-                              ['STRONG BULL','BULL','RECOVERY / SIDEWAYS','EARLY BEAR'],default='BEAR')
-            traded=(df.close*df.volume).rolling(20,min_periods=20).mean()
-            jumps=df.close.pct_change().abs().rolling(30,min_periods=30).sum()
-            safe_arr=np.where((traded<500000)|(jumps>=3),50,np.where(traded<2000000,70,100))
+            df=df.sort_index();f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
+            if f.empty:continue
             for s in strategies:
                 sig=strategy_signal(f,s).fillna(False).to_numpy()
                 for i in np.flatnonzero(sig):
                     dt=pd.Timestamp(f.index[i])
-                    if dt<start or dt>end or i>=len(df)-1: continue
-                    # Score only genuine signals; no per-day full historical scan.
-                    regime=str(regimes[i]); safe=int(safe_arr[i]) if np.isfinite(safe_arr[i]) else 50
+                    if dt<start or dt>end or i>=len(df)-1:continue
+                    hist=df.iloc[:i+1]
+                    regime,_=regime_from_index(hist)
+                    safe,_,_=safety({},hist)
                     score,parts=_row_score(f,i,s,regime,safe)
-                    if score<int(threshold): continue
+                    if score<int(threshold):continue
                     entry_i=i+1; entry=float(df.close.iloc[entry_i])
-                    if not np.isfinite(entry) or entry<=0: continue
-                    stop=entry*.93; target=entry+3*(entry-stop)
-                    last=min(len(df)-1,entry_i+60)
-                    outcome='TIMEOUT'; exit_price=float(df.close.iloc[last]); held=last-entry_i
+                    if not np.isfinite(entry) or entry<=0:continue
+                    stop=entry*.93;target=entry+3*(entry-stop);risk=entry-stop
+                    last=min(len(df)-1,entry_i+60);outcome='TIMEOUT';exit_price=float(df.close.iloc[last]);held=last-entry_i
+                    max_high=entry;min_low=entry
                     for j in range(entry_i,last+1):
-                        bar=df.iloc[j]
+                        bar=df.iloc[j];max_high=max(max_high,float(bar.high));min_low=min(min_low,float(bar.low))
                         if bar.low<=stop:
-                            outcome='LOSS'; exit_price=stop; held=j-entry_i; break
+                            outcome='LOSS';exit_price=stop;held=j-entry_i;break
                         if bar.high>=target:
-                            outcome='WIN'; exit_price=target; held=j-entry_i; break
-                    rows.append({'Date':dt.date(),'Ticker':str(ticker).replace('.NS',''),'Strategy':f'S{s}',
-                                 'Score':int(score),'Entry':round(entry,2),'SL':round(stop,2),'Target':round(target,2),
-                                 'Outcome':outcome,'R':round((exit_price-entry)/(entry-stop),2),'Holding Bars':int(held),
-                                 'Strategy Score':parts.get('Strategy',0),'HTF':parts.get('HTF Demand',0),
-                                 'Footprint':parts.get('Footprint',0),'Entry Quality':parts.get('Entry Quality',0),
-                                 'Relative Strength':parts.get('Relative Strength',0),'Regime':regime,'Safety':safe})
-        except Exception: continue
+                            outcome='WIN';exit_price=target;held=j-entry_i;break
+                    gross_pct=(exit_price/entry-1)*100
+                    return_pct=gross_pct-BT_COST_PCT
+                    r_mult=return_pct/((risk/entry)*100) if risk>0 else 0
+                    mfe=(max_high/entry-1)*100;mae=(min_low/entry-1)*100
+                    rows.append({
+                        'Date':dt.date(),'Ticker':str(ticker).replace('.NS',''),'Strategy':f'S{s}',
+                        'Entry Date':df.index[entry_i].date(),'Exit Date':df.index[entry_i+held].date(),
+                        'Score':int(score),'≥85 Gate':bool(score>=85),'Entry':round(entry,2),'SL':round(stop,2),'Target':round(target,2),
+                        'Exit':round(exit_price,2),'Outcome':outcome,'Return %':round(return_pct,2),'R':round(float(r_mult),2),
+                        'Holding Bars':int(held),'MFE %':round(mfe,2),'MAE %':round(mae,2),
+                        'Strategy Score':parts.get('Strategy',0),'HTF':parts.get('HTF Demand',0),'Footprint':parts.get('Footprint',0),
+                        'Trend':parts.get('Trend',0),'Entry Quality':parts.get('Entry Quality',0),'Relative Strength':parts.get('Relative Strength',0),
+                        'Regime':regime,'Safety':safe
+                    })
+        except Exception:
+            continue
     return pd.DataFrame(rows)
+
+def run_local_backtest(tickers,start_date,end_date,threshold=85):
+    status=local_backtest_status(tickers,start_date,end_date)
+    if status.empty or not bool(status.Ready.all()):raise RuntimeError('LOCAL_DATA_NOT_READY')
+    data=load_local_backtest_data(tickers,start_date,end_date)
+    return _professional_bt(data,[1,2,3,4],threshold,start_date,end_date)
 
 def run_local_backtest(tickers,start_date,end_date,threshold=85):
     status=local_backtest_status(tickers,start_date,end_date)
@@ -2116,38 +2189,27 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
     return pd.DataFrame(rows)
 
 def _learn_from_backtest(bt):
-    """Persist backtest outcomes into the same learning store used by forward tests.
-    Unique keys prevent repeated backtest runs from artificially multiplying evidence."""
+    """Persist completed backtest observations for long-term learning."""
     if bt is None or bt.empty:return 0
-    ensure_learning_tables(); n=0
-    for _,r in bt.iterrows():
-        row={
-            "symbol":r.get("Ticker",""), "strategy":r.get("Strategy",""),
-            "signal_time":str(r.get("Date","")), "score":r.get("Score",np.nan),
-            "regime":r.get("Regime",""), "HTF":r.get("HTF",np.nan),
-            "Footprint":r.get("Footprint",np.nan), "Strategy Score":r.get("Strategy Score",np.nan),
-            "Entry Quality":r.get("Entry Quality",np.nan), "Relative Strength":r.get("Relative Strength",np.nan),
-            "Safety":r.get("Safety",np.nan), "Entry":r.get("Entry",np.nan),
-            "Exit":r.get("Exit",np.nan), "R":r.get("R",np.nan),
-            "Outcome":r.get("Outcome",""),
-        }
-        before=0
-        try:
-            con=_db(); before=con.total_changes
-            con.execute("""INSERT OR IGNORE INTO learning_observations(
-                created_at,market,symbol,strategy,signal_time,score,regime,htf,footprint,
-                strategy_score,entry_quality,relative_strength,safety_score,entry,exit_price,
-                result_r,outcome,holding_minutes,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
-                datetime.now().isoformat(timespec="seconds"),"INDIA",str(row["symbol"]),str(row["strategy"]),
-                row["signal_time"],float(row["score"]),str(row["regime"]),float(row["HTF"]),float(row["Footprint"]),
-                float(row["Strategy Score"]),float(row["Entry Quality"]),float(row["Relative Strength"]),
-                float(row["Safety"]),float(row["Entry"]),float(row["Exit"]),float(row["R"]),str(row["Outcome"]),
-                float(r.get("Holding Bars",0))*390.0,"backtest"))
-            con.commit(); n += 1 if con.total_changes>before else 0
-        except Exception: pass
-        finally:
-            try:con.close()
-            except:pass
+    ensure_learning_tables();n=0;con=_db()
+    try:
+        for _,r in bt.iterrows():
+            try:
+                before=con.total_changes
+                con.execute("""INSERT INTO learning_observations(
+                    created_at,market,symbol,strategy,signal_time,score,regime,htf,footprint,
+                    strategy_score,entry_quality,relative_strength,safety_score,entry,exit_price,
+                    result_r,outcome,holding_minutes,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                    datetime.now().isoformat(timespec='seconds'),'INDIA',str(r.get('Ticker','')),str(r.get('Strategy','')),
+                    str(r.get('Date','')),float(r.get('Score',np.nan)),str(r.get('Regime','')),float(r.get('HTF',np.nan)),
+                    float(r.get('Footprint',np.nan)),float(r.get('Strategy Score',np.nan)),float(r.get('Entry Quality',np.nan)),
+                    float(r.get('Relative Strength',np.nan)),float(r.get('Safety',np.nan)),float(r.get('Entry',np.nan)),
+                    float(r.get('Exit',np.nan)),float(r.get('R',np.nan)),str(r.get('Outcome','')),
+                    float(r.get('Holding Bars',0))*390.0,'backtest'))
+                n += 1 if con.total_changes>before else 0
+            except Exception:continue
+        con.commit()
+    finally:con.close()
     return n
 
 def adaptive_edge_table(market="INDIA"):
@@ -2793,6 +2855,69 @@ with tabs[1]:
             st.error(f"Scanner error: {e}")
 
 # ========================= RESEARCH MODULES =========================
+
+def add_forward_candidates(candidates):
+    """Persist current >=85 qualifying setups for forward testing.
+
+    Only complete strategy-rule candidates supplied by the scanner are added.
+    Existing ACTIVE records for the same symbol/strategy are not duplicated.
+    """
+    if candidates is None or len(candidates)==0:
+        return 0
+    con=_db(); added=0
+    try:
+        for _,r in candidates.iterrows():
+            symbol=str(r.get("Ticker","")).upper().replace(".NS","")
+            strategy=str(r.get("Strategy","")).upper()
+            score=float(r.get("Score",0))
+            if not symbol or strategy not in {"S1","S2","S3","S4"} or score < 85:
+                continue
+            exists=con.execute(
+                "SELECT 1 FROM forward_tests WHERE symbol=? AND strategy=? AND status='ACTIVE' LIMIT 1",
+                (symbol,strategy)
+            ).fetchone()
+            if exists:
+                continue
+            entry=float(r.get("Entry",np.nan))
+            sl=float(r.get("SL",r.get("SL 7%",np.nan)))
+            target=float(r.get("Target",r.get("Target 3R",np.nan)))
+            regime=str(r.get("Regime","")).strip()
+            now=datetime.now().isoformat(timespec="seconds")
+            con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,exit_price,result_r,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (now,symbol,strategy,score,regime,entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now))
+            added += 1
+        con.commit()
+    finally:
+        con.close()
+    return added
+
+def crypto_learning_summary(symbol=None):
+    """Summarise persisted crypto research observations; safe when empty."""
+    _ensure_research_tables()
+    con=_db()
+    try:
+        if symbol:
+            q=pd.read_sql_query(
+                "SELECT * FROM research_events WHERE market='CRYPTO' AND symbol=? ORDER BY created_at DESC",
+                con,params=(str(symbol).upper(),)
+            )
+        else:
+            q=pd.read_sql_query(
+                "SELECT * FROM research_events WHERE market='CRYPTO' ORDER BY created_at DESC",
+                con
+            )
+    finally:
+        con.close()
+    if q.empty:
+        return pd.DataFrame()
+    q["Win"]=(q["r_multiple"]>0).astype(int)
+    return (q.groupby(["symbol","study"],dropna=False)
+              .agg(Observations=("id","count"),WinRate=("Win","mean"),AvgR=("r_multiple","mean"),BestR=("r_multiple","max"))
+              .reset_index()
+              .assign(WinRate=lambda x:(x.WinRate*100).round(1),AvgR=lambda x:x.AvgR.round(3),BestR=lambda x:x.BestR.round(3)))
+
 def _two_year_backtest(data, strategies, threshold=85):
     return _fast_score_learning_backtest(data, strategies, threshold)
 
@@ -2806,115 +2931,134 @@ def _learning_summary(bt):
 
 with tabs[2]:
     st.subheader("📊 Professional Walk-Forward Backtest")
-    st.caption("Dhan builds the dataset. The backtest itself runs 100% from downloaded local data — no API calls.")
+    st.caption("Historical data is built once from Dhan. Backtest calculations use only the local dataset and never call Dhan.")
     c1,c2,c3=st.columns(3)
-    period=c1.selectbox("Time Span",["6 Months","1 Year","2 Years","3 Years"],index=2,key="bt_period_final")
+    period=c1.selectbox("Time Span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="bt_period_final")
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
     universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
-    start_date,end_date=_bt_period(period)
+    start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
     tickers=sorted(set(sum([index_universe(u) for u in universes],[]))) if universes else []
-    st.info(f"{period} | {start_date} → {end_date} | {len(tickers):,} stocks | exact S1–S4 | ≥{threshold}")
+    st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | gate ≥{threshold}")
 
-    st.markdown("### 1️⃣ Build / Verify Local Dataset")
+    st.markdown("### 1️⃣ Local Dataset")
     status=local_backtest_status(tickers,start_date,end_date) if tickers else pd.DataFrame()
-    ready=int(status.Ready.sum()) if not status.empty else 0
-    total=len(status)
-    a,b,c=st.columns(3); a.metric("Local ready",f"{ready:,}"); b.metric("Missing",f"{total-ready:,}"); c.metric("Local candles",f"{int(status.Bars.sum()):,}" if not status.empty else "0")
+    ready=int(status.Ready.sum()) if not status.empty else 0;total=len(status)
+    a,b,c,d=st.columns(4);a.metric("Stocks ready",f"{ready:,}");b.metric("Missing",f"{total-ready:,}");c.metric("Local bars",f"{int(status.Bars.sum()):,}" if not status.empty else "0");d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
     if total and ready<total:
-        st.warning("Missing history is a DATA BUILD problem, not a backtest problem. Build it once below.")
-        if st.button("⬇️ Build Missing Dhan Dataset",type="primary",key="build_local_bt"):
+        st.warning("Some stocks need historical warm-up data. Build it once; the same data is reused by every research module.")
+        if st.button("⬇️ BUILD / UPDATE LOCAL DATASET",type="primary",key="build_local_bt"):
             t0=time.perf_counter()
             try:
-                with st.spinner("Downloading missing history from Dhan and saving it locally..."):
+                with st.spinner("Downloading only missing Dhan history and materialising the local dataset..."):
                     rdy,missing=build_local_backtest_dataset(tickers,start_date,end_date)
-                st.success(f"Dataset build finished in {time.perf_counter()-t0:.1f}s. Ready: {rdy:,}; still missing: {len(missing):,}.")
+                elapsed=time.perf_counter()-t0
+                st.success(f"Dataset build finished in {elapsed:.1f}s. Ready {rdy:,}/{total:,}; missing {len(missing):,}.")
+                if _DHAN_LAST_DATA_ERRORS:st.warning("Recent Dhan errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
                 st.rerun()
-            except Exception as ex: st.error(f"Dataset build error: {ex}")
+            except Exception as ex:st.error(f"Dataset build error: {ex}")
     elif total:
-        st.success("✅ Local dataset ready. The Run Backtest button makes ZERO Dhan/API calls.")
+        st.success("✅ Local dataset ready. No Dhan/API calls are made during backtesting.")
 
-    st.markdown("### 2️⃣ Run Local Backtest")
+    st.markdown("### 2️⃣ Run Backtest")
     if total and ready==total:
         if st.button("⚡ RUN LOCAL S1–S4 BACKTEST",type="primary",key="run_local_bt"):
             t0=time.perf_counter()
-            with st.spinner("Calculating S1–S4 from local candles only..."):
-                try:
+            try:
+                with st.spinner("Replaying all qualifying S1–S4 signals from local candles..."):
                     bt=run_local_backtest(tickers,start_date,end_date,int(threshold))
-                    st.session_state["backtest_final"]=bt
-                    learned=_learn_from_backtest(bt)
-                    st.session_state["backtest_learning_added"]=learned
-                    elapsed=time.perf_counter()-t0
-                    st.success(f"Completed in {elapsed:.2f}s — {len(bt):,} qualifying trades.")
-                except Exception as ex: st.error(f"Backtest error: {ex}")
+                elapsed=time.perf_counter()-t0
+                _persist_backtest(bt,period,start_date,end_date,int(threshold),len(tickers),elapsed)
+                learned=_learn_from_backtest(bt)
+                st.session_state["backtest_final"]=bt
+                st.session_state["backtest_learning_added"]=learned
+                st.success(f"Completed in {elapsed:.2f}s — {len(bt):,} qualifying trades; {learned:,} learning observations saved.")
+            except Exception as ex:st.error(f"Backtest error: {ex}")
     else:
-        st.info("Build the local dataset first. This prevents the backtest from secretly downloading data.")
+        st.info("Build the local dataset first. 6-month backtests still require warm-up history for EMA250 and MTF calculations.")
 
     bt=st.session_state.get("backtest_final",pd.DataFrame())
-    if not bt.empty:
-        st.subheader("🏆 Historical Setups")
-        st.dataframe(bt.sort_values(["Score","Date"],ascending=[False,False]).head(250),use_container_width=True,hide_index=True)
-        st.subheader("📈 Strategy Performance")
-        st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
-        st.subheader("🧠 Score Learning")
-        bands=pd.cut(bt.Score,[84,89,94,100],labels=["85–89","90–94","95–100"],include_lowest=True)
-        bx=bt.assign(Band=bands,Win=(bt.Outcome=="WIN").astype(int))
-        learn=bx.groupby("Band",observed=True).agg(Signals=("Ticker","count"),Wins=("Win","sum"),WinRate=("Win","mean"),AvgR=("R","mean")).reset_index()
-        learn["WinRate"]=(learn.WinRate*100).round(1); learn["AvgR"]=learn.AvgR.round(2)
-        st.dataframe(learn,use_container_width=True,hide_index=True)
-        stabs=st.tabs(["S1","S2","S3","S4"])
+    if bt.empty:
+        bt,_run=_load_latest_backtest()
+        if not bt.empty:st.session_state["backtest_final"]=bt
+    if bt.empty:
+        st.info("No completed backtest is stored yet. Build the dataset and run the backtest once.")
+    else:
+        st.subheader("🏆 Historical Learning Dataset")
+        a,b,c,d,e=st.columns(5)
+        a.metric("Trades",len(bt));b.metric("S1",int((bt.Strategy=='S1').sum()));c.metric("S2",int((bt.Strategy=='S2').sum()));d.metric("S3",int((bt.Strategy=='S3').sum()));e.metric("S4",int((bt.Strategy=='S4').sum()))
+        st.dataframe(bt.sort_values(["Score","Date"],ascending=[False,False]),use_container_width=True,hide_index=True)
+
+        st.subheader("📈 Strategy Performance / ROI / Risk")
+        perf=[]
+        for strat,g in bt.groupby('Strategy'):
+            wins=g[g['R']>0];loss=g[g['R']<=0];grossw=float(wins['R'].sum());grossl=abs(float(loss['R'].sum()))
+            pf=grossw/grossl if grossl>0 else (99.99 if grossw>0 else 0)
+            perf.append({'Strategy':strat,'Trades':len(g),'Win %':round((g.R>0).mean()*100,1),'Avg R':round(g.R.mean(),3),'Total R':round(g.R.sum(),2),'Profit Factor':round(pf,2),'Avg Return %':round(g['Return %'].mean(),2),'Avg MFE %':round(g['MFE %'].mean(),2),'Avg MAE %':round(g['MAE %'].mean(),2),'Best Score':int(g.Score.max())})
+        st.dataframe(pd.DataFrame(perf).sort_values('Avg R',ascending=False),use_container_width=True,hide_index=True)
+
+        st.subheader("💰 Capital / ROI Simulation")
+        pc1,pc2,pc3=st.columns(3);capital=pc1.number_input("Starting capital ₹",10000,100000000,100000,10000,key='bt_capital');risk_pct=pc2.number_input("Risk per trade %",0.1,5.0,1.0,0.1,key='bt_risk');slots=pc3.number_input("Capital slots",1,50,5,1,key='bt_slots')
+        roi=portfolio_from_backtest(bt,float(capital),float(risk_pct),int(slots));st.dataframe(pd.DataFrame([roi]),use_container_width=True,hide_index=True)
+
+        st.subheader("🎯 Score Learning")
+        bands=pd.cut(bt.Score,[84,89,94,100],labels=["85–89","90–94","95–100"],include_lowest=True);bx=bt.assign(Band=bands,Win=(bt.Outcome.str.upper()=='WIN').astype(int))
+        learn=bx.groupby('Band',observed=True).agg(Signals=('Ticker','count'),Wins=('Win','sum'),WinRate=('Win','mean'),AvgR=('R','mean'),TotalR=('R','sum'),AvgReturn=('Return %','mean'),AvgMFE=('MFE %','mean'),AvgMAE=('MAE %','mean')).reset_index();learn['WinRate']=(learn.WinRate*100).round(1);learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']]=learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']].round(2);st.dataframe(learn,use_container_width=True,hide_index=True)
+
+        st.subheader("🧠 Marking Conditions Used")
+        st.info("A row exists only when ALL mandatory rules of its strategy passed. The columns below preserve the score components used to rank the historical setup; the strategy itself is independently re-evaluated from the full rule set.")
+        st.dataframe(bt[['Ticker','Date','Strategy','Score','Strategy Score','HTF','Footprint','Trend','Entry Quality','Relative Strength','Safety','Regime','Outcome','R','Return %','MFE %','MAE %','Holding Bars']].sort_values('Score',ascending=False),use_container_width=True,hide_index=True)
+
+        st.subheader("🔎 Individual Strategy Results")
+        stabs=st.tabs(['S1','S2','S3','S4'])
         for tab,ss in zip(stabs,[1,2,3,4]):
             with tab:
-                sr=bt[bt.Strategy==f"S{ss}"].sort_values(["Score","Date"],ascending=[False,False])
-                st.dataframe(sr,use_container_width=True,hide_index=True) if not sr.empty else st.info(f"S{ss}: no qualifying historical setups.")
+                sr=bt[bt.Strategy==f'S{ss}'].sort_values(['Score','Date'],ascending=[False,False])
+                st.dataframe(sr,use_container_width=True,hide_index=True) if not sr.empty else st.info(f'S{ss}: no qualifying historical setups in this window.')
 
 with tabs[3]:
-    st.subheader("🔬 Forward Testing")
+    st.subheader('🔬 Forward Testing')
     con=_db()
-    try: ft=pd.read_sql_query("SELECT * FROM forward_tests ORDER BY created_at DESC",con)
-    finally: con.close()
-    if ft.empty: st.info("No forward-test records yet. Complete-rule ≥85 setups will appear here.")
+    try:ft=pd.read_sql_query('SELECT * FROM forward_tests ORDER BY created_at DESC',con)
+    finally:con.close()
+    if ft.empty:
+        st.info('No active forward-test records yet. This is expected until a current scanner run produces complete-rule ≥85 candidates. Historical backtest trades are NOT treated as live trades.')
+        q=st.session_state.get('forward_queue',pd.DataFrame())
+        if q is not None and not q.empty:
+            st.subheader('🚀 Latest Live Candidate Queue')
+            st.dataframe(q.sort_values('Score',ascending=False),use_container_width=True,hide_index=True)
+            st.caption('These are current scanner candidates; they become forward-test records when added by the scanner. Historical backtest results remain separate.')
     else:
-        a,b,c,d=st.columns(4); a.metric("Total",len(ft)); b.metric("Active",int((ft.status=="ACTIVE").sum()))
-        c.metric("Positive R",int((ft.result_r>0).sum())); d.metric("Average R",round(float(ft.result_r.dropna().mean()),2) if ft.result_r.notna().any() else 0)
-        st.dataframe(ft.sort_values("score",ascending=False),use_container_width=True,hide_index=True)
+        a,b,c,d=st.columns(4);a.metric('Total',len(ft));b.metric('Active',int((ft.status=='ACTIVE').sum()));c.metric('Positive R',int((ft.result_r>0).sum()));d.metric('Average R',round(float(ft.result_r.dropna().mean()),2) if ft.result_r.notna().any() else 0)
+        st.dataframe(ft.sort_values('score',ascending=False),use_container_width=True,hide_index=True)
 
 with tabs[4]:
-    st.subheader("🧠 Adaptive Market Learning — Final")
-    bt=st.session_state.get("backtest_final",pd.DataFrame())
-    if bt.empty: st.info("Run the 2-Year Backtest first.")
+    st.subheader("🧠 Adaptive Market Learning")
+    bt=st.session_state.get('backtest_final',pd.DataFrame())
+    if bt.empty:
+        bt,_run=_load_latest_backtest()
+        if not bt.empty:st.session_state['backtest_final']=bt
+    learn_db=learning_snapshot('INDIA')
+    if bt.empty and learn_db.empty:
+        st.info('No learning observations yet. Run a backtest or complete forward-test trades first.')
     else:
-        st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
-        rows=[]
-        for c in ["HTF","Footprint","Strategy Score","Safety"]:
-            if c in bt:
-                med=bt[c].median(); hi=bt[bt[c]>=med]; lo=bt[bt[c]<med]
-                rows.append({"Component":c,"High Avg R":round(float(hi.R.mean()),2) if len(hi) else 0,"Low Avg R":round(float(lo.R.mean()),2) if len(lo) else 0,"High Win %":round(float((hi.Outcome=="WIN").mean()*100),1) if len(hi) else 0})
-        st.subheader("Marking Component Learning"); st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-
-        st.subheader("🎯 Adaptive Score Edge")
-        edge = adaptive_edge_table("INDIA")
-        if edge.empty:
-            st.info("No completed learning sample yet.")
-        else:
-            st.dataframe(edge, use_container_width=True, hide_index=True)
-            st.caption(
-                "The learned edge ranks candidates; it does not change S1–S4 qualification. "
-                "Small samples are shrunk toward neutral values."
-            )
-
-        st.divider()
-        st.subheader("🔁 Adaptive Learning Database")
-        learn_db = learning_snapshot("INDIA")
-        if learn_db.empty:
-            st.info("No completed learning observations yet. Forward-test results will automatically feed the learning engine.")
-        else:
-            st.metric("Completed learning observations", len(learn_db))
-            st.dataframe(
-                adaptive_component_weights("INDIA"),
-                use_container_width=True,
-                hide_index=True
-            )
-            st.caption("Learning adjusts candidate ranking only after sufficient evidence; it never changes the deterministic S1–S4 rules.")
+        if not bt.empty:
+            st.subheader('📊 Historical Evidence')
+            st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
+            rows=[]
+            for c in ['HTF','Footprint','Strategy Score','Safety','Entry Quality','Relative Strength']:
+                if c in bt.columns:
+                    med=bt[c].median();hi=bt[bt[c]>=med];lo=bt[bt[c]<med]
+                    rows.append({'Component':c,'High Samples':len(hi),'High Avg R':round(float(hi.R.mean()),3) if len(hi) else 0,'Low Samples':len(lo),'Low Avg R':round(float(lo.R.mean()),3) if len(lo) else 0,'High Win %':round(float((hi.Outcome.str.upper()=='WIN').mean()*100),1) if len(hi) else 0})
+            st.subheader('🔬 Marking Component Learning');st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+        st.subheader('🎯 Adaptive Score Edge')
+        edge=adaptive_edge_table('INDIA')
+        st.dataframe(edge,use_container_width=True,hide_index=True) if not edge.empty else st.info('Not enough completed observations for adaptive edge estimates.')
+        st.subheader('🗄️ Persistent Learning Database')
+        st.metric('Completed observations',len(learn_db))
+        if not learn_db.empty:
+            st.dataframe(adaptive_component_weights('INDIA'),use_container_width=True,hide_index=True)
+            st.dataframe(learn_db.head(500),use_container_width=True,hide_index=True)
+        st.caption('Learning ranks candidates using evidence; it never changes the deterministic S1–S4 qualification rules.')
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals + News")
@@ -2943,7 +3087,14 @@ with tabs[6]:
     else:
         rows=[]
         for sym in syms.symbol:
-            d=download_prices([sym],date.today()-timedelta(days=180),date.today()).get(sym,pd.DataFrame())
+            
+            con2=_db()
+            try:
+                d=_read_cache(con2,str(sym).upper().replace('.NS',''),date.today()-timedelta(days=180),date.today())
+            finally:
+                con2.close()
+            if d.empty:
+                d=download_prices([sym],date.today()-timedelta(days=180),date.today(),max_workers=1).get(sym,pd.DataFrame())
             info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
             sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
             rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
