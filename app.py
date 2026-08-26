@@ -42,6 +42,7 @@ DATA_DB="market_data.sqlite3"
 DHAN_MIN_INTERVAL=0.22  # stay below the documented 5 data-API requests/sec
 _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
+_DHAN_LAST_DATA_ERRORS=[]
 
 def dhan_configured():
     try:
@@ -161,22 +162,55 @@ def _read_cache(con,s,start_date,end_date):
     if d.empty:return pd.DataFrame()
     d.dt=pd.to_datetime(d.dt);d=d.set_index("dt");d.index.name="date";return d
 
-def download_prices(tickers,start,end):
-    if not dhan_configured():raise RuntimeError("Dhan credentials are not configured")
+def download_prices(tickers,start,end,max_workers=4):
+    """
+    Dhan historical loader with bounded concurrency and transparent failures.
+
+    Dhan data requests are globally rate-limited by dhan_history(). The worker
+    count therefore controls concurrency, not API request rate. Existing local
+    candles are reused and only missing ranges are requested.
+    """
+    if not dhan_configured():
+        raise RuntimeError(
+            "Dhan credentials are not configured. Add DHAN_CLIENT_ID and "
+            "DHAN_ACCESS_TOKEN to Streamlit Secrets."
+        )
+
     dhan_map()
-    # Conservative concurrency for first-time data build; repeated scans are cache-only.
-    from concurrent.futures import ThreadPoolExecutor,as_completed
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        fs={ex.submit(update_dhan_symbol,t,start,end):t for t in tickers}
-        for f in as_completed(fs):
-            try:f.result()
-            except Exception:pass
-    con=_db();out={}
+    tickers=list(dict.fromkeys(tickers))
+    errors=[]
+    workers=max(1,min(int(max_workers),5))
+
+    def worker(symbol):
+        try:
+            saved=update_dhan_symbol(symbol,start,end)
+            return symbol,saved,None
+        except Exception as exc:
+            return symbol,0,str(exc)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures={pool.submit(worker,s):s for s in tickers}
+        for fut in as_completed(futures):
+            symbol,saved,err=fut.result()
+            if err:
+                errors.append(f"{symbol}: {err}")
+
+    con=_db()
+    out={}
     try:
-        for t in tickers:
-            d=_read_cache(con,str(t).upper().replace(".NS",""),start,end)
-            if not d.empty:out[t]=d
-    finally:con.close()
+        for symbol in tickers:
+            clean=str(symbol).upper().replace(".NS","")
+            d=_read_cache(con,clean,start,end)
+            if not d.empty:
+                out[symbol]=d
+    finally:
+        con.close()
+
+    # Keep the last build errors available to the Data Manager instead of
+    # silently converting API failures into "0 cached stocks".
+    global _DHAN_LAST_DATA_ERRORS
+    _DHAN_LAST_DATA_ERRORS=errors[-100:]
+
     return out
 
 def dhan_live_ltp(symbols):
@@ -190,6 +224,72 @@ def dhan_live_ltp(symbols):
     raw=r.json().get("data",{}).get("NSE_EQ",{});rev={a:b for a,b in pairs}
     return {rev[str(k)]:float(v["last_price"]) for k,v in raw.items()
             if str(k) in rev and isinstance(v,dict) and v.get("last_price") is not None}
+
+def dhan_connection_diagnostic():
+    """
+    Safe, read-only Dhan connectivity test.
+
+    Checks:
+      1. Secrets are present.
+      2. Dhan instrument master can be downloaded.
+      3. RELIANCE has an NSE equity security ID.
+      4. Authenticated Dhan LTP endpoint responds.
+      5. Authenticated Dhan historical endpoint returns candles.
+
+    No order endpoint is called.
+    """
+    result={
+        "credentials":False,
+        "instrument_master":False,
+        "reliance_mapping":False,
+        "ltp_api":False,
+        "historical_api":False,
+        "details":[]
+    }
+
+    if not dhan_configured():
+        result["details"].append("Dhan secrets missing: DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN")
+        return result
+
+    result["credentials"]=True
+
+    try:
+        mp=dhan_map()
+        result["instrument_master"]=True
+    except Exception as exc:
+        result["details"].append(f"Instrument master failed: {exc}")
+        return result
+
+    sid=mp.get("RELIANCE")
+    if not sid:
+        result["details"].append("RELIANCE NSE security ID was not found in Dhan instrument master.")
+        return result
+
+    result["reliance_mapping"]=True
+    result["details"].append(f"RELIANCE security ID: {sid}")
+
+    try:
+        ltp=dhan_live_ltp(["RELIANCE"])
+        if ltp:
+            result["ltp_api"]=True
+            result["details"].append(f"RELIANCE LTP: ₹{ltp.get('RELIANCE', 0):,.2f}")
+        else:
+            result["details"].append("LTP endpoint responded but returned no RELIANCE price.")
+    except Exception as exc:
+        result["details"].append(f"LTP API failed: {exc}")
+
+    try:
+        d=dhan_history("RELIANCE",date.today()-timedelta(days=7),date.today())
+        if d is not None and not d.empty:
+            result["historical_api"]=True
+            result["details"].append(f"Historical API returned {len(d)} candles.")
+        else:
+            result["details"].append("Historical API returned no candles.")
+    except Exception as exc:
+        result["details"].append(f"Historical API failed: {exc}")
+
+    return result
+
 
 @st.cache_data(ttl=3600)
 def _ensure_ws_tables():
@@ -2301,7 +2401,7 @@ with tabs[1]:
             )
 
             if not idx_data:
-                st.error("No Nifty 500 price data returned by Yahoo Finance. This is a data-source problem.")
+                st.error("No Nifty 500 price data returned by Dhan. Check Dhan Connection Test and recent data-build errors.")
                 st.stop()
 
             proxy = max(idx_data.values(), key=len)
@@ -2323,7 +2423,7 @@ with tabs[1]:
 
             if not data:
                 st.error(
-                    "Yahoo Finance returned no price data for the selected universe. "
+                    "Dhan returned no price data for the selected universe. "
                     "The scanner cannot generate signals until price data is available."
                 )
                 st.stop()
@@ -2896,19 +2996,67 @@ with tabs[7]:
 
 with tabs[8]:
     st.subheader("💾 Dhan Data Manager")
-    st.caption("First run builds history. Later scans request only missing candles.")
+    st.caption("Dhan is the primary Indian-equity market-data source. Historical candles are cached locally; backtests use the local dataset after it is built.")
+
+    # ---- Explicit, read-only Dhan health check --------------------------------
+    st.markdown("### 🔌 Dhan Connection Test")
+    st.caption("This test never places an order. It checks credentials, instrument mapping, authenticated LTP, and authenticated historical data using RELIANCE.")
+
+    if st.button("🧪 TEST DHAN CONNECTION",type="primary",key="dhan_connection_test"):
+        with st.spinner("Testing Dhan connection..."):
+            diag=dhan_connection_diagnostic()
+
+        checks=[
+            ("Credentials",diag["credentials"]),
+            ("Instrument master",diag["instrument_master"]),
+            ("RELIANCE NSE mapping",diag["reliance_mapping"]),
+            ("Authenticated LTP API",diag["ltp_api"]),
+            ("Authenticated historical API",diag["historical_api"]),
+        ]
+        cols=st.columns(5)
+        for col,(label,ok) in zip(cols,checks):
+            col.metric(label,"PASS" if ok else "FAIL")
+
+        if all(ok for _,ok in checks):
+            st.success("🟢 DHAN CONNECTED — authentication, NSE mapping, LTP and historical data are working.")
+        else:
+            st.error("🔴 Dhan connection is not fully verified. Read the diagnostics below.")
+        for msg in diag["details"]:
+            st.write("•",msg)
+
+    st.markdown("### 📦 Local Dataset")
     con=_db()
     try:
         ns=con.execute("SELECT COUNT(DISTINCT symbol) FROM candles").fetchone()[0]
         nc=con.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
         latest=con.execute("SELECT MAX(dt) FROM candles").fetchone()[0]
-    finally:con.close()
+    finally:
+        con.close()
+
     a,b,c=st.columns(3)
-    a.metric("Cached stocks",ns);b.metric("Cached candles",f"{nc:,}");c.metric("Latest candle",latest or "—")
+    a.metric("Cached stocks",ns)
+    b.metric("Cached candles",f"{nc:,}")
+    c.metric("Latest candle",latest or "—")
+
+    if ns==0:
+        st.warning("⚠️ Cache is empty. Run the Dhan Connection Test first, then use the Build/Verify Local Dataset section in Backtest.")
+    else:
+        st.success(f"🟢 Local Dhan dataset contains {ns:,} stocks and {nc:,} candles.")
+
     st.info(
-        "Daily Scanner updates missing historical candles. Repeated scans use the persistent cache. "
-        "Live Forward Testing uses a persistent Dhan WebSocket for the active candidate list."
+        "Architecture: Dhan → local candle cache → local backtest. "
+        "The backtest runner does not call Dhan once the required local dataset is ready. "
+        "Existing candles are reused and only missing historical ranges are downloaded."
     )
+
+    if _DHAN_LAST_DATA_ERRORS:
+        st.markdown("### ⚠️ Recent Dhan data-build errors")
+        st.dataframe(
+            pd.DataFrame({"Error":_DHAN_LAST_DATA_ERRORS}),
+            use_container_width=True,
+            hide_index=True
+        )
+
     if st.button("⛔ Stop Live WebSocket",key="stop_ws"):
         stop_persistent_live_feed()
         st.success("Dhan WebSocket stop requested.")
