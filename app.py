@@ -2030,31 +2030,57 @@ def build_local_backtest_dataset(tickers,start_date,end_date):
     return ready,missing
 
 def local_backtest_status(tickers,start_date,end_date):
+    """Check BOTH the per-symbol backtest cache and the canonical SQLite Dhan cache.
+
+    The backtest must not depend on a separate materialisation step merely to show
+    a Run button. If candles already exist in market_data.sqlite3, they are usable.
+    """
     data_start=_bt_required_data_start(start_date)
-    rows=[]
-    for t in tickers:
-        f=_bt_file(t); ok=False; n=0; a=None; b=None
-        if f.exists():
-            try:
-                d=pd.read_pickle(f); d.index=pd.to_datetime(d.index)
-                d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))]
-                n=len(d); ok=n>=260
-                if not d.empty:a=d.index.min().date();b=d.index.max().date()
-            except Exception:pass
-        rows.append({'Ticker':str(t).replace('.NS',''),'Bars':n,'Ready':ok,'Start':a,'End':b})
+    con=_db(); rows=[]
+    try:
+        for t in tickers:
+            s=str(t).upper().replace('.NS','')
+            f=_bt_file(t); d=pd.DataFrame()
+            if f.exists():
+                try:
+                    d=pd.read_pickle(f); d.index=pd.to_datetime(d.index)
+                    d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))]
+                except Exception:
+                    d=pd.DataFrame()
+            if d.empty:
+                try:
+                    d=_read_cache(con,s,data_start,end_date)
+                except Exception:
+                    d=pd.DataFrame()
+            n=len(d); ok=n>=260; a=d.index.min().date() if not d.empty else None; b=d.index.max().date() if not d.empty else None
+            rows.append({'Ticker':s,'Bars':n,'Ready':ok,'Start':a,'End':b,'Source':'LOCAL CACHE' if ok else 'MISSING'})
+    finally:
+        con.close()
     return pd.DataFrame(rows)
 
 def load_local_backtest_data(tickers,start_date,end_date):
+    """Load the canonical local Dhan dataset; per-symbol pkl is only an optional accelerator."""
     data_start=_bt_required_data_start(start_date)
-    out={}
-    for t in tickers:
-        f=_bt_file(t)
-        if not f.exists():continue
-        try:
-            d=pd.read_pickle(f);d.index=pd.to_datetime(d.index)
-            d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))].sort_index()
-            if len(d)>=260:out[t]=d
-        except Exception:pass
+    out={}; con=_db()
+    try:
+        for t in tickers:
+            s=str(t).upper().replace('.NS','')
+            f=_bt_file(t); d=pd.DataFrame()
+            if f.exists():
+                try:
+                    d=pd.read_pickle(f); d.index=pd.to_datetime(d.index)
+                    d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))].sort_index()
+                except Exception:
+                    d=pd.DataFrame()
+            if d.empty:
+                d=_read_cache(con,s,data_start,end_date)
+            if len(d)>=260:
+                out[t]=d.sort_index()
+                # Lazily materialise the accelerator so later runs are faster.
+                try:d.sort_index().to_pickle(f)
+                except Exception:pass
+    finally:
+        con.close()
     return out
 
 def _professional_bt(data,strategies,threshold,start_date,end_date):
@@ -2106,15 +2132,12 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
 
 def run_local_backtest(tickers,start_date,end_date,threshold=85):
     status=local_backtest_status(tickers,start_date,end_date)
-    if status.empty or not bool(status.Ready.all()):raise RuntimeError('LOCAL_DATA_NOT_READY')
-    data=load_local_backtest_data(tickers,start_date,end_date)
-    return _professional_bt(data,[1,2,3,4],threshold,start_date,end_date)
-
-def run_local_backtest(tickers,start_date,end_date,threshold=85):
-    status=local_backtest_status(tickers,start_date,end_date)
-    if status.empty or not bool(status.Ready.all()):
-        raise RuntimeError('LOCAL_DATA_NOT_READY')
-    data=load_local_backtest_data(tickers,start_date,end_date)
+    if status.empty:
+        raise RuntimeError('NO_UNIVERSE_SELECTED')
+    ready_tickers=[str(r.Ticker)+'.NS' for r in status.itertuples() if bool(r.Ready)]
+    if not ready_tickers:
+        raise RuntimeError('NO_LOCAL_DATA_READY')
+    data=load_local_backtest_data(ready_tickers,start_date,end_date)
     return _professional_bt(data,[1,2,3,4],threshold,start_date,end_date)
 
 def _bt_period(period):
@@ -2931,82 +2954,109 @@ def _learning_summary(bt):
 
 with tabs[2]:
     st.subheader("📊 Professional Walk-Forward Backtest")
-    st.caption("Historical data is built once from Dhan. Backtest calculations use only the local dataset and never call Dhan.")
+    st.caption("ONE historical Dhan dataset → scanner, backtest, learning and research. The backtest itself never calls Dhan.")
     c1,c2,c3=st.columns(3)
     period=c1.selectbox("Time Span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="bt_period_final")
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
     universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
-    start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
+    start_date,end_date=_bt_period(period); data_start=_bt_required_data_start(start_date)
     tickers=sorted(set(sum([index_universe(u) for u in universes],[]))) if universes else []
     st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | gate ≥{threshold}")
 
-    st.markdown("### 1️⃣ Local Dataset")
+    st.markdown("### 1️⃣ Available Local Data")
     status=local_backtest_status(tickers,start_date,end_date) if tickers else pd.DataFrame()
-    ready=int(status.Ready.sum()) if not status.empty else 0;total=len(status)
-    a,b,c,d=st.columns(4);a.metric("Stocks ready",f"{ready:,}");b.metric("Missing",f"{total-ready:,}");c.metric("Local bars",f"{int(status.Bars.sum()):,}" if not status.empty else "0");d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
-    if total and ready<total:
-        st.warning("Some stocks need historical warm-up data. Build it once; the same data is reused by every research module.")
-        if st.button("⬇️ BUILD / UPDATE LOCAL DATASET",type="primary",key="build_local_bt"):
+    ready=int(status.Ready.sum()) if not status.empty else 0; total=len(status); missing=total-ready
+    a,b,c,d=st.columns(4)
+    a.metric("Available stocks",f"{ready:,}/{total:,}")
+    b.metric("Missing stocks",f"{missing:,}")
+    c.metric("Local candles",f"{int(status.Bars.sum()):,}" if not status.empty else "0")
+    d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
+
+    if total and missing:
+        st.warning(f"{missing:,} stocks are missing sufficient warm-up history. They will NOT block the backtest: the engine can run immediately on the {ready:,} available stocks.")
+        if st.button("⬇️ BUILD / UPDATE MISSING DATA",type="secondary",key="build_local_bt"):
             t0=time.perf_counter()
             try:
-                with st.spinner("Downloading only missing Dhan history and materialising the local dataset..."):
-                    rdy,missing=build_local_backtest_dataset(tickers,start_date,end_date)
+                with st.spinner("Downloading only missing Dhan history and updating the local dataset..."):
+                    rdy,miss=build_local_backtest_dataset(tickers,start_date,end_date)
                 elapsed=time.perf_counter()-t0
-                st.success(f"Dataset build finished in {elapsed:.1f}s. Ready {rdy:,}/{total:,}; missing {len(missing):,}.")
-                if _DHAN_LAST_DATA_ERRORS:st.warning("Recent Dhan errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
+                st.success(f"Dataset update finished in {elapsed:.1f}s. Ready {rdy:,}/{total:,}; still missing {len(miss):,}.")
+                if _DHAN_LAST_DATA_ERRORS:
+                    st.warning("Recent Dhan errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
                 st.rerun()
-            except Exception as ex:st.error(f"Dataset build error: {ex}")
+            except Exception as ex:
+                st.error(f"Dataset update error: {ex}")
     elif total:
-        st.success("✅ Local dataset ready. No Dhan/API calls are made during backtesting.")
+        st.success("✅ Required local historical data is available. No Dhan/API calls are made by the backtest.")
+    elif not tickers:
+        st.warning("Select at least one universe.")
 
     st.markdown("### 2️⃣ Run Backtest")
-    if total and ready==total:
-        if st.button("⚡ RUN LOCAL S1–S4 BACKTEST",type="primary",key="run_local_bt"):
+    # The button is ALWAYS visible when a universe is selected. Missing stocks never hide it.
+    can_run=bool(total and ready>0)
+    if can_run:
+        label=f"⚡ RUN LOCAL S1–S4 BACKTEST ({ready:,} available stocks)"
+        if st.button(label,type="primary",key="run_local_bt"):
             t0=time.perf_counter()
             try:
                 with st.spinner("Replaying all qualifying S1–S4 signals from local candles..."):
                     bt=run_local_backtest(tickers,start_date,end_date,int(threshold))
                 elapsed=time.perf_counter()-t0
-                _persist_backtest(bt,period,start_date,end_date,int(threshold),len(tickers),elapsed)
+                _persist_backtest(bt,period,start_date,end_date,int(threshold),ready,elapsed)
                 learned=_learn_from_backtest(bt)
                 st.session_state["backtest_final"]=bt
                 st.session_state["backtest_learning_added"]=learned
-                st.success(f"Completed in {elapsed:.2f}s — {len(bt):,} qualifying trades; {learned:,} learning observations saved.")
-            except Exception as ex:st.error(f"Backtest error: {ex}")
+                if bt.empty:
+                    st.warning(f"Backtest completed in {elapsed:.2f}s. No S1–S4 setup met the ≥{threshold} score gate in the available historical data. This is a valid result; the dataset/engine worked.")
+                else:
+                    st.success(f"Completed in {elapsed:.2f}s — {len(bt):,} qualifying historical trades; {learned:,} persistent learning observations saved.")
+            except Exception as ex:
+                st.error(f"Backtest error: {ex}")
+    elif total==0:
+        st.info("Select a universe to enable the backtest.")
     else:
-        st.info("Build the local dataset first. 6-month backtests still require warm-up history for EMA250 and MTF calculations.")
+        st.info("No usable local historical dataset is available yet. Build/update the Dhan dataset above.")
 
     bt=st.session_state.get("backtest_final",pd.DataFrame())
     if bt.empty:
         bt,_run=_load_latest_backtest()
-        if not bt.empty:st.session_state["backtest_final"]=bt
+        if not bt.empty: st.session_state["backtest_final"]=bt
+
     if bt.empty:
-        st.info("No completed backtest is stored yet. Build the dataset and run the backtest once.")
+        _ensure_backtest_tables()
+        con=_db()
+        try:
+            latest=con.execute("SELECT period,start_date,end_date,threshold,universe_size,trades,elapsed_seconds,status,created_at FROM backtest_runs ORDER BY run_id DESC LIMIT 1").fetchone()
+        finally:
+            con.close()
+        if latest:
+            st.info(f"Latest stored backtest: {latest[0]} | {latest[1]} → {latest[2]} | {latest[5]:,} trades | {latest[6]:.2f}s | {latest[7]} — run again above to load/display a new result.")
+        else:
+            st.info("No completed backtest is stored yet. Use the visible RUN button above.")
     else:
         st.subheader("🏆 Historical Learning Dataset")
         a,b,c,d,e=st.columns(5)
-        a.metric("Trades",len(bt));b.metric("S1",int((bt.Strategy=='S1').sum()));c.metric("S2",int((bt.Strategy=='S2').sum()));d.metric("S3",int((bt.Strategy=='S3').sum()));e.metric("S4",int((bt.Strategy=='S4').sum()))
+        a.metric("Trades",len(bt)); b.metric("S1",int((bt.Strategy=='S1').sum())); c.metric("S2",int((bt.Strategy=='S2').sum())); d.metric("S3",int((bt.Strategy=='S3').sum())); e.metric("S4",int((bt.Strategy=='S4').sum()))
         st.dataframe(bt.sort_values(["Score","Date"],ascending=[False,False]),use_container_width=True,hide_index=True)
 
         st.subheader("📈 Strategy Performance / ROI / Risk")
         perf=[]
         for strat,g in bt.groupby('Strategy'):
-            wins=g[g['R']>0];loss=g[g['R']<=0];grossw=float(wins['R'].sum());grossl=abs(float(loss['R'].sum()))
-            pf=grossw/grossl if grossl>0 else (99.99 if grossw>0 else 0)
+            wins=g[g['R']>0]; loss=g[g['R']<=0]; grossw=float(wins['R'].sum()); grossl=abs(float(loss['R'].sum())); pf=grossw/grossl if grossl>0 else (99.99 if grossw>0 else 0)
             perf.append({'Strategy':strat,'Trades':len(g),'Win %':round((g.R>0).mean()*100,1),'Avg R':round(g.R.mean(),3),'Total R':round(g.R.sum(),2),'Profit Factor':round(pf,2),'Avg Return %':round(g['Return %'].mean(),2),'Avg MFE %':round(g['MFE %'].mean(),2),'Avg MAE %':round(g['MAE %'].mean(),2),'Best Score':int(g.Score.max())})
         st.dataframe(pd.DataFrame(perf).sort_values('Avg R',ascending=False),use_container_width=True,hide_index=True)
 
         st.subheader("💰 Capital / ROI Simulation")
-        pc1,pc2,pc3=st.columns(3);capital=pc1.number_input("Starting capital ₹",10000,100000000,100000,10000,key='bt_capital');risk_pct=pc2.number_input("Risk per trade %",0.1,5.0,1.0,0.1,key='bt_risk');slots=pc3.number_input("Capital slots",1,50,5,1,key='bt_slots')
-        roi=portfolio_from_backtest(bt,float(capital),float(risk_pct),int(slots));st.dataframe(pd.DataFrame([roi]),use_container_width=True,hide_index=True)
+        pc1,pc2,pc3=st.columns(3); capital=pc1.number_input("Starting capital ₹",10000,100000000,100000,10000,key='bt_capital'); risk_pct=pc2.number_input("Risk per trade %",0.1,5.0,1.0,0.1,key='bt_risk'); slots=pc3.number_input("Capital slots",1,50,5,1,key='bt_slots')
+        roi=portfolio_from_backtest(bt,float(capital),float(risk_pct),int(slots)); st.dataframe(pd.DataFrame([roi]),use_container_width=True,hide_index=True)
 
         st.subheader("🎯 Score Learning")
-        bands=pd.cut(bt.Score,[84,89,94,100],labels=["85–89","90–94","95–100"],include_lowest=True);bx=bt.assign(Band=bands,Win=(bt.Outcome.str.upper()=='WIN').astype(int))
-        learn=bx.groupby('Band',observed=True).agg(Signals=('Ticker','count'),Wins=('Win','sum'),WinRate=('Win','mean'),AvgR=('R','mean'),TotalR=('R','sum'),AvgReturn=('Return %','mean'),AvgMFE=('MFE %','mean'),AvgMAE=('MAE %','mean')).reset_index();learn['WinRate']=(learn.WinRate*100).round(1);learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']]=learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']].round(2);st.dataframe(learn,use_container_width=True,hide_index=True)
+        bands=pd.cut(bt.Score,[84,89,94,100],labels=["85–89","90–94","95–100"],include_lowest=True); bx=bt.assign(Band=bands,Win=(bt.Outcome.str.upper()=='WIN').astype(int))
+        learn=bx.groupby('Band',observed=True).agg(Signals=('Ticker','count'),Wins=('Win','sum'),WinRate=('Win','mean'),AvgR=('R','mean'),TotalR=('R','sum'),AvgReturn=('Return %','mean'),AvgMFE=('MFE %','mean'),AvgMAE=('MAE %','mean')).reset_index(); learn['WinRate']=(learn.WinRate*100).round(1); learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']]=learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']].round(2); st.dataframe(learn,use_container_width=True,hide_index=True)
 
         st.subheader("🧠 Marking Conditions Used")
-        st.info("A row exists only when ALL mandatory rules of its strategy passed. The columns below preserve the score components used to rank the historical setup; the strategy itself is independently re-evaluated from the full rule set.")
-        st.dataframe(bt[['Ticker','Date','Strategy','Score','Strategy Score','HTF','Footprint','Trend','Entry Quality','Relative Strength','Safety','Regime','Outcome','R','Return %','MFE %','MAE %','Holding Bars']].sort_values('Score',ascending=False),use_container_width=True,hide_index=True)
+        st.info("Each historical row exists only when ALL mandatory rules of its strategy passed. The score components below show exactly what drove the ranking; the deterministic S1–S4 rules remain unchanged.")
+        st.dataframe(bt[['Ticker','Date','Strategy','Score','≥85 Gate','Strategy Score','HTF','Footprint','Trend','Entry Quality','Relative Strength','Safety','Regime','Entry','SL','Target','Exit','Outcome','R','Return %','MFE %','MAE %','Holding Bars']].sort_values('Score',ascending=False),use_container_width=True,hide_index=True)
 
         st.subheader("🔎 Individual Strategy Results")
         stabs=st.tabs(['S1','S2','S3','S4'])
@@ -3021,7 +3071,12 @@ with tabs[3]:
     try:ft=pd.read_sql_query('SELECT * FROM forward_tests ORDER BY created_at DESC',con)
     finally:con.close()
     if ft.empty:
-        st.info('No active forward-test records yet. This is expected until a current scanner run produces complete-rule ≥85 candidates. Historical backtest trades are NOT treated as live trades.')
+        st.info('No ACTIVE forward-test records yet. This is intentionally separate from historical backtesting. Run the Daily Scanner; only current complete-rule ≥85 candidates are added to the forward-test queue.')
+        latest_bt=st.session_state.get('backtest_final',pd.DataFrame())
+        if latest_bt is not None and not latest_bt.empty:
+            hist_gate=latest_bt[latest_bt['Score']>=85].copy()
+            st.metric('Historical ≥85 setups (not live)',len(hist_gate))
+            st.caption('Historical setups are shown for learning only; they are never automatically treated as live forward trades.')
         q=st.session_state.get('forward_queue',pd.DataFrame())
         if q is not None and not q.empty:
             st.subheader('🚀 Latest Live Candidate Queue')
@@ -3039,7 +3094,14 @@ with tabs[4]:
         if not bt.empty:st.session_state['backtest_final']=bt
     learn_db=learning_snapshot('INDIA')
     if bt.empty and learn_db.empty:
-        st.info('No learning observations yet. Run a backtest or complete forward-test trades first.')
+        _ensure_backtest_tables(); con=_db()
+        try:
+            latest=con.execute("SELECT period,start_date,end_date,trades,elapsed_seconds,status,created_at FROM backtest_runs ORDER BY run_id DESC LIMIT 1").fetchone()
+        finally: con.close()
+        if latest:
+            st.info(f"A backtest run exists ({latest[0]} | {latest[1]} → {latest[2]} | {latest[3]:,} trades | {latest[5]}), but there are no persisted learning observations yet. Re-run the backtest to populate learning.")
+        else:
+            st.info('No learning observations yet. Run a backtest or complete forward-test trades first.')
     else:
         if not bt.empty:
             st.subheader('📊 Historical Evidence')
