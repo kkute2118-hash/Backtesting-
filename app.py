@@ -13,6 +13,15 @@ from datetime import date, timedelta, datetime
 from pathlib import Path
 import math
 
+# Browser URL bridge: Streamlit fragments are client-side and are not exposed to
+# st.query_params. Dhan may return tokenId on a URL that contains the Streamlit
+# page fragment. This component lets us read the browser URL and consume tokenId
+# without asking the user to paste an access token.
+try:
+    from streamlit_js_eval import streamlit_js_eval
+except Exception:
+    streamlit_js_eval = None
+
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
 APP_VERSION = "PROFESSIONAL FINAL — Dhan API-Key OAuth / Local-First Research"
@@ -160,39 +169,83 @@ def dhan_consume_token(token_id):
     st.session_state["dhan_consent_app_id"]=""
     return j
 
-def dhan_process_redirect():
-    """Consume tokenId once when Dhan redirects back to Streamlit."""
+def _extract_dhan_token_from_url(url):
+    """Extract tokenId from both normal query strings and Streamlit hash routes."""
+    import re
+    if not url:
+        return ""
+    text=str(url)
+    # Normal: ?tokenId=... or &tokenId=...
+    m=re.search(r"(?:[?&])tokenId=([^&#]+)", text, flags=re.I)
+    if m:
+        return m.group(1).strip()
+    # Fragment route seen in Streamlit: #1-page-name?tokenId=...
+    m=re.search(r"#.*?[?&]tokenId=([^&#]+)", text, flags=re.I)
+    return m.group(1).strip() if m else ""
+
+def dhan_process_redirect(browser_url=None):
+    """Consume Dhan tokenId from normal query params OR a Streamlit URL fragment."""
+    token=None
     try:
         params=st.query_params
         token=params.get("tokenId") or params.get("tokenid")
     except Exception:
         token=None
+    if not token and browser_url:
+        token=_extract_dhan_token_from_url(browser_url)
     if not token:
         return None
-    token=str(token)
+    token=str(token).strip()
     last=st.session_state.get("dhan_last_token_id")
     if last==token:
         return None
     st.session_state["dhan_last_token_id"]=token
     try:
         result=dhan_consume_token(token)
-        # Remove the one-time token from the visible URL after consuming it.
+        # Remove normal query parameters. Fragment cleanup is done with JS below.
         try:
             st.query_params.clear()
         except Exception:
             pass
-        st.session_state["dhan_auth_message"]="Dhan authentication completed successfully."
+        st.session_state["dhan_auth_message"]="Dhan authentication completed successfully. Access token generated."
+        st.session_state["dhan_oauth_cleanup_needed"]=True
         return result
     except Exception as exc:
         st.session_state["dhan_auth_message"]=f"Dhan authentication failed: {exc}"
         return None
 
+# Process an OAuth redirect before any authenticated API check.
+# A browser URL is captured when the optional JS bridge is installed; this is
+# specifically for the fragment form visible in the user's Streamlit URL.
+_dhan_browser_url = None
+if streamlit_js_eval is not None:
+    try:
+        _dhan_browser_url = streamlit_js_eval(
+            js_expressions="window.location.href",
+            key="dhan_browser_url_capture",
+            want_output=True,
+        )
+    except Exception:
+        _dhan_browser_url = None
+dhan_process_redirect(_dhan_browser_url)
+
+# After successful OAuth, remove tokenId from the browser address bar, including
+# the Streamlit hash route form. This does not contact Dhan and is safe to run
+# more than once.
+if st.session_state.get("dhan_oauth_cleanup_needed") and streamlit_js_eval is not None:
+    try:
+        streamlit_js_eval(
+            js_expressions="window.history.replaceState({}, document.title, window.location.origin + window.location.pathname); true",
+            key="dhan_oauth_cleanup",
+            want_output=True,
+        )
+        st.session_state["dhan_oauth_cleanup_needed"]=False
+    except Exception:
+        pass
+
 def dhan_clear_session():
     for k in ["dhan_access_token","dhan_token_expiry","dhan_client_name","dhan_client_ucc","dhan_consent_app_id","dhan_last_token_id"]:
         st.session_state.pop(k,None)
-
-# Process an OAuth redirect before any authenticated API check.
-dhan_process_redirect()
 
 
 def _db():
