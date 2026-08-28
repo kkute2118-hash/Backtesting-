@@ -2470,9 +2470,18 @@ st.title("🧠 Adaptive Trading Intelligence Lab — Professional Final")
 st.caption("Dhan-first • persistent local data • exact S1–S4 • no-lookahead walk-forward • adaptive learning • S4 recovery research • fundamentals/news enrichment")
 
 tabs=st.tabs([
-    "🏠 Dashboard","📡 Daily Scanner","📊 Backtest","🔬 Forward Testing",
-    "🧠 Market Learning","💎 Long-Term Fundamentals","🏢 Small/Micro Safety",
-    "⚡ Live Monitor","💾 Dhan Data Manager","🧪 S4 Recovery Study","🧪 Custom Strategy","🧬 Research & Risk Control"
+    "🏠 Dashboard",
+    "📡 Daily Scanner",
+    "📊 Backtest",
+    "🔬 Forward Testing",
+    "🧠 Market Learning",
+    "💎 Long-Term Fundamentals",
+    "🏢 Small/Micro Safety",
+    "🧪 Custom Strategy",
+    "💾 Dhan Data Manager",
+    "🧪 S4 Recovery Study",
+    "🧬 Research & Risk Control",
+    "⚙️ System Diagnostics"
 ])
 
 with tabs[0]:
