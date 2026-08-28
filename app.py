@@ -3215,7 +3215,16 @@ with tabs[6]:
             finally:
                 con2.close()
             if d.empty:
-                d=download_prices([sym],date.today()-timedelta(days=180),date.today(),max_workers=1).get(sym,pd.DataFrame())
+                # Safety analysis is local-first. Never trigger a hidden Dhan
+                # historical download from a tab rerun.
+                rows.append({
+                    "Stock":sym,
+                    "Safety Score":0,
+                    "Status":"NO LOCAL DATA",
+                    "News Risk":None,
+                    "Flags":"Build/sync this symbol in Dhan Data Manager first"
+                })
+                continue
             info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
             sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
             rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
@@ -3243,9 +3252,17 @@ with tabs[7]:
         mgr=get_dhan_live_manager()
         mgr.stop()
     else:
-        mgr=start_persistent_live_feed(active.symbol.tolist())
-        status,error,last_tick,subscribed=mgr.snapshot()
+        st.info(
+            "Live WebSocket is OFF by default. Opening another tab never starts a "
+            "network connection. Use the button below only when you want live monitoring."
+        )
+        if st.button("▶️ Start Live WebSocket", key="start_ws_manual"):
+            mgr=start_persistent_live_feed(active.symbol.tolist())
+            st.session_state["live_ws_requested"]=True
+        else:
+            mgr=get_dhan_live_manager()
 
+        status,error,last_tick,subscribed=mgr.snapshot()
         a,b,c,d=st.columns(4)
         a.metric("WebSocket",status)
         b.metric("Active setups",len(active))
@@ -3255,16 +3272,14 @@ with tabs[7]:
         if error:
             st.warning(f"Last WebSocket error: {error}")
 
-        q=live_forward_test_table()
-        if q.empty:
-            st.info("Waiting for the first Dhan WebSocket ticks...")
+        if st.session_state.get("live_ws_requested", False):
+            q=live_forward_test_table()
+            if q.empty:
+                st.info("Waiting for the first Dhan WebSocket ticks...")
+            else:
+                st.dataframe(q,use_container_width=True,hide_index=True)
         else:
-            st.dataframe(q,use_container_width=True,hide_index=True)
-
-        st.caption(
-            "The feed is persistent only while this Streamlit application process is running. "
-            "If the app sleeps/restarts, the manager reconnects automatically when the app resumes."
-        )
+            st.caption("No live network activity has been started.")
 
 with tabs[8]:
     st.subheader("💾 Dhan Data Manager")
