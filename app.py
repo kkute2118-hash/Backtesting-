@@ -13,18 +13,9 @@ from datetime import date, timedelta, datetime
 from pathlib import Path
 import math
 
-# Browser URL bridge: Streamlit fragments are client-side and are not exposed to
-# st.query_params. Dhan may return tokenId on a URL that contains the Streamlit
-# page fragment. This component lets us read the browser URL and consume tokenId
-# without asking the user to paste an access token.
-try:
-    from streamlit_js_eval import streamlit_js_eval
-except Exception:
-    streamlit_js_eval = None
-
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
-APP_VERSION = "PROFESSIONAL FINAL — Dhan API-Key OAuth / Local-First Research"
+APP_VERSION = "GTF PROFESSIONAL CORE v2 — Single Dataset / Local Research"
 ARCHITECTURE_STANDARD = "Deterministic rules • no-lookahead • persistent data • adaptive ranking • human approval"
 
 # ========================= DATA =========================
@@ -47,206 +38,24 @@ def index_universe(name):
 
 # ========================= DHAN PERSISTENT DATA ENGINE =========================
 DHAN_BASE_URL="https://api.dhan.co/v2"
-DHAN_AUTH_BASE_URL="https://auth.dhan.co"
 DATA_DB="market_data.sqlite3"
-DHAN_MIN_INTERVAL=0.22  # below Dhan's documented 5 data-API requests/sec
+DHAN_MIN_INTERVAL=0.205  # stay below the documented 5 data-API requests/sec
 _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
 _DHAN_LAST_DATA_ERRORS=[]
 
-# ---------------------------------------------------------------------------
-# Dhan authentication: API-key based OAuth/consent flow.
-# The API key + secret are long-lived application credentials (Dhan documents
-# 12-month validity). They are NEVER sent to market-data endpoints. They are
-# used only to create/consume a consent session and obtain a short-lived access
-# token. The access token is kept in Streamlit session state, not in source code.
-# ---------------------------------------------------------------------------
-def _secret(name, default=""):
-    try:
-        v=st.secrets.get(name, default)
-        return str(v).strip() if v is not None else default
-    except Exception:
-        return default
-
-def _session_access_token():
-    try:
-        return str(st.session_state.get("dhan_access_token", "") or "").strip()
-    except Exception:
-        return ""
-
-def _session_token_expiry():
-    try:
-        return str(st.session_state.get("dhan_token_expiry", "") or "").strip()
-    except Exception:
-        return ""
-
-def dhan_api_key_configured():
-    return bool(_secret("DHAN_CLIENT_ID") and _secret("DHAN_API_KEY") and _secret("DHAN_API_SECRET"))
-
 def dhan_configured():
-    """True only when API-key credentials exist AND a generated access token exists."""
-    return bool(_secret("DHAN_CLIENT_ID") and _session_access_token())
-
-def dhan_auth_redirect_url():
-    """Exact redirect URL registered in Dhan. Prefer an explicit secret."""
-    configured=_secret("DHAN_REDIRECT_URL")
-    if configured:
-        return configured.rstrip("/")
     try:
-        host=str(st.context.headers.get("host", "")).strip()
+        return bool(st.secrets["DHAN_CLIENT_ID"]) and bool(st.secrets["DHAN_ACCESS_TOKEN"])
     except Exception:
-        host=""
-    if host:
-        return "https://"+host
-    return ""
+        return False
 
 def _dhan_headers():
-    token=_session_access_token()
-    if not token:
-        raise RuntimeError("No active Dhan access token. Use CONNECT DHAN (API KEY) first.")
     return {
-        "access-token":token,
-        "client-id":_secret("DHAN_CLIENT_ID"),
+        "access-token":str(st.secrets["DHAN_ACCESS_TOKEN"]),
+        "client-id":str(st.secrets["DHAN_CLIENT_ID"]),
         "Content-Type":"application/json","Accept":"application/json"
     }
-
-def dhan_api_key_diagnostic():
-    return {
-        "client_id":bool(_secret("DHAN_CLIENT_ID")),
-        "api_key":bool(_secret("DHAN_API_KEY")),
-        "api_secret":bool(_secret("DHAN_API_SECRET")),
-        "redirect_url":bool(dhan_auth_redirect_url()),
-        "access_token":bool(_session_access_token()),
-        "expiry":_session_token_expiry(),
-    }
-
-def dhan_generate_consent():
-    """Create a Dhan consentAppId. This is a server-side, read-only auth call."""
-    if not dhan_api_key_configured():
-        raise RuntimeError("Missing DHAN_CLIENT_ID, DHAN_API_KEY or DHAN_API_SECRET in Streamlit Secrets.")
-    r=requests.post(
-        f"{DHAN_AUTH_BASE_URL}/app/generate-consent",
-        params={"client_id":_secret("DHAN_CLIENT_ID")},
-        headers={"app_id":_secret("DHAN_API_KEY"),"app_secret":_secret("DHAN_API_SECRET"),"Accept":"application/json"},
-        timeout=30,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Dhan consent generation failed ({r.status_code}): {r.text[:500]}")
-    j=r.json()
-    consent=str(j.get("consentAppId", "")).strip()
-    if not consent:
-        raise RuntimeError("Dhan did not return consentAppId: "+str(j)[:500])
-    st.session_state["dhan_consent_app_id"]=consent
-    st.session_state["dhan_consent_created_at"]=datetime.now().isoformat(timespec="seconds")
-    return consent
-
-def dhan_login_url(consent_app_id):
-    return f"{DHAN_AUTH_BASE_URL}/login/consentApp-login?consentAppId={consent_app_id}"
-
-def dhan_consume_token(token_id):
-    """Consume tokenId returned to the registered redirect URL and save token in session."""
-    if not dhan_api_key_configured():
-        raise RuntimeError("Dhan API-key credentials are not configured.")
-    token_id=str(token_id or "").strip()
-    if not token_id:
-        raise RuntimeError("Missing Dhan tokenId.")
-    r=requests.get(
-        f"{DHAN_AUTH_BASE_URL}/app/consumeApp-consent",
-        params={"tokenId":token_id},
-        headers={"app_id":_secret("DHAN_API_KEY"),"app_secret":_secret("DHAN_API_SECRET"),"Accept":"application/json"},
-        timeout=30,
-    )
-    if not r.ok:
-        raise RuntimeError(f"Dhan consent consumption failed ({r.status_code}): {r.text[:500]}")
-    j=r.json()
-    access=str(j.get("accessToken", "")).strip()
-    if not access:
-        raise RuntimeError("Dhan did not return accessToken: "+str(j)[:500])
-    st.session_state["dhan_access_token"]=access
-    st.session_state["dhan_token_expiry"]=str(j.get("expiryTime", ""))
-    st.session_state["dhan_client_name"]=str(j.get("dhanClientName", ""))
-    st.session_state["dhan_client_ucc"]=str(j.get("dhanClientUcc", ""))
-    st.session_state["dhan_consent_app_id"]=""
-    return j
-
-def _extract_dhan_token_from_url(url):
-    """Extract tokenId from both normal query strings and Streamlit hash routes."""
-    import re
-    if not url:
-        return ""
-    text=str(url)
-    # Normal: ?tokenId=... or &tokenId=...
-    m=re.search(r"(?:[?&])tokenId=([^&#]+)", text, flags=re.I)
-    if m:
-        return m.group(1).strip()
-    # Fragment route seen in Streamlit: #1-page-name?tokenId=...
-    m=re.search(r"#.*?[?&]tokenId=([^&#]+)", text, flags=re.I)
-    return m.group(1).strip() if m else ""
-
-def dhan_process_redirect(browser_url=None):
-    """Consume Dhan tokenId from normal query params OR a Streamlit URL fragment."""
-    token=None
-    try:
-        params=st.query_params
-        token=params.get("tokenId") or params.get("tokenid")
-    except Exception:
-        token=None
-    if not token and browser_url:
-        token=_extract_dhan_token_from_url(browser_url)
-    if not token:
-        return None
-    token=str(token).strip()
-    last=st.session_state.get("dhan_last_token_id")
-    if last==token:
-        return None
-    st.session_state["dhan_last_token_id"]=token
-    try:
-        result=dhan_consume_token(token)
-        # Remove normal query parameters. Fragment cleanup is done with JS below.
-        try:
-            st.query_params.clear()
-        except Exception:
-            pass
-        st.session_state["dhan_auth_message"]="Dhan authentication completed successfully. Access token generated."
-        st.session_state["dhan_oauth_cleanup_needed"]=True
-        return result
-    except Exception as exc:
-        st.session_state["dhan_auth_message"]=f"Dhan authentication failed: {exc}"
-        return None
-
-# Process an OAuth redirect before any authenticated API check.
-# A browser URL is captured when the optional JS bridge is installed; this is
-# specifically for the fragment form visible in the user's Streamlit URL.
-_dhan_browser_url = None
-if streamlit_js_eval is not None:
-    try:
-        _dhan_browser_url = streamlit_js_eval(
-            js_expressions="window.location.href",
-            key="dhan_browser_url_capture",
-            want_output=True,
-        )
-    except Exception:
-        _dhan_browser_url = None
-dhan_process_redirect(_dhan_browser_url)
-
-# After successful OAuth, remove tokenId from the browser address bar, including
-# the Streamlit hash route form. This does not contact Dhan and is safe to run
-# more than once.
-if st.session_state.get("dhan_oauth_cleanup_needed") and streamlit_js_eval is not None:
-    try:
-        streamlit_js_eval(
-            js_expressions="window.history.replaceState({}, document.title, window.location.origin + window.location.pathname); true",
-            key="dhan_oauth_cleanup",
-            want_output=True,
-        )
-        st.session_state["dhan_oauth_cleanup_needed"]=False
-    except Exception:
-        pass
-
-def dhan_clear_session():
-    for k in ["dhan_access_token","dhan_token_expiry","dhan_client_name","dhan_client_ucc","dhan_consent_app_id","dhan_last_token_id"]:
-        st.session_state.pop(k,None)
-
 
 def _db():
     con=sqlite3.connect(DATA_DB,timeout=60,check_same_thread=False)
@@ -301,7 +110,7 @@ def dhan_history(symbol,start_date,end_date):
     payload={"securityId":sid,"exchangeSegment":"NSE_EQ","instrument":"EQUITY",
              "expiryCode":0,"oi":False,
              "fromDate":pd.Timestamp(start_date).strftime("%Y-%m-%d"),
-             "toDate":pd.Timestamp(end_date).strftime("%Y-%m-%d")}
+             "toDate":(pd.Timestamp(end_date)+pd.Timedelta(days=1)).strftime("%Y-%m-%d")}
     global _DHAN_LAST_REQUEST
     last_error=None
     for attempt in range(5):
@@ -324,6 +133,54 @@ def dhan_history(symbol,start_date,end_date):
     if j.get("timestamp"):d.index=pd.to_datetime(j["timestamp"],unit="s",errors="coerce")
     d=d.apply(pd.to_numeric,errors="coerce").dropna(subset=["close"]).sort_index()
     return d
+
+def dhan_historical_smoke_test(symbol="RELIANCE", days=30):
+    """One-symbol end-to-end test: Dhan -> parser -> SQLite.
+
+    This is intentionally separate from the 500-stock sync so a broken data
+    request or database write can be diagnosed without wasting time.
+    """
+    symbol=str(symbol).upper().replace(".NS","").strip()
+    before_con=_db()
+    try:
+        before=int(before_con.execute("SELECT COUNT(*) FROM candles WHERE symbol=?",(symbol,)).fetchone()[0])
+    finally:
+        before_con.close()
+
+    end=date.today()
+    start=end-timedelta(days=int(days))
+    started=time.perf_counter()
+    d=dhan_history(symbol,start,end)
+    request_seconds=time.perf_counter()-started
+    if d is None or d.empty:
+        raise RuntimeError(f"Dhan returned zero candles for {symbol} ({start} to {end}).")
+
+    d=d.copy().sort_index()
+    required=["open","high","low","close","volume"]
+    missing=[x for x in required if x not in d.columns]
+    if missing:
+        raise RuntimeError("Parsed historical data is missing columns: "+", ".join(missing))
+
+    con=_db()
+    try:
+        saved=_save(con,symbol,d)
+        after=int(con.execute("SELECT COUNT(*) FROM candles WHERE symbol=?",(symbol,)).fetchone()[0])
+        bounds=con.execute("SELECT MIN(dt),MAX(dt) FROM candles WHERE symbol=?",(symbol,)).fetchone()
+    finally:
+        con.close()
+
+    return {
+        "symbol":symbol,"security_id":str(dhan_map().get(symbol,"")),
+        "requested_start":str(start),"requested_end":str(end),
+        "http/parser_candles":int(len(d)),"saved_rows":int(saved),
+        "db_rows_before":before,"db_rows_after":after,
+        "db_min":bounds[0] if bounds else None,"db_max":bounds[1] if bounds else None,
+        "request_seconds":round(request_seconds,2),
+        "sample_first":d.index[0].strftime("%Y-%m-%d"),
+        "sample_last":d.index[-1].strftime("%Y-%m-%d"),
+        "sample_close":float(d.close.iloc[-1]),
+    }
+
 
 def _bounds(con,s):
     return con.execute("SELECT MIN(dt),MAX(dt) FROM candles WHERE symbol=?",(s,)).fetchone()
@@ -363,7 +220,8 @@ def download_prices(tickers,start,end,max_workers=4):
     """
     if not dhan_configured():
         raise RuntimeError(
-            "Dhan is not connected. Add DHAN_CLIENT_ID, DHAN_API_KEY and DHAN_API_SECRET to Streamlit Secrets, then use CONNECT DHAN (API KEY)."
+            "Dhan credentials are not configured. Add DHAN_CLIENT_ID and "
+            "DHAN_ACCESS_TOKEN to Streamlit Secrets."
         )
 
     dhan_map()
@@ -438,7 +296,7 @@ def dhan_connection_diagnostic():
     }
 
     if not dhan_configured():
-        result["details"].append("Dhan API-key credentials or active access token are missing. Use CONNECT DHAN (API KEY).")
+        result["details"].append("Dhan secrets missing: DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN")
         return result
 
     result["credentials"]=True
@@ -567,8 +425,8 @@ class DhanLiveManager:
 
                 self._set_status("CONNECTING")
                 ctx=DhanContext(
-                    _secret("DHAN_CLIENT_ID"),
-                    _session_access_token()
+                    str(st.secrets["DHAN_CLIENT_ID"]),
+                    str(st.secrets["DHAN_ACCESS_TOKEN"])
                 )
                 feed=MarketFeed(ctx,instruments,version="v2")
                 feed.run_forever()
@@ -1628,6 +1486,17 @@ def ensure_learning_tables():
                 source TEXT
             )
         """)
+        # Backward-compatible migration: older deployments created a narrower
+        # learning_observations table. Never require a destructive DB reset.
+        cols={r[1] for r in con.execute("PRAGMA table_info(learning_observations)").fetchall()}
+        for col,typ in {
+            "learned_score":"REAL", "holding_bars":"INTEGER",
+            "entry":"REAL", "exit_price":"REAL", "result_r":"REAL",
+            "source":"TEXT"
+        }.items():
+            if col not in cols:
+                con.execute(f"ALTER TABLE learning_observations ADD COLUMN {col} {typ}")
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS model_weights(
                 market TEXT NOT NULL,
@@ -1881,7 +1750,7 @@ def save_scan_state(market, universe_size, elapsed):
 
 
 # ========================= LONG-LIVED FAST ENGINE =========================
-ENGINE_VERSION = "FINAL-1"
+ENGINE_VERSION = "FINAL-2_ASOF_CACHE"
 
 def ensure_engine_tables():
     con = _db()
@@ -1977,7 +1846,6 @@ def _save_feature_snapshot(symbol, df):
     # Keep the feature store compact: one DataFrame per symbol.
     if df is None or df.empty:
         return
-    payload = pd.to_pickle(df, None)
     con = _db()
     try:
         # pd.to_pickle does not support bytes in all versions, so use a bytes buffer.
@@ -2063,7 +1931,7 @@ def features_fast(symbol, df):
     except Exception:pass
     return x
 
-def build_fast_data_cache(tickers, start, end, max_workers=12):
+def build_fast_data_cache(tickers, start, end, max_workers=5):
     """
     First run: populate Dhan history.
     Later runs: fetch only missing ranges and read locally.
@@ -2199,6 +2067,20 @@ def _load_latest_backtest():
 def _bt_file(symbol):
     return BT_CACHE_DIR/(str(symbol).upper().replace('.NS','').replace('/','_')+'.pkl')
 
+def load_local_market_dataset(tickers,start_date,end_date,min_bars=160):
+    """LOCAL-ONLY reader for scanner/research. Never calls Dhan."""
+    out={}
+    con=_db()
+    try:
+        for t in tickers:
+            s=str(t).upper().replace(".NS","")
+            d=_read_cache(con,s,start_date,end_date)
+            if d is not None and len(d)>=min_bars: out[t]=d
+    finally:
+        con.close()
+    return out
+
+
 def build_local_backtest_dataset(tickers,start_date,end_date):
     """Materialise the backtest dataset from LOCAL candles only.
 
@@ -2252,14 +2134,13 @@ def local_backtest_status(tickers,start_date,end_date):
                 f=_bt_file(s)
                 try:
                     # Re-materialise only when absent/stale; still LOCAL ONLY.
-                    if (not f.exists()) or f.stat().st_mtime < 0:
-                        d.sort_index().to_pickle(f)
-                    else:
-                        # Verify the cached file covers the same requested range.
+                    rewrite=True
+                    if f.exists():
                         cached=pd.read_pickle(f)
                         cached.index=pd.to_datetime(cached.index)
-                        if len(cached)<260 or cached.index.min()>pd.Timestamp(data_start) or cached.index.max()<pd.Timestamp(end_date):
-                            d.sort_index().to_pickle(f)
+                        rewrite = (len(cached)<260 or cached.index.min()>pd.Timestamp(data_start) or cached.index.max()<pd.Timestamp(end_date))
+                    if rewrite:
+                        d.sort_index().to_pickle(f)
                 except Exception:
                     d.sort_index().to_pickle(f)
             rows.append({'Ticker':str(t).replace('.NS',''),'Bars':n,'Ready':ok,'Start':a,'End':b})
@@ -2373,9 +2254,9 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                     safe, _, _ = safety({}, df.iloc[:i+1])
                     score, parts = _row_score(f, i, s, regime, safe)
 
-                    if score < threshold:
-                        continue
-
+                    # IMPORTANT: keep every complete-rule historical signal for learning.
+                    # The threshold is a forward-test gate/ranking filter, not a historical
+                    # data filter. This prevents survivorship-by-score in our research set.
                     entry_i = i + 1
                     entry = float(df.close.iloc[entry_i])
                     stop = entry * 0.93
@@ -2391,6 +2272,7 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                         "Ticker": str(ticker).replace(".NS",""),
                         "Strategy": f"S{s}",
                         "Score": score,
+                        "≥85 Gate": bool(score >= threshold),
                         "Entry": round(entry,2),
                         "SL": round(stop,2),
                         "Target": round(target,2),
@@ -2667,7 +2549,7 @@ with tabs[1]:
     if st.button("🔄 Scan Market Now", type="primary", key="scan_button_v4"):
         try:
             if not dhan_configured():
-                st.error("Dhan is not connected. Complete CONNECT DHAN (API KEY) first.")
+                st.error("Dhan is not configured. Add DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN to Streamlit Secrets.")
                 st.stop()
             if not selected_strategies:
                 st.warning("Select at least one strategy.")
@@ -2676,34 +2558,33 @@ with tabs[1]:
                 st.warning("Select at least one universe.")
                 st.stop()
 
-            idx_tickers = index_universe("Nifty 500")
-            idx_data = build_fast_data_cache(
-                tuple(idx_tickers),
-                date.today()-timedelta(days=1000),
-                date.today(),
-                max_workers=10
-            )
-
-            if not idx_data:
-                st.error("No Nifty 500 price data returned by Dhan. Check Dhan Connection Test and recent data-build errors.")
-                st.stop()
-
-            proxy = max(idx_data.values(), key=len)
-            regime, regime_score = regime_from_index(proxy)
-
             universe = set()
             for u in universes:
                 universe.update(index_universe(u))
             tickers = sorted(universe)
 
+            # Scanner is LOCAL-ONLY. Data acquisition belongs exclusively to the
+            # Data Manager / explicit sync action. This prevents every scan from
+            # becoming another Dhan historical download.
             t0 = time.perf_counter()
-            data = build_fast_data_cache(
-                tuple(tickers),
-                date.today()-timedelta(days=1000),
-                date.today(),
-                max_workers=10
-            )
+            data = {}
+            con=_db()
+            try:
+                for ticker in tickers:
+                    clean=str(ticker).upper().replace(".NS","")
+                    d=_read_cache(con,clean,date.today()-timedelta(days=1000),date.today())
+                    if d is not None and len(d)>=260:
+                        data[ticker]=d
+            finally:
+                con.close()
             scan_load_seconds = time.perf_counter() - t0
+
+            if not data:
+                st.error("Local dataset is empty/incomplete. Use Data Manager → SYNC ONLY MISSING DATA once, then scan again. Scanner itself never downloads historical data.")
+                st.stop()
+
+            proxy = max(data.values(), key=len)
+            regime, regime_score = regime_from_index(proxy)
 
             if not data:
                 st.error(
@@ -2821,7 +2702,7 @@ with tabs[1]:
                     for ticker, df in data.items():
                         if len(df) < 260:
                             continue
-                        f = features(df)
+                        f = features_fast(str(ticker), df)
                         if f.empty:
                             continue
                         z = f.iloc[-1]
@@ -2868,7 +2749,7 @@ with tabs[1]:
                     for ticker, df in data.items():
                         if len(df) < 260:
                             continue
-                        f = features(df)
+                        f = features_fast(str(ticker), df)
                         if f.empty:
                             continue
                         z = f.iloc[-1]
@@ -3160,7 +3041,7 @@ with tabs[2]:
     universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
     start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
     tickers=sorted(set(sum([index_universe(u) for u in universes],[]))) if universes else []
-    st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | gate ≥{threshold}")
+    st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | learning keeps ALL complete-rule signals | forward gate ≥{threshold}")
 
     st.markdown("### 1️⃣ Local Dataset")
     status=local_backtest_status(tickers,start_date,end_date) if tickers else pd.DataFrame()
@@ -3380,48 +3261,9 @@ with tabs[8]:
     st.subheader("💾 Dhan Data Manager")
     st.caption("Dhan is the primary Indian-equity market-data source. Historical candles are cached locally; backtests use the local dataset after it is built.")
 
-    # ---- API-key OAuth authentication ----------------------------------------
-    st.markdown("### 🔐 Dhan API-Key Authentication")
-    st.caption("GTF uses your Dhan API Key + Secret to create a consent session. After you complete Dhan login/2FA, Dhan redirects back here and GTF consumes the tokenId to obtain the short-lived access token. No order API is used.")
-
-    authdiag=dhan_api_key_diagnostic()
-    a,b,c,d=st.columns(4)
-    a.metric("Client ID", "READY" if authdiag["client_id"] else "MISSING")
-    b.metric("API Key", "READY" if authdiag["api_key"] else "MISSING")
-    c.metric("API Secret", "READY" if authdiag["api_secret"] else "MISSING")
-    d.metric("Access Token", "ACTIVE" if authdiag["access_token"] else "NOT CONNECTED")
-
-    if authdiag["expiry"]:
-        st.caption("Current token expiry: "+authdiag["expiry"])
-    redirect=dhan_auth_redirect_url()
-    if redirect:
-        st.code(redirect,language="text")
-        st.caption("This must exactly match the Redirect URL registered in your Dhan API-key application. Do not add a URL fragment such as #... .")
-    else:
-        st.warning("Unable to determine the Streamlit HTTPS URL. Add DHAN_REDIRECT_URL to Streamlit Secrets using the exact URL registered in Dhan.")
-
-    if st.button("🔐 CONNECT DHAN (API KEY)",type="primary",key="dhan_api_key_connect"):
-        try:
-            consent=dhan_generate_consent()
-            st.success("Consent session created. Complete Dhan login/2FA using the button below.")
-            st.link_button("➡️ LOGIN TO DHAN",dhan_login_url(consent),use_container_width=False)
-        except Exception as ex:
-            st.error(f"Could not start Dhan authentication: {ex}")
-
-    consent=st.session_state.get("dhan_consent_app_id","")
-    if consent:
-        st.link_button("➡️ CONTINUE DHAN LOGIN",dhan_login_url(consent))
-        st.caption("After successful login Dhan redirects to this app. The tokenId is consumed automatically.")
-
-    if st.session_state.get("dhan_auth_message"):
-        st.info(st.session_state["dhan_auth_message"])
-    if st.button("🔒 CLEAR DHAN SESSION",key="dhan_clear_session"):
-        dhan_clear_session()
-        st.rerun()
-
     # ---- Explicit, read-only Dhan health check --------------------------------
     st.markdown("### 🔌 Dhan Connection Test")
-    st.caption("This test never places an order. It verifies the generated access token, instrument mapping, authenticated LTP, and authenticated historical data using RELIANCE.")
+    st.caption("These tests never place an order. First prove the Dhan historical API, then prove Dhan → parser → SQLite with one stock before starting a large sync.")
 
     if st.button("🧪 TEST DHAN CONNECTION",type="primary",key="dhan_connection_test"):
         with st.spinner("Testing Dhan connection..."):
@@ -3444,6 +3286,25 @@ with tabs[8]:
             st.error("🔴 Dhan connection is not fully verified. Read the diagnostics below.")
         for msg in diag["details"]:
             st.write("•",msg)
+
+    st.markdown("### 🧪 One-Stock Data Smoke Test")
+    st.caption("This downloads only RELIANCE for a small diagnostic range and immediately verifies that candles were written to SQLite. It does NOT start the 500-stock sync.")
+    smoke_days=st.selectbox("Smoke-test range",[7,30,90],index=1,key="dhan_smoke_days")
+    if st.button("🔎 TEST DHAN → SQLITE (RELIANCE)",type="secondary",key="dhan_smoke_test"):
+        try:
+            with st.spinner("Testing Dhan historical data and SQLite write..."):
+                smoke=dhan_historical_smoke_test("RELIANCE",int(smoke_days))
+            st.success(f"✅ End-to-end data test passed: {smoke['http/parser_candles']:,} candles received and {smoke['saved_rows']:,} rows written/updated in SQLite.")
+            q1,q2,q3,q4=st.columns(4)
+            q1.metric("Security ID",smoke["security_id"])
+            q2.metric("Candles received",smoke["http/parser_candles"])
+            q3.metric("DB rows after",smoke["db_rows_after"])
+            q4.metric("Request time",f"{smoke['request_seconds']:.2f}s")
+            st.write(f"**Requested:** {smoke['requested_start']} → {smoke['requested_end']}  |  **Returned:** {smoke['sample_first']} → {smoke['sample_last']}  |  **DB:** {smoke['db_min']} → {smoke['db_max']}")
+            st.write(f"**Latest RELIANCE close:** ₹{smoke['sample_close']:,.2f}")
+        except Exception as ex:
+            st.error(f"❌ End-to-end data test failed: {ex}")
+            st.warning("Do not start the 500-stock sync until this one-stock test passes.")
 
     st.markdown("### 📦 Local Dataset")
     st.caption("Historical acquisition is controlled ONLY from this section. Backtest and scanner never synchronize historical data.")
@@ -3490,7 +3351,7 @@ with tabs[8]:
     c.metric("Latest candle",latest or "—")
 
     if ns==0:
-        st.warning("⚠️ Cache is empty. Complete CONNECT DHAN (API KEY), run TEST DHAN CONNECTION, then use SYNC ONLY MISSING DATA.")
+        st.warning("⚠️ Cache is empty. Run the Dhan Connection Test first, then use SYNC ONLY MISSING DATA in this Data Manager.")
     else:
         st.success(f"🟢 Local Dhan dataset contains {ns:,} stocks and {nc:,} candles.")
 
@@ -3525,7 +3386,7 @@ with tabs[9]:
     if st.button("🔬 Study S4 Recovery Pattern",type="primary",key="s4study_run"):
         try:
             tickers=index_universe(study_universe)
-            data=build_fast_data_cache(tuple(tickers),date.today()-timedelta(days=1000),date.today(),max_workers=10)
+            data=load_local_market_dataset(tuple(tickers),date.today()-timedelta(days=1000),date.today(),160)
             # Use custom impulse/base settings while retaining the research-only definition.
             rows=[]
             for ticker,d in data.items():
@@ -3667,7 +3528,7 @@ with tabs[11]:
     if st.button("🔬 RUN S4 RECOVERY WALK-FORWARD STUDY",type="primary",key="s4_walk_run"):
         try:
             sd,ed=_bt_period(study_years); ticks=index_universe(study_universe)
-            data=build_fast_data_cache(tuple(ticks),sd-timedelta(days=1000),ed,max_workers=8)
+            data=load_local_market_dataset(tuple(ticks),sd-timedelta(days=1000),ed,160)
             study=study_s4_recovery_walkforward(data,sd,ed,study_threshold)
             st.session_state["s4_recovery_bt_final"]=study
         except Exception as ex: st.error(f"S4 Recovery study error: {ex}")
