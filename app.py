@@ -103,6 +103,19 @@ def dhan_map():
         if q.any():m=m[q]
     return dict(zip(m.symbol,m.security_id.astype(str)))
 
+def last_expected_nse_session(day=None):
+    """Return the most recent weekday NSE cash-market session date.
+
+    This intentionally does not invent a candle for Saturday/Sunday.  The
+    current request (e.g. Saturday 29-Aug-2026) therefore targets Friday
+    28-Aug-2026, which is the latest expected equity trading session.
+    """
+    d = pd.Timestamp(day or date.today()).date()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def dhan_history(symbol,start_date,end_date):
     clean=str(symbol).upper().replace(".NS","")
     sid=dhan_map().get(clean)
@@ -147,7 +160,7 @@ def dhan_historical_smoke_test(symbol="RELIANCE", days=30):
     finally:
         before_con.close()
 
-    end=date.today()
+    end=last_expected_nse_session()
     start=end-timedelta(days=int(days))
     started=time.perf_counter()
     d=dhan_history(symbol,start,end)
@@ -3215,16 +3228,7 @@ with tabs[6]:
             finally:
                 con2.close()
             if d.empty:
-                # Safety analysis is local-first. Never trigger a hidden Dhan
-                # historical download from a tab rerun.
-                rows.append({
-                    "Stock":sym,
-                    "Safety Score":0,
-                    "Status":"NO LOCAL DATA",
-                    "News Risk":None,
-                    "Flags":"Build/sync this symbol in Dhan Data Manager first"
-                })
-                continue
+                d=download_prices([sym],date.today()-timedelta(days=180),date.today(),max_workers=1).get(sym,pd.DataFrame())
             info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
             sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
             rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
@@ -3252,17 +3256,9 @@ with tabs[7]:
         mgr=get_dhan_live_manager()
         mgr.stop()
     else:
-        st.info(
-            "Live WebSocket is OFF by default. Opening another tab never starts a "
-            "network connection. Use the button below only when you want live monitoring."
-        )
-        if st.button("▶️ Start Live WebSocket", key="start_ws_manual"):
-            mgr=start_persistent_live_feed(active.symbol.tolist())
-            st.session_state["live_ws_requested"]=True
-        else:
-            mgr=get_dhan_live_manager()
-
+        mgr=start_persistent_live_feed(active.symbol.tolist())
         status,error,last_tick,subscribed=mgr.snapshot()
+
         a,b,c,d=st.columns(4)
         a.metric("WebSocket",status)
         b.metric("Active setups",len(active))
@@ -3272,14 +3268,16 @@ with tabs[7]:
         if error:
             st.warning(f"Last WebSocket error: {error}")
 
-        if st.session_state.get("live_ws_requested", False):
-            q=live_forward_test_table()
-            if q.empty:
-                st.info("Waiting for the first Dhan WebSocket ticks...")
-            else:
-                st.dataframe(q,use_container_width=True,hide_index=True)
+        q=live_forward_test_table()
+        if q.empty:
+            st.info("Waiting for the first Dhan WebSocket ticks...")
         else:
-            st.caption("No live network activity has been started.")
+            st.dataframe(q,use_container_width=True,hide_index=True)
+
+        st.caption(
+            "The feed is persistent only while this Streamlit application process is running. "
+            "If the app sleeps/restarts, the manager reconnects automatically when the app resumes."
+        )
 
 with tabs[8]:
     st.subheader("💾 Dhan Data Manager")
@@ -3331,7 +3329,12 @@ with tabs[8]:
             st.warning("Do not start the 500-stock sync until this one-stock test passes.")
 
     st.markdown("### 📦 Local Dataset")
-    st.caption("Historical acquisition is controlled ONLY from this section. Backtest and scanner never synchronize historical data.")
+    st.caption(
+        "Historical acquisition is controlled ONLY from this section. "
+        "Backtest and scanner never synchronize historical data. "
+        f"Latest expected NSE cash-session: {last_expected_nse_session().strftime('%d-%b-%Y')}. "
+        "No candle is expected on Saturday/Sunday."
+    )
     sync_universe=st.selectbox(
         "Sync universe",
         ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
@@ -3350,8 +3353,8 @@ with tabs[8]:
             with st.spinner(f"Checking local ranges and downloading ONLY missing data for {len(sync_tickers):,} stocks..."):
                 sync_missing_backtest_data(
                     sync_tickers,
-                    date.today()-timedelta(days=int(sync_days)),
-                    date.today(),
+                    last_expected_nse_session()-timedelta(days=int(sync_days)),
+                    last_expected_nse_session(),
                     max_workers=5
                 )
             st.success("Sync completed. Existing local candles were reused; only missing ranges were requested from Dhan.")
@@ -3372,7 +3375,7 @@ with tabs[8]:
     a,b,c=st.columns(3)
     a.metric("Cached stocks",ns)
     b.metric("Cached candles",f"{nc:,}")
-    c.metric("Latest candle",latest or "—")
+    c.metric("Latest stored candle",latest or "—")
 
     if ns==0:
         st.warning("⚠️ Cache is empty. Run the Dhan Connection Test first, then use SYNC ONLY MISSING DATA in this Data Manager.")
