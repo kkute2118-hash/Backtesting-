@@ -5217,11 +5217,18 @@ with tabs[13]:
     if not twelvedata_configured():
         st.warning("Add TWELVEDATA_API_KEY to Streamlit Secrets to activate this tab.")
     else:
-        smc_market = st.selectbox("Market", ["Forex", "Crypto"], key="smc_market")
-        default_pairs = (
-            ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"]
-            if smc_market == "Forex" else
-            ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "BNB/USD"]
+        # "Market" is informational only — Twelve Data's symbol format (e.g.
+        # "XAU/USD", "BTC/USD") is what actually matters to the API, so every
+        # instrument (forex, metals, crypto) is offered in one combined list
+        # instead of gating pairs behind a Forex/Crypto toggle.
+        SMC_PRESET_PAIRS = [
+            "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD",
+            "XAU/USD", "XAG/USD",
+            "BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "BNB/USD", "DOGE/USD",
+        ]
+        smc_market = st.selectbox(
+            "Market (informational only — affects labeling, not which pairs you can pick)",
+            ["Forex", "Crypto"], key="smc_market"
         )
         c1, c2, c3 = st.columns(3)
         smc_confluence = c1.slider("Min confluence score", 1, 5, 2, key="smc_confluence")
@@ -5230,13 +5237,24 @@ with tabs[13]:
         st.caption("These three are calibrated guesses from the source guide, not exact values from any source — tune freely.")
 
         st.markdown("### 🔍 Live Multi-Pair Scan")
-        smc_scan_pairs = st.multiselect("Pairs to scan", default_pairs, default=default_pairs, key="smc_scan_pairs")
+        smc_scan_pairs = st.multiselect(
+            "Pairs to scan", SMC_PRESET_PAIRS,
+            default=["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD", "BTC/USD", "ETH/USD"],
+            key="smc_scan_pairs"
+        )
+        smc_extra_pairs_raw = st.text_input(
+            "Additional pairs not in the list above (comma separated, Twelve Data symbol format)",
+            "", key="smc_extra_pairs", placeholder="e.g. USD/INR, LTC/USD, WTI/USD"
+        )
+        smc_extra_pairs = [p.strip().upper() for p in smc_extra_pairs_raw.split(",") if p.strip()]
+        smc_all_scan_pairs = list(dict.fromkeys(smc_scan_pairs + smc_extra_pairs))  # dedupe, keep order
+
         if st.button("🔍 Scan SMC Setups", type="primary", key="smc_scan_run"):
-            if not smc_scan_pairs:
-                st.warning("Select at least one pair.")
+            if not smc_all_scan_pairs:
+                st.warning("Select or type at least one pair.")
             else:
-                with st.spinner(f"Scanning {len(smc_scan_pairs)} pair(s) for SMC setups..."):
-                    smc_results = scan_smc_pairs(smc_scan_pairs, smc_market, smc_confluence, smc_body_pct, smc_beyond_pct)
+                with st.spinner(f"Scanning {len(smc_all_scan_pairs)} pair(s) for SMC setups..."):
+                    smc_results = scan_smc_pairs(smc_all_scan_pairs, smc_market, smc_confluence, smc_body_pct, smc_beyond_pct)
                 st.session_state["smc_scan_results"] = smc_results
 
         smc_results = st.session_state.get("smc_scan_results", pd.DataFrame())
@@ -5263,18 +5281,36 @@ with tabs[13]:
             "Backtest slippage is a fixed 0.05% placeholder, not a real spread/liquidity/session model. "
             "Do not treat these R-multiples as production-accurate."
         )
-        bc1, bc2, bc3 = st.columns(3)
-        smc_bt_pair = bc1.text_input("Pair", "EUR/USD" if smc_market == "Forex" else "BTC/USD", key="smc_bt_pair")
-        smc_bt_capital = bc2.number_input("Starting capital", 1000, 10000000, 100000, 1000, key="smc_bt_capital")
-        smc_bt_risk = bc3.number_input("Risk per trade %", 0.25, 5.0, 1.0, 0.25, key="smc_bt_risk")
+        st.info(
+            "⏱️ **How much history you actually get**: Twelve Data returns at most 5,000 bars per request "
+            "regardless of the lookback you pick below. At 15min (the LTF leg this backtest walks bar-by-bar), "
+            "5,000 bars ≈ 52 days (~1.7 months) — that's the real ceiling even if you ask for 12 months. "
+            "HTF (4h) easily covers a full year in 5,000 bars, but the LTF cap is what actually limits the "
+            "backtest's trade count. The exact coverage you got is shown after each run below."
+        )
+        bc1, bc2, bc3, bc4 = st.columns(4)
+        smc_bt_pair_choice = bc1.selectbox("Pair", SMC_PRESET_PAIRS + ["✏️ Custom..."], key="smc_bt_pair_choice")
+        if smc_bt_pair_choice == "✏️ Custom...":
+            smc_bt_pair = bc1.text_input("Custom pair (Twelve Data symbol)", "EUR/USD", key="smc_bt_pair_custom")
+        else:
+            smc_bt_pair = smc_bt_pair_choice
+        smc_bt_years = bc2.selectbox("Requested lookback", [0.25, 0.5, 1, 2], index=2, format_func=lambda y: f"{y} yr", key="smc_bt_years")
+        smc_bt_capital = bc3.number_input("Starting capital", 1000, 10000000, 100000, 1000, key="smc_bt_capital")
+        smc_bt_risk = bc4.number_input("Risk per trade %", 0.25, 5.0, 1.0, 0.25, key="smc_bt_risk")
         if st.button("🧪 Run SMC Backtest", type="primary", key="smc_bt_run"):
             try:
                 with st.spinner(f"Fetching HTF/LTF history and replaying {smc_bt_pair}..."):
-                    smc_htf = td_market_history(smc_bt_pair, smc_market, "4h", years=1)
-                    smc_ltf = td_market_history(smc_bt_pair, smc_market, "15min", years=1)
+                    smc_htf = td_market_history(smc_bt_pair, smc_market, "4h", years=smc_bt_years)
+                    smc_ltf = td_market_history(smc_bt_pair, smc_market, "15min", years=smc_bt_years)
                     if smc_htf.empty or smc_ltf.empty or len(smc_htf) < 60 or len(smc_ltf) < 60:
                         st.error("Not enough HTF/LTF history returned for this pair.")
                     else:
+                        htf_days = (smc_htf.index[-1] - smc_htf.index[0]).days
+                        ltf_days = (smc_ltf.index[-1] - smc_ltf.index[0]).days
+                        st.caption(
+                            f"📊 Actually fetched: HTF {len(smc_htf):,} bars (~{htf_days} days) | "
+                            f"LTF {len(smc_ltf):,} bars (~{ltf_days} days, ~{ltf_days/30.4:.1f} months)"
+                        )
                         smc_trades, smc_equity = smc_backtest(
                             smc_htf, smc_ltf, float(smc_bt_capital), float(smc_bt_risk),
                             smc_confluence, 0.0005, smc_body_pct, smc_beyond_pct
