@@ -811,6 +811,567 @@ def td_validate_symbol(symbol,market):
     except Exception as e:
         return False,0,str(e)
 
+# ============================================================================
+# SMC PRICE ACTION STRATEGY (Forex/Crypto) — HTF=4h, LTF=15min
+# ============================================================================
+# detect_swings, _atr, detect_msb, find_order_block, detect_fvg, detect_sfp,
+# premium_discount_zone, confluence_score, smc_htf_context, smc_ltf_trigger,
+# and smc_signal below are taken from the user-supplied SMC patch, with one
+# change: detect_msb's "strong MSB" thresholds (candle-body % and
+# close-beyond %) were hardcoded literals (0.6, 0.10) in the supplied code
+# despite the patch's own header saying they're "already" configurable via
+# function args — they are now actual parameters (defaulting to the same
+# 0.6/0.10 values) so the UI slider added below can actually vary them
+# without editing this file.
+#
+# smc_backtest()'s loop body, scan_smc_pairs(), and add_smc_forward_
+# candidates() were NOT present in the supplied patch (it was cut off
+# mid-function) and are Claude's completion of the behavior described in
+# the patch's own docstrings/header comment (partial-at-1R, move-to-
+# breakeven, final target at opposing HTF liquidity; live multi-pair scan;
+# tracking into the existing forward_tests table as strategy='FX_SMC').
+# Review these three specifically before trusting their output — they are
+# not verbatim from your file.
+# ============================================================================
+
+def detect_swings(df, left=3, right=3):
+    """Marks swing highs/lows using a simple fractal: a bar is a swing high
+    if its high is the max within [i-left, i+right], swing low similarly.
+    Returns df copy with 'swing_high' and 'swing_low' boolean columns.
+    """
+    d = df.copy()
+    d["swing_high"] = False
+    d["swing_low"] = False
+    n = len(d)
+    highs = d["high"].values
+    lows = d["low"].values
+    for i in range(left, n - right):
+        window_h = highs[i-left:i+right+1]
+        window_l = lows[i-left:i+right+1]
+        if highs[i] == window_h.max() and (window_h == highs[i]).sum() == 1:
+            d.iloc[i, d.columns.get_loc("swing_high")] = True
+        if lows[i] == window_l.min() and (window_l == lows[i]).sum() == 1:
+            d.iloc[i, d.columns.get_loc("swing_low")] = True
+    return d
+
+
+def _atr(df, n=14):
+    h, l, c = df["high"], df["low"], df["close"]
+    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+    return tr.rolling(n, min_periods=n).mean()
+
+
+def detect_msb(df_swung, atr_series, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """Walks swing points in order, tracks the prevailing trend (based on
+    sequence of higher-highs/higher-lows vs lower-highs/lower-lows), and
+    flags the bar where price breaks the most recent counter-trend swing —
+    i.e. an MSB. Only the break of the swing belonging to the DEEPEST leg
+    counts (per the guide's rule), not every minor swing break.
+
+    strong_body_pct / strong_close_beyond_pct: configurable "strong MSB"
+    thresholds (calibrated guesses per the source guide, not exact values
+    from any source) - candle body must be >= strong_body_pct of its range
+    AND close beyond the broken level by >= strong_close_beyond_pct of the
+    candle's range.
+
+    Returns a list of dicts, one per detected MSB:
+      {idx, direction ('bull'/'bear'), strength ('strong'/'weak'),
+       broken_level, deepest_extreme_idx, origin_swing_idx}
+    """
+    d = df_swung
+    swing_rows = d[(d["swing_high"]) | (d["swing_low"])].copy()
+    if len(swing_rows) < 3:
+        return []
+
+    events = []
+    seen_idx = set()
+    last_swing_high_idx = None
+    last_swing_low_idx = None
+    deepest_low_idx = None
+    deepest_high_idx = None
+
+    for i in range(len(d)):
+        row = d.iloc[i]
+        if row["swing_high"]:
+            last_swing_high_idx = i
+            if deepest_high_idx is None or d["high"].iloc[i] > d["high"].iloc[deepest_high_idx]:
+                deepest_high_idx = i
+        if row["swing_low"]:
+            last_swing_low_idx = i
+            if deepest_low_idx is None or d["low"].iloc[i] < d["low"].iloc[deepest_low_idx]:
+                deepest_low_idx = i
+
+        # Bullish MSB: in a downtrend, close breaks above last swing high
+        # that sits between the deepest low and now.
+        if last_swing_high_idx is not None and deepest_low_idx is not None and last_swing_high_idx > deepest_low_idx:
+            level = d["high"].iloc[last_swing_high_idx]
+            if d["close"].iloc[i] > level and i not in seen_idx:
+                body = abs(d["close"].iloc[i] - d["open"].iloc[i])
+                rng = max(d["high"].iloc[i] - d["low"].iloc[i], 1e-9)
+                close_beyond = d["close"].iloc[i] - level
+                strong = (body / rng >= strong_body_pct) and (close_beyond >= strong_close_beyond_pct * rng)
+                events.append({
+                    "idx": i, "direction": "bull",
+                    "strength": "strong" if strong else "weak",
+                    "broken_level": float(level),
+                    "deepest_extreme_idx": deepest_low_idx,
+                    "origin_swing_idx": last_swing_high_idx,
+                })
+                seen_idx.add(i)
+                deepest_low_idx = None  # reset leg after confirmed break
+
+        # Bearish MSB: mirror logic breaking below last swing low.
+        if last_swing_low_idx is not None and deepest_high_idx is not None and last_swing_low_idx > deepest_high_idx:
+            level = d["low"].iloc[last_swing_low_idx]
+            if d["close"].iloc[i] < level and i not in seen_idx:
+                body = abs(d["close"].iloc[i] - d["open"].iloc[i])
+                rng = max(d["high"].iloc[i] - d["low"].iloc[i], 1e-9)
+                close_beyond = level - d["close"].iloc[i]
+                strong = (body / rng >= strong_body_pct) and (close_beyond >= strong_close_beyond_pct * rng)
+                events.append({
+                    "idx": i, "direction": "bear",
+                    "strength": "strong" if strong else "weak",
+                    "broken_level": float(level),
+                    "deepest_extreme_idx": deepest_high_idx,
+                    "origin_swing_idx": last_swing_low_idx,
+                })
+                seen_idx.add(i)
+                deepest_high_idx = None
+
+    return events
+
+
+def find_order_block(df, msb_event):
+    """Scans backward from the MSB's origin swing to find the last
+    opposite-colored candle before the impulsive leg. Returns dict with
+    zone_top/zone_bottom or None if not found.
+    """
+    d = df
+    start = msb_event["deepest_extreme_idx"]
+    end = msb_event["origin_swing_idx"]
+    if start is None or end is None or start >= end:
+        return None
+    bullish = msb_event["direction"] == "bull"
+    for i in range(end, start - 1, -1):
+        is_bear_candle = d["close"].iloc[i] < d["open"].iloc[i]
+        is_bull_candle = d["close"].iloc[i] > d["open"].iloc[i]
+        if bullish and is_bear_candle:
+            return {"idx": i, "zone_top": float(d["high"].iloc[i]), "zone_bottom": float(d["low"].iloc[i]), "type": "demand_OB"}
+        if (not bullish) and is_bull_candle:
+            return {"idx": i, "zone_top": float(d["high"].iloc[i]), "zone_bottom": float(d["low"].iloc[i]), "type": "supply_OB"}
+    return None
+
+
+def detect_fvg(df, atr_series, min_atr_mult=0.10):
+    """3-candle gap pattern. Bullish FVG: low[i] > high[i-2] (gap not
+    filled by candle i-1). Bearish FVG: high[i] < low[i-2].
+    Returns list of dicts: {idx, type, top, bottom}.
+    """
+    fvgs = []
+    n = len(df)
+    for i in range(2, n):
+        atr_v = atr_series.iloc[i]
+        if pd.isna(atr_v) or atr_v <= 0:
+            continue
+        min_gap = atr_v * min_atr_mult
+        low_i = df["low"].iloc[i]
+        high_i2 = df["high"].iloc[i-2]
+        high_i = df["high"].iloc[i]
+        low_i2 = df["low"].iloc[i-2]
+        if low_i - high_i2 > min_gap:
+            fvgs.append({"idx": i, "type": "bullish_fvg", "top": float(low_i), "bottom": float(high_i2)})
+        if low_i2 - high_i > min_gap:
+            fvgs.append({"idx": i, "type": "bearish_fvg", "top": float(low_i2), "bottom": float(high_i)})
+    return fvgs
+
+
+def detect_sfp(df_swung, atr_series, tolerance_atr_mult=0.15):
+    """A bar that wicks beyond a prior swing high/low but closes back
+    inside it — a stop-hunt / liquidity grab. Returns list of dicts.
+    """
+    d = df_swung
+    sfps = []
+    swing_highs = d.index[d["swing_high"]].tolist()
+    swing_lows = d.index[d["swing_low"]].tolist()
+    for i in range(len(d)):
+        atr_v = atr_series.iloc[i]
+        if pd.isna(atr_v) or atr_v <= 0:
+            continue
+        tol = atr_v * tolerance_atr_mult
+        recent_highs = [sh for sh in swing_highs if sh < d.index[i]]
+        if recent_highs:
+            level = d.loc[recent_highs[-1], "high"]
+            if d["high"].iloc[i] > level and d["high"].iloc[i] - level <= tol and d["close"].iloc[i] < level:
+                sfps.append({"idx": i, "type": "bearish_sfp", "level": float(level)})
+        recent_lows = [sl for sl in swing_lows if sl < d.index[i]]
+        if recent_lows:
+            level = d.loc[recent_lows[-1], "low"]
+            if d["low"].iloc[i] < level and level - d["low"].iloc[i] <= tol and d["close"].iloc[i] > level:
+                sfps.append({"idx": i, "type": "bullish_sfp", "level": float(level)})
+    return sfps
+
+
+def premium_discount_zone(swing_low_price, swing_high_price, current_price):
+    """Returns (zone:'premium'/'discount'/'equilibrium', pct_of_range,
+    ote_low, ote_high) — OTE = 0.7-0.8 retracement zone from swing extremes.
+    """
+    rng = swing_high_price - swing_low_price
+    if rng <= 0:
+        return "unknown", np.nan, np.nan, np.nan
+    pct = (current_price - swing_low_price) / rng
+    if pct >= 0.7:
+        zone = "premium"
+    elif pct <= 0.3:
+        zone = "discount"
+    else:
+        zone = "equilibrium"
+    ote_low = swing_low_price + 0.7 * rng
+    ote_high = swing_low_price + 0.8 * rng
+    return zone, round(pct, 3), ote_low, ote_high
+
+
+def confluence_score(price_level, order_block, fvgs, sfps, tolerance_pct=0.0015):
+    """Counts how many structures sit within tolerance of price_level.
+    order_block: dict or None. fvgs/sfps: lists (already filtered to
+    relevant recent ones by the caller). Returns (score:int, matched:list).
+    """
+    matched = []
+    tol = price_level * tolerance_pct
+    if order_block and order_block["zone_bottom"] - tol <= price_level <= order_block["zone_top"] + tol:
+        matched.append(order_block["type"])
+    for fvg in fvgs:
+        if fvg["bottom"] - tol <= price_level <= fvg["top"] + tol:
+            matched.append(fvg["type"])
+    for sfp in sfps:
+        if abs(sfp["level"] - price_level) <= tol:
+            matched.append(sfp["type"])
+    return len(matched), matched
+
+
+def smc_htf_context(htf_df, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """Full HTF read at the LATEST completed bar. Returns dict or None if
+    no valid strong MSB / zone currently active.
+    """
+    d = detect_swings(htf_df)
+    atr_s = _atr(d)
+    msbs = detect_msb(d, atr_s, strong_body_pct, strong_close_beyond_pct)
+    if not msbs:
+        return None
+    last_msb = msbs[-1]
+    if last_msb["strength"] != "strong":
+        return {"has_zone": False, "reason": "Last HTF MSB is weak — skip per guide's rule", "last_msb": last_msb}
+
+    ob = find_order_block(d, last_msb)
+    fvgs = detect_fvg(d, atr_s)
+    sfps = detect_sfp(d, atr_s)
+
+    deepest_idx = last_msb["deepest_extreme_idx"]
+    origin_idx = last_msb["origin_swing_idx"]
+    if last_msb["direction"] == "bull":
+        zone_extreme = d["low"].iloc[deepest_idx]
+        zone_origin = d["high"].iloc[origin_idx]
+        swing_low_price, swing_high_price = zone_extreme, zone_origin
+    else:
+        zone_extreme = d["high"].iloc[deepest_idx]
+        zone_origin = d["low"].iloc[origin_idx]
+        swing_low_price, swing_high_price = zone_origin, zone_extreme
+
+    current_price = float(d["close"].iloc[-1])
+    zone_label, pct, ote_low, ote_high = premium_discount_zone(
+        min(swing_low_price, swing_high_price), max(swing_low_price, swing_high_price), current_price
+    )
+
+    recent_fvgs = [f for f in fvgs if f["idx"] >= deepest_idx]
+    recent_sfps = [s for s in sfps if s["idx"] >= deepest_idx]
+    score, matched = confluence_score(current_price, ob, recent_fvgs, recent_sfps)
+
+    bias_ok = (last_msb["direction"] == "bull" and zone_label == "discount") or \
+              (last_msb["direction"] == "bear" and zone_label == "premium")
+
+    return {
+        "has_zone": True,
+        "direction": last_msb["direction"],
+        "msb": last_msb,
+        "order_block": ob,
+        "zone_label": zone_label,
+        "zone_pct": pct,
+        "ote_low": ote_low, "ote_high": ote_high,
+        "confluence_score": score,
+        "confluence_matched": matched,
+        "bias_ok": bias_ok,
+        "current_price": current_price,
+        "swing_low": min(swing_low_price, swing_high_price),
+        "swing_high": max(swing_low_price, swing_high_price),
+    }
+
+
+def smc_ltf_trigger(ltf_df, htf_ctx, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """Checks if price is currently inside the HTF zone AND the LTF shows
+    a micro-MSB (or SFP) confirming the HTF direction. Returns dict or None.
+    """
+    if not htf_ctx or not htf_ctx.get("has_zone"):
+        return None
+    price = float(ltf_df["close"].iloc[-1])
+    in_zone = htf_ctx["swing_low"] <= price <= htf_ctx["swing_high"]
+    if not in_zone:
+        return None
+
+    d = detect_swings(ltf_df)
+    atr_s = _atr(d)
+    micro_msbs = detect_msb(d, atr_s, strong_body_pct, strong_close_beyond_pct)
+    if not micro_msbs:
+        return None
+    last_micro = micro_msbs[-1]
+    if last_micro["idx"] < len(d) - 6:
+        return None
+    if last_micro["direction"] != htf_ctx["direction"]:
+        return None
+
+    sfps = detect_sfp(d, atr_s)
+    recent_sfp = [s for s in sfps if s["idx"] >= len(d) - 6]
+
+    return {
+        "confirmed": True,
+        "micro_msb": last_micro,
+        "sfp_present": len(recent_sfp) > 0,
+        "entry_price": float(d["close"].iloc[-1]),
+        "trigger_idx": last_micro["idx"],
+    }
+
+
+def smc_signal(htf_df, ltf_df, min_confluence=2, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """Returns a signal dict if a valid trade setup exists right now,
+    else None. Encodes the guide's stop/target rules directly.
+    """
+    htf_ctx = smc_htf_context(htf_df, strong_body_pct, strong_close_beyond_pct)
+    if not htf_ctx or not htf_ctx.get("has_zone") or not htf_ctx.get("bias_ok"):
+        return None
+    if htf_ctx["confluence_score"] < min_confluence:
+        return None
+
+    ltf_trig = smc_ltf_trigger(ltf_df, htf_ctx, strong_body_pct, strong_close_beyond_pct)
+    if not ltf_trig:
+        return None
+
+    direction = htf_ctx["direction"]
+    entry = ltf_trig["entry_price"]
+
+    if direction == "bull":
+        stop = htf_ctx["swing_low"] * 0.999
+        risk_per_unit = entry - stop
+        target = htf_ctx["swing_high"]
+    else:
+        stop = htf_ctx["swing_high"] * 1.001
+        risk_per_unit = stop - entry
+        target = htf_ctx["swing_low"]
+
+    if risk_per_unit <= 0:
+        return None
+    rr = abs(target - entry) / risk_per_unit
+
+    return {
+        "direction": direction,
+        "entry": round(entry, 6),
+        "stop": round(stop, 6),
+        "target": round(target, 6),
+        "risk_reward": round(rr, 2),
+        "confluence_score": htf_ctx["confluence_score"],
+        "confluence_matched": htf_ctx["confluence_matched"],
+        "zone_label": htf_ctx["zone_label"],
+        "msb_strength": htf_ctx["msb"]["strength"],
+        "sfp_confirmation": ltf_trig["sfp_present"],
+        "note": "Confirm macro/news calendar manually before entry — not automated in this system.",
+    }
+
+
+def smc_backtest(htf_df, ltf_df, capital=100000, risk_pct=1.0, min_confluence=2, slip=0.0005,
+                  strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """Walks the LTF series bar-by-bar, re-evaluating HTF context every N
+    bars (approximating a live re-scan), simulating entries per smc_signal
+    logic. Applies: partial at 1R (half position, then stop moved to
+    breakeven), final target at the opposing HTF swing (liquidity).
+    Returns (trades_df, equity_curve_list).
+
+    NOT present in the supplied patch (file was truncated mid-loop) —
+    this loop body is Claude's completion of the behavior described in the
+    function's own docstring/header comment. Review before trusting it.
+
+    SIMPLIFICATION: slip is a fixed percentage placeholder applied to the
+    entry price (default 0.05%), not a real spread/liquidity/session model.
+    Do not treat backtest R-multiples as production-accurate without this
+    caveat in mind — the UI surfaces this same warning next to the results.
+    """
+    equity = float(capital)
+    rows = []
+    equity_curve = [equity]
+    htf_recompute_every = 16  # ~ once per HTF bar equivalent (4h/15m = 16)
+    i = 60  # warmup for swing/ATR detection
+    n = len(ltf_df)
+    htf_ctx_cache = None
+    pos = None
+
+    while i < n - 1:
+        if pos is None:
+            if htf_ctx_cache is None or i % htf_recompute_every == 0:
+                htf_slice = htf_df[htf_df.index <= ltf_df.index[i]]
+                htf_ctx_cache = smc_htf_context(htf_slice, strong_body_pct, strong_close_beyond_pct) if len(htf_slice) >= 60 else None
+
+            sig = None
+            if htf_ctx_cache and htf_ctx_cache.get("has_zone") and htf_ctx_cache.get("bias_ok") \
+               and htf_ctx_cache["confluence_score"] >= min_confluence:
+                ltf_trig = smc_ltf_trigger(ltf_df.iloc[:i+1], htf_ctx_cache, strong_body_pct, strong_close_beyond_pct)
+                if ltf_trig:
+                    direction = htf_ctx_cache["direction"]
+                    raw_entry = float(ltf_df["close"].iloc[i])
+                    entry = raw_entry * (1 + slip) if direction == "bull" else raw_entry * (1 - slip)
+                    if direction == "bull":
+                        stop = htf_ctx_cache["swing_low"] * 0.999
+                        risk_per_unit = entry - stop
+                        target = htf_ctx_cache["swing_high"]
+                    else:
+                        stop = htf_ctx_cache["swing_high"] * 1.001
+                        risk_per_unit = stop - entry
+                        target = htf_ctx_cache["swing_low"]
+                    if risk_per_unit > 0 and abs(target - entry) / risk_per_unit >= 1.0:
+                        sig = {
+                            "direction": direction, "entry": entry, "stop": stop, "target": target,
+                            "risk_per_unit": risk_per_unit, "entry_idx": i, "partial_taken": False,
+                            "confluence_score": htf_ctx_cache["confluence_score"],
+                            "msb_strength": htf_ctx_cache["msb"]["strength"],
+                        }
+            if sig:
+                pos = sig
+                htf_ctx_cache = None  # force a fresh HTF read before the next entry
+        else:
+            bar = ltf_df.iloc[i]
+            direction = pos["direction"]
+            one_r_level = pos["entry"] + pos["risk_per_unit"] if direction == "bull" else pos["entry"] - pos["risk_per_unit"]
+            exit_now, exit_price, outcome = False, None, None
+
+            if direction == "bull":
+                if not pos["partial_taken"] and bar["high"] >= one_r_level:
+                    pos["partial_taken"] = True
+                    pos["stop"] = pos["entry"]  # move to breakeven
+                if bar["low"] <= pos["stop"]:
+                    exit_now, exit_price = True, pos["stop"]
+                elif bar["high"] >= pos["target"]:
+                    exit_now, exit_price = True, pos["target"]
+            else:
+                if not pos["partial_taken"] and bar["low"] <= one_r_level:
+                    pos["partial_taken"] = True
+                    pos["stop"] = pos["entry"]
+                if bar["high"] >= pos["stop"]:
+                    exit_now, exit_price = True, pos["stop"]
+                elif bar["low"] <= pos["target"]:
+                    exit_now, exit_price = True, pos["target"]
+
+            if i == n - 2 and not exit_now:
+                exit_now, exit_price, outcome = True, float(ltf_df["close"].iloc[i]), "TIMEOUT"
+
+            if exit_now:
+                final_r = (exit_price - pos["entry"]) / pos["risk_per_unit"] if direction == "bull" \
+                    else (pos["entry"] - exit_price) / pos["risk_per_unit"]
+                # Half the position was already realized at +1R if the partial
+                # fired; the other half rides to the final exit (>=0R once the
+                # stop is at breakeven).
+                blended_r = 0.5 * 1.0 + 0.5 * final_r if pos["partial_taken"] else final_r
+                if outcome is None:
+                    outcome = "WIN" if blended_r > 0 else "LOSS"
+                risk_cash = equity * (risk_pct / 100.0)
+                equity += risk_cash * blended_r
+                equity_curve.append(equity)
+                rows.append({
+                    "Entry Date": ltf_df.index[pos["entry_idx"]], "Exit Date": ltf_df.index[i],
+                    "Direction": direction.upper(), "Entry": round(pos["entry"], 6),
+                    "Stop": round(pos["stop"], 6), "Target": round(pos["target"], 6),
+                    "Exit": round(exit_price, 6), "Partial at 1R": pos["partial_taken"],
+                    "R": round(blended_r, 3), "Outcome": outcome,
+                    "Confluence": pos["confluence_score"], "MSB Strength": pos["msb_strength"],
+                    "Holding Bars": i - pos["entry_idx"],
+                })
+                pos = None
+        i += 1
+
+    return pd.DataFrame(rows), equity_curve
+
+
+def scan_smc_pairs(pairs, market="Forex", min_confluence=2, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """Live multi-pair SMC scan: fetches HTF(4h)+LTF(15min) data for each
+    pair via Twelve Data and evaluates smc_signal(). One bad pair never
+    blanks the rest (per-pair try/except, matching this app's existing
+    scanner pattern). Returns a DataFrame of current setups (possibly
+    empty). NOT present in the supplied patch - Claude's completion.
+    """
+    rows = []
+    for pair in pairs:
+        try:
+            htf_df = td_market_history(pair, market, "4h", years=1)
+            ltf_df = td_market_history(pair, market, "15min", years=1)
+            if htf_df.empty or ltf_df.empty or len(htf_df) < 60 or len(ltf_df) < 60:
+                continue
+            sig = smc_signal(htf_df, ltf_df, min_confluence, strong_body_pct, strong_close_beyond_pct)
+            if sig:
+                rows.append({"Pair": pair, **sig})
+        except Exception as e:
+            rows.append({"Pair": pair, "direction": "ERROR", "entry": np.nan, "stop": np.nan,
+                         "target": np.nan, "risk_reward": np.nan, "confluence_score": np.nan,
+                         "confluence_matched": [], "zone_label": str(e), "msb_strength": "",
+                         "sfp_confirmation": False, "note": ""})
+    return pd.DataFrame(rows)
+
+
+def add_smc_forward_candidates(candidates):
+    """Persist SMC scanner signals into the EXISTING forward_tests table,
+    tagged strategy='FX_SMC' - same table/schema as add_forward_candidates(),
+    no new table created. NOT present in the supplied patch - Claude's
+    completion, modeled directly on add_forward_candidates()'s pattern.
+    """
+    if candidates is None or len(candidates) == 0:
+        return 0
+    valid = candidates[candidates.get("direction", pd.Series(dtype=str)) != "ERROR"] if "direction" in candidates.columns else candidates
+    if valid.empty:
+        return 0
+    con = _db(); added = 0
+    try:
+        today = str(date.today())
+        for _, r in valid.iterrows():
+            symbol = str(r.get("Pair", "")).upper()
+            entry = float(r.get("entry", np.nan)); sl = float(r.get("stop", np.nan)); target = float(r.get("target", np.nan))
+            if not symbol or not np.isfinite(entry) or entry <= 0 or not np.isfinite(sl) or not np.isfinite(target):
+                continue
+            exists = con.execute(
+                """SELECT id FROM forward_tests WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
+                (symbol, "FX_SMC", today)
+            ).fetchone()
+            if exists:
+                continue
+            now = datetime.now().isoformat(timespec="seconds")
+            # forward_tests' "score" column is 0-100 elsewhere (S1-S4); SMC has
+            # no natural 0-100 score, so confluence_score (typically 2-5) is
+            # scaled for rough display/sort convenience only - not comparable
+            # to S1-S4 scores.
+            display_score = float(min(100, r.get("confluence_score", 0) * 20))
+            snapshot = {k: r.get(k, None) for k in r.index}
+            cur = con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
+                exit_price,result_r,updated_at,signal_date,signal_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                now, symbol, "FX_SMC", display_score, str(r.get("zone_label", "")),
+                entry, sl, target, "ACTIVE", entry, 0.0, 0.0, None, None, now,
+                today, json.dumps(snapshot, default=str, allow_nan=True)
+            ))
+            fid = int(cur.lastrowid); added += 1
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                fid, now, today, entry, entry, entry, 0.0, 0.0, 0.0, "ACTIVE"
+            ))
+        con.commit()
+    finally:
+        con.close()
+    return added
+
+
 # ========================= INDICATORS =========================
 
 def ema(s,n): return s.ewm(span=n,adjust=False,min_periods=n).mean()
@@ -3150,7 +3711,8 @@ tabs=st.tabs([
     "🧪 S4 Recovery Study",
     "🧪 Custom Strategy",
     "🧬 Research & Risk Control",
-    "🎓 Strategy Coach"
+    "🎓 Strategy Coach",
+    "💱 Forex/Crypto SMC"
 ])
 
 with tabs[0]:
@@ -4390,12 +4952,14 @@ with tabs[10]:
                     st.error(str(e))
             if st.button("⚡ Get Live Price",key="td_live_price"):
                 try:
-                    px=td_price(symbol)
+                    with st.spinner(f"Fetching live price for {symbol}..."):
+                        px=td_price(symbol)
                     st.session_state["td_live_px"]=px
                 except Exception as e:
                     st.error(str(e))
             if st.button("🧪 Test Symbol",key="td_test_symbol"):
-                ok,n,msg=td_validate_symbol(symbol,market)
+                with st.spinner(f"Validating {symbol}..."):
+                    ok,n,msg=td_validate_symbol(symbol,market)
                 if ok: st.success(f"Working: {symbol} — {n} recent daily candles available.")
                 else: st.error(f"Symbol test failed: {msg}")
 
@@ -4637,6 +5201,139 @@ with tabs[12]:
                 "past evidence, not guaranteed future performance — the smaller the sample, the less "
                 "the rule should influence live decisions."
             )
+
+with tabs[13]:
+    st.subheader("💱 Forex/Crypto SMC — Smart Money Concepts (HTF 4h + LTF 15min)")
+    st.caption(
+        "Separate research engine from S1-S4. HTF (4h) establishes market structure/bias via "
+        "MSB + order blocks + FVGs + premium/discount zones; LTF (15min) confirms entry with a "
+        "micro-MSB or liquidity sweep inside the HTF zone. Real-money order execution remains disabled."
+    )
+    st.warning(
+        "⚠️ No economic calendar / news-day filter is wired in. Manually check for CPI, NFP, and "
+        "rate-decision days before acting on any signal below — this is not automated."
+    )
+
+    if not twelvedata_configured():
+        st.warning("Add TWELVEDATA_API_KEY to Streamlit Secrets to activate this tab.")
+    else:
+        smc_market = st.selectbox("Market", ["Forex", "Crypto"], key="smc_market")
+        default_pairs = (
+            ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD"]
+            if smc_market == "Forex" else
+            ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "BNB/USD"]
+        )
+        c1, c2, c3 = st.columns(3)
+        smc_confluence = c1.slider("Min confluence score", 1, 5, 2, key="smc_confluence")
+        smc_body_pct = c2.slider("Strong MSB: min candle body %", 30, 90, 60, 5, key="smc_body_pct") / 100
+        smc_beyond_pct = c3.slider("Strong MSB: min close-beyond %", 0, 30, 10, 1, key="smc_beyond_pct") / 100
+        st.caption("These three are calibrated guesses from the source guide, not exact values from any source — tune freely.")
+
+        st.markdown("### 🔍 Live Multi-Pair Scan")
+        smc_scan_pairs = st.multiselect("Pairs to scan", default_pairs, default=default_pairs, key="smc_scan_pairs")
+        if st.button("🔍 Scan SMC Setups", type="primary", key="smc_scan_run"):
+            if not smc_scan_pairs:
+                st.warning("Select at least one pair.")
+            else:
+                with st.spinner(f"Scanning {len(smc_scan_pairs)} pair(s) for SMC setups..."):
+                    smc_results = scan_smc_pairs(smc_scan_pairs, smc_market, smc_confluence, smc_body_pct, smc_beyond_pct)
+                st.session_state["smc_scan_results"] = smc_results
+
+        smc_results = st.session_state.get("smc_scan_results", pd.DataFrame())
+        if smc_results.empty:
+            st.info("No SMC setups found yet. Run a scan above.")
+        else:
+            errors = smc_results[smc_results.get("direction") == "ERROR"] if "direction" in smc_results.columns else pd.DataFrame()
+            valid = smc_results[smc_results.get("direction") != "ERROR"] if "direction" in smc_results.columns else smc_results
+            if not errors.empty:
+                for _, e in errors.iterrows():
+                    st.caption(f"⚠️ {e['Pair']}: {e['zone_label']}")
+            if valid.empty:
+                st.info("No qualifying setups right now (all selected pairs either had no valid HTF zone or failed the confluence gate).")
+            else:
+                st.dataframe(valid.drop(columns=["confluence_matched", "note"], errors="ignore"), width='stretch', hide_index=True)
+                for _, row in valid.iterrows():
+                    st.caption(f"**{row['Pair']}** ({row['direction'].upper()}): {row.get('note','')}")
+                added = add_smc_forward_candidates(valid)
+                if added:
+                    st.success(f"{added} setup(s) added to forward-test tracking as strategy='FX_SMC'.")
+
+        st.markdown("### 🧪 Backtest")
+        st.warning(
+            "Backtest slippage is a fixed 0.05% placeholder, not a real spread/liquidity/session model. "
+            "Do not treat these R-multiples as production-accurate."
+        )
+        bc1, bc2, bc3 = st.columns(3)
+        smc_bt_pair = bc1.text_input("Pair", "EUR/USD" if smc_market == "Forex" else "BTC/USD", key="smc_bt_pair")
+        smc_bt_capital = bc2.number_input("Starting capital", 1000, 10000000, 100000, 1000, key="smc_bt_capital")
+        smc_bt_risk = bc3.number_input("Risk per trade %", 0.25, 5.0, 1.0, 0.25, key="smc_bt_risk")
+        if st.button("🧪 Run SMC Backtest", type="primary", key="smc_bt_run"):
+            try:
+                with st.spinner(f"Fetching HTF/LTF history and replaying {smc_bt_pair}..."):
+                    smc_htf = td_market_history(smc_bt_pair, smc_market, "4h", years=1)
+                    smc_ltf = td_market_history(smc_bt_pair, smc_market, "15min", years=1)
+                    if smc_htf.empty or smc_ltf.empty or len(smc_htf) < 60 or len(smc_ltf) < 60:
+                        st.error("Not enough HTF/LTF history returned for this pair.")
+                    else:
+                        smc_trades, smc_equity = smc_backtest(
+                            smc_htf, smc_ltf, float(smc_bt_capital), float(smc_bt_risk),
+                            smc_confluence, 0.0005, smc_body_pct, smc_beyond_pct
+                        )
+                        st.session_state["smc_backtest_trades"] = smc_trades
+                        st.session_state["smc_backtest_equity"] = smc_equity
+            except Exception as ex:
+                st.error(f"SMC backtest error: {ex}")
+
+        smc_trades = st.session_state.get("smc_backtest_trades", pd.DataFrame())
+        if smc_trades.empty:
+            st.info("Run the backtest to see historical SMC trade results.")
+        else:
+            a, b, c, d = st.columns(4)
+            a.metric("Trades", len(smc_trades))
+            b.metric("Win %", f"{(smc_trades.Outcome=='WIN').mean()*100:.1f}%")
+            c.metric("Avg R", f"{smc_trades.R.mean():.2f}")
+            d.metric("Total R", f"{smc_trades.R.sum():.2f}")
+            st.dataframe(smc_trades, width='stretch', hide_index=True)
+            smc_equity = st.session_state.get("smc_backtest_equity", [])
+            if len(smc_equity) > 1:
+                st.line_chart(pd.Series(smc_equity, name="Equity"))
+
+        with st.expander("🔬 Debug: Swing/MSB Detection (cross-check against a real chart)"):
+            st.caption(
+                "Prints the raw swing points and MSB events this engine detects for one pair/timeframe, "
+                "with timestamps, so you can manually verify them against a real chart (e.g. TradingView) "
+                "before trusting the scan/backtest above."
+            )
+            dc1, dc2 = st.columns(2)
+            debug_pair = dc1.text_input("Pair", smc_bt_pair, key="smc_debug_pair")
+            debug_tf = dc2.selectbox("Timeframe", ["4h", "15min"], key="smc_debug_tf")
+            if st.button("🔬 Run Debug Detection", key="smc_debug_run"):
+                try:
+                    with st.spinner(f"Fetching {debug_pair} {debug_tf}..."):
+                        debug_df = td_market_history(debug_pair, smc_market, debug_tf, years=1)
+                    if debug_df.empty or len(debug_df) < 20:
+                        st.error("Not enough history returned for this pair/timeframe.")
+                    else:
+                        d_swung = detect_swings(debug_df)
+                        d_atr = _atr(d_swung)
+                        d_msbs = detect_msb(d_swung, d_atr, smc_body_pct, smc_beyond_pct)
+                        sh = d_swung[d_swung.swing_high][["close"]].rename(columns={"close": "Swing High"})
+                        sl = d_swung[d_swung.swing_low][["close"]].rename(columns={"close": "Swing Low"})
+                        st.markdown("**Swing highs:**")
+                        st.dataframe(sh, width='stretch') if not sh.empty else st.info("None detected.")
+                        st.markdown("**Swing lows:**")
+                        st.dataframe(sl, width='stretch') if not sl.empty else st.info("None detected.")
+                        st.markdown("**MSB events:**")
+                        if d_msbs:
+                            msb_rows = [{
+                                "Timestamp": d_swung.index[m["idx"]], "Direction": m["direction"],
+                                "Strength": m["strength"], "Broken Level": round(m["broken_level"], 5)
+                            } for m in d_msbs]
+                            st.dataframe(pd.DataFrame(msb_rows), width='stretch', hide_index=True)
+                        else:
+                            st.info("None detected.")
+                except Exception as ex:
+                    st.error(f"Debug detection error: {ex}")
 
 st.markdown("---")
 st.caption(f"{APP_VERSION} • {ARCHITECTURE_STANDARD} • Research only • Real-money order execution disabled")
