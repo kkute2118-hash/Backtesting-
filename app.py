@@ -657,7 +657,10 @@ def _ensure_research_tables():
 
 def _td_get(endpoint, params, timeout=30):
     if not twelvedata_configured(): return {}
-    r=requests.get(f"{TWELVE_BASE}/{endpoint}",headers=_td_headers(),params=params,timeout=timeout)
+    try:
+        r=requests.get(f"{TWELVE_BASE}/{endpoint}",headers=_td_headers(),params=params,timeout=timeout)
+    except Exception as exc:
+        return {"_error":f"Network error: {exc}"}
     if not r.ok: return {"_error":f"HTTP {r.status_code}"}
     try:j=r.json()
     except Exception:return {"_error":"Invalid JSON"}
@@ -1292,6 +1295,55 @@ def safety(info,d):
         score-=15; flags.append("High debt/equity")
     if isinstance(insider,(int,float)) and np.isfinite(insider) and insider<.25:
         score-=5; flags.append("Low insider holding")
+    score=max(0,min(100,score))
+    status="ELIGIBLE" if score>=70 else ("CAUTION" if score>=50 else "REJECT")
+    return score,status,flags
+
+def _regime_from_row(f,i):
+    """O(1) equivalent of regime_from_index(hist) — reads the already-computed
+    features_fast() frame at row i instead of recomputing features() from scratch
+    on a growing history slice for every signal (that recompute is O(len^2) per
+    call because of the weekly/monthly as-of loops, and was being called once per
+    signal per ticker per strategy inside the backtest — an O(n^3)-class hot path)."""
+    if i<30 or i-20<0:
+        return "UNKNOWN",0
+    z=f.iloc[i]
+    ema200_lag20=f.ema200.iloc[i-20]
+    req=(z.close,z.ema200,z.ema50,z.rsi14,z.ema20,z.relvol,ema200_lag20)
+    if any(pd.isna(v) for v in req):
+        return "UNKNOWN",0
+    score=0
+    score += 25 if z.close>z.ema200 else 0
+    score += 20 if z.ema50>z.ema200 else 0
+    score += 15 if z.ema200>ema200_lag20 else 0
+    score += 15 if z.rsi14>=55 else 0
+    score += 10 if z.close>z.ema20 else 0
+    score += 15 if z.relvol>=1 else 0
+    if score>=75: return "STRONG BULL",score
+    if score>=60: return "BULL",score
+    if score>=45: return "RECOVERY / SIDEWAYS",score
+    if score>=30: return "EARLY BEAR",score
+    return "BEAR",score
+
+def _safety_fast_series(df):
+    """Vectorized once-per-ticker precompute of the rolling stats safety() reads,
+    so the backtest hot loop can look them up in O(1) per signal instead of
+    re-slicing/re-computing tail(20)/tail(30) windows from scratch per signal."""
+    avg_value=(df.close*df.volume).rolling(20,min_periods=1).mean()
+    abnormal=(df.close.pct_change().abs()>.15).rolling(30,min_periods=1).sum()
+    return avg_value,abnormal
+
+def _safety_from_row(avg_value,abnormal,i):
+    """O(1) equivalent of safety({}, hist) for the backtest (info is always {}
+    there, so the debt/insider branches never fire)."""
+    score=100; flags=[]
+    av=avg_value.iloc[i]
+    if pd.notna(av):
+        if av<2_000_000: score-=30; flags.append("Low traded value")
+        if av<500_000: score-=20; flags.append("Very low liquidity")
+    ab=abnormal.iloc[i]
+    if pd.notna(ab) and ab>=3:
+        score-=15; flags.append("Abnormal volatility")
     score=max(0,min(100,score))
     status="ELIGIBLE" if score>=70 else ("CAUTION" if score>=50 else "REJECT")
     return score,status,flags
@@ -2240,14 +2292,14 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
         try:
             df=df.sort_index();f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
             if f.empty:continue
+            avg_value,abnormal=_safety_fast_series(df)
             for s in strategies:
                 sig=strategy_signal(f,s).fillna(False).to_numpy()
                 for i in np.flatnonzero(sig):
                     dt=pd.Timestamp(f.index[i])
                     if dt<start or dt>end or i>=len(df)-1:continue
-                    hist=df.iloc[:i+1]
-                    regime,_=regime_from_index(hist)
-                    safe,_,_=safety({},hist)
+                    regime,_=_regime_from_row(f,i)
+                    safe,_,_=_safety_from_row(avg_value,abnormal,i)
                     score,parts=_row_score(f,i,s,regime,safe)
                     if score<int(threshold):continue
                     entry_i=i+1; entry=float(df.close.iloc[entry_i])
@@ -2309,8 +2361,10 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                 continue
 
             # Market regime is evaluated once at each candidate using only data
-            # known up to the candidate date. To keep execution sharp, use the
-            # precomputed daily regime columns where possible.
+            # known up to the candidate date. To keep execution sharp, use an
+            # O(1) lookup on the already-computed feature frame instead of
+            # recomputing features()/safety() from scratch per signal.
+            avg_value, abnormal = _safety_fast_series(df)
             for s in strategies:
                 sig = strategy_signal(f, s).fillna(False).to_numpy()
                 idxs = np.flatnonzero(sig)
@@ -2320,9 +2374,8 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                     if dt < start or i >= len(f)-1:
                         continue
 
-                    hist = f.iloc[:i+1]
-                    regime, _ = regime_from_index(hist)
-                    safe, _, _ = safety({}, df.iloc[:i+1])
+                    regime, _ = _regime_from_row(f, i)
+                    safe, _, _ = _safety_from_row(avg_value, abnormal, i)
                     score, parts = _row_score(f, i, s, regime, safe)
 
                     # IMPORTANT: keep every complete-rule historical signal for learning.
@@ -2570,6 +2623,51 @@ def portfolio_from_backtest(bt,capital,risk_pct,slots):
         if equity<=0:equity=0;break
     return {"Starting Capital":round(capital,2),"Final Capital":round(equity,2),"Profit ₹":round(equity-capital,2),"ROI %":round((equity/capital-1)*100,2),"Max DD %":round(maxdd,2),"Trades":taken,"Risk/Trade %":risk_pct,"Slots (display)":slots}
 
+def add_forward_candidates(candidates):
+    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them."""
+    if candidates is None or len(candidates)==0:
+        return 0
+    con=_db(); added=0
+    try:
+        today=str(date.today())
+        for _,r in candidates.iterrows():
+            symbol=str(r.get("Ticker","")).upper().replace(".NS","")
+            strategy=str(r.get("Strategy","")).upper()
+            score=float(r.get("Score",0))
+            if not symbol or strategy not in {"S1","S2","S3","S4"}:
+                continue
+            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
+            target=float(r.get("Target",r.get("Target 3R",np.nan)))
+            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl) or not np.isfinite(target):
+                continue
+            exists=con.execute(
+                """SELECT id FROM forward_tests
+                   WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
+                (symbol,strategy,today)
+            ).fetchone()
+            if exists:
+                continue
+            now=datetime.now().isoformat(timespec="seconds")
+            snapshot={k:r.get(k,None) for k in r.index}
+            cur=con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
+                exit_price,result_r,updated_at,signal_date,signal_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                now,symbol,strategy,score,str(r.get("Regime","")).strip(),
+                entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
+                today,json.dumps(snapshot,default=str,allow_nan=True)
+            ))
+            fid=int(cur.lastrowid); added+=1
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
+                fid,now,today,entry,entry,entry,0.0,0.0,0.0,"ACTIVE"
+            ))
+        con.commit()
+    finally:
+        con.close()
+    return added
+
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab — Professional Final")
@@ -2583,11 +2681,11 @@ tabs=st.tabs([
     "🧠 Market Learning",
     "💎 Long-Term Fundamentals",
     "🏢 Small/Micro Safety",
-    "🧪 Custom Strategy",
+    "⚡ Live Monitor",
     "💾 Dhan Data Manager",
     "🧪 S4 Recovery Study",
-    "🧬 Research & Risk Control",
-    "⚙️ System Diagnostics"
+    "🧪 Custom Strategy",
+    "🧬 Research & Risk Control"
 ])
 
 with tabs[0]:
@@ -3115,51 +3213,6 @@ with tabs[1]:
 
 # ========================= RESEARCH MODULES =========================
 
-def add_forward_candidates(candidates):
-    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them."""
-    if candidates is None or len(candidates)==0:
-        return 0
-    con=_db(); added=0
-    try:
-        today=str(date.today())
-        for _,r in candidates.iterrows():
-            symbol=str(r.get("Ticker","")).upper().replace(".NS","")
-            strategy=str(r.get("Strategy","")).upper()
-            score=float(r.get("Score",0))
-            if not symbol or strategy not in {"S1","S2","S3","S4"}:
-                continue
-            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
-            target=float(r.get("Target",r.get("Target 3R",np.nan)))
-            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl) or not np.isfinite(target):
-                continue
-            exists=con.execute(
-                """SELECT id FROM forward_tests
-                   WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
-                (symbol,strategy,today)
-            ).fetchone()
-            if exists:
-                continue
-            now=datetime.now().isoformat(timespec="seconds")
-            snapshot={k:r.get(k,None) for k in r.index}
-            cur=con.execute("""INSERT INTO forward_tests(
-                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
-                exit_price,result_r,updated_at,signal_date,signal_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
-                now,symbol,strategy,score,str(r.get("Regime","")).strip(),
-                entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
-                today,json.dumps(snapshot,default=str,allow_nan=True)
-            ))
-            fid=int(cur.lastrowid); added+=1
-            con.execute("""INSERT OR IGNORE INTO forward_observations(
-                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
-            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
-                fid,now,today,entry,entry,entry,0.0,0.0,0.0,"ACTIVE"
-            ))
-        con.commit()
-    finally:
-        con.close()
-    return added
-
 def refresh_forward_positions():
     """Update active forward records using only locally stored daily candles."""
     con=_db()
@@ -3295,7 +3348,12 @@ with tabs[2]:
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
     universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
     start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
-    tickers=sorted(set(sum([index_universe(u) for u in universes],[]))) if universes else []
+    tickers=[]
+    if universes:
+        try:
+            tickers=sorted(set(sum([index_universe(u) for u in universes],[])))
+        except Exception as e:
+            st.error(f"Could not load index universe constituents (network/data issue): {e}")
     st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | local SQLite only | forward gate ≥{threshold}")
 
     st.markdown("### 1️⃣ Local Dataset")
@@ -3483,17 +3541,26 @@ with tabs[6]:
     else:
         rows=[]
         for sym in syms.symbol:
-            
+
             con2=_db()
             try:
                 d=_read_cache(con2,str(sym).upper().replace('.NS',''),date.today()-timedelta(days=180),date.today())
             finally:
                 con2.close()
-            if d.empty:
-                d=download_prices([sym],date.today()-timedelta(days=180),date.today(),max_workers=1).get(sym,pd.DataFrame())
-            info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
-            sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
-            rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
+            # LOCAL-ONLY. Safety must never trigger a live Dhan download on a bare rerun.
+            if d is None or d.empty:
+                rows.append({
+                    "Stock":sym,"Safety Score":np.nan,
+                    "Status":"NO LOCAL DATA — sync this symbol in Data Manager first",
+                    "News Risk":np.nan,"Flags":""
+                })
+                continue
+            try:
+                info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
+                sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
+                rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
+            except Exception as e:
+                rows.append({"Stock":sym,"Safety Score":np.nan,"Status":f"ERROR: {e}","News Risk":np.nan,"Flags":""})
         st.dataframe(pd.DataFrame(rows).sort_values("Safety Score",ascending=False),use_container_width=True,hide_index=True)
 
 
