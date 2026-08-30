@@ -2482,6 +2482,146 @@ def current_candidate_edge(market, strategy, score):
     conf = "HIGH" if int(row.iloc[0]["Samples"]) >= 100 else "MEDIUM"
     return r, conf
 
+def fallback_win_probability(market, strategy, score):
+    """Score-band historical win rate (adaptive_edge_table), used as the
+    Win Probability % estimate whenever the ML classifier isn't trained yet."""
+    q = adaptive_edge_table(market)
+    if q.empty:
+        return np.nan
+    band = "85-89" if 85 <= score <= 89 else "90-94" if score <= 94 else "95-100" if score >= 95 else "<85"
+    row = q[(q.Strategy == strategy) & (q["Score Band"] == band)]
+    if row.empty or int(row.iloc[0]["Samples"]) < 20:
+        return np.nan
+    return float(row.iloc[0]["Win % (shrunk)"])
+
+
+# ========================= ML WIN PROBABILITY =========================
+# Trained on learning_observations (completed backtest/forward-test trades).
+# Falls back to the existing score-band edge table (adaptive_edge_table) when
+# there isn't yet enough completed evidence to trust a classifier.
+
+ML_MIN_SAMPLES = 60
+ML_MIN_CLASS_SAMPLES = 15
+ML_FEATURE_COLUMNS = [
+    "score", "htf", "footprint", "strategy_score",
+    "entry_quality", "relative_strength", "safety_score"
+]
+
+@st.cache_resource(ttl=1800, show_spinner=False)
+def train_win_probability_model(market="INDIA"):
+    """Fit a win-probability classifier on completed learning_observations.
+
+    Returns a dict:
+      ready=False, n_samples=<n>, min_samples=<needed> when there isn't
+      enough completed evidence yet (or scikit-learn/data is unavailable) —
+      callers should fall back to adaptive_edge_table()/current_candidate_edge().
+      ready=True with the fitted models, feature schema, and honest
+      out-of-sample reliability metrics (AUC / Brier score) otherwise.
+    """
+    result = {"ready": False, "n_samples": 0, "min_samples": ML_MIN_SAMPLES}
+    q = learning_snapshot(market)
+    if q.empty or "result_r" not in q.columns:
+        return result
+    q = q.dropna(subset=["result_r"]).copy()
+    result["n_samples"] = len(q)
+    if len(q) < ML_MIN_SAMPLES:
+        return result
+
+    q["win"] = (pd.to_numeric(q["result_r"], errors="coerce") > 0).astype(int)
+    if q.win.sum() < ML_MIN_CLASS_SAMPLES or (len(q)-q.win.sum()) < ML_MIN_CLASS_SAMPLES:
+        result["reason"] = "Not enough win/loss diversity yet"
+        return result
+
+    try:
+        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import roc_auc_score, brier_score_loss
+    except ImportError:
+        result["reason"] = "scikit-learn is not installed"
+        return result
+
+    x_num = q[ML_FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    strat_dummies = pd.get_dummies(q["strategy"].astype(str).str.upper(), prefix="strategy")
+    regime_dummies = pd.get_dummies(q["regime"].astype(str), prefix="regime")
+    X = pd.concat([x_num, strat_dummies, regime_dummies], axis=1).fillna(0.0)
+    y = q["win"].to_numpy()
+
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.25, random_state=42, stratify=y
+        )
+    except ValueError:
+        X_train, X_test, y_train, y_test = X, X, y, y
+
+    gbc = GradientBoostingClassifier(random_state=42)
+    gbc.fit(X_train, y_train)
+    logit = LogisticRegression(max_iter=1000)
+    logit.fit(X_train, y_train)
+
+    def _reliability(model):
+        p = model.predict_proba(X_test)[:, 1]
+        try:
+            auc = float(roc_auc_score(y_test, p))
+        except ValueError:
+            auc = np.nan
+        return auc, float(brier_score_loss(y_test, p))
+
+    gbc_auc, gbc_brier = _reliability(gbc)
+    logit_auc, logit_brier = _reliability(logit)
+
+    # Refit on the full dataset for production inference; the held-out split
+    # above is only used to report honest reliability metrics.
+    gbc.fit(X, y)
+    logit.fit(X, y)
+
+    result.update({
+        "ready": True,
+        "gbc_model": gbc,
+        "logit_model": logit,
+        "feature_columns": list(X.columns),
+        "gbc_auc": gbc_auc, "gbc_brier": gbc_brier,
+        "logit_auc": logit_auc, "logit_brier": logit_brier,
+    })
+    return result
+
+def ml_win_probability(model_info, row):
+    """O(1) inference of win probability (0-100) for one candidate row using a
+    model dict from train_win_probability_model(). `row` may use either the
+    learning_observations naming (score/htf/...) or scanner naming
+    (Score/HTF Score/...). Returns np.nan when the model isn't ready."""
+    if not model_info or not model_info.get("ready"):
+        return np.nan
+
+    def g(*keys, default=0.0):
+        for k in keys:
+            v = row.get(k) if hasattr(row, "get") else None
+            if v is not None and pd.notna(v):
+                return v
+        return default
+
+    feat = {
+        "score": g("score", "Score"),
+        "htf": g("htf", "HTF Score", "HTF Demand", "HTF"),
+        "footprint": g("footprint", "Footprint Score", "Footprint"),
+        "strategy_score": g("strategy_score", "Strategy Score"),
+        "entry_quality": g("entry_quality", "Entry Quality"),
+        "relative_strength": g("relative_strength", "Relative Strength"),
+        "safety_score": g("safety_score", "Safety Score"),
+    }
+    strategy = str(g("strategy", "Strategy", default="")).upper()
+    regime = str(g("regime", "Regime", default=""))
+
+    x = pd.DataFrame([feat])
+    x[f"strategy_{strategy}"] = 1.0
+    x[f"regime_{regime}"] = 1.0
+    x = x.reindex(columns=model_info["feature_columns"], fill_value=0.0)
+    try:
+        p = model_info["gbc_model"].predict_proba(x)[0, 1]
+        return float(round(p*100, 1))
+    except Exception:
+        return np.nan
+
 
 # ========================= BACKTEST =========================
 
@@ -2816,6 +2956,7 @@ with tabs[1]:
                 "qualified": {1:0,2:0,3:0,4:0},
                 "safety_reject": 0
             }
+            ml_model = train_win_probability_model("INDIA")
 
             for n,(ticker,df) in enumerate(data.items()):
                 if len(df) < 260:
@@ -2865,7 +3006,7 @@ with tabs[1]:
                         "INDIA", f"S{s}", float(score)
                     )
                     learned_rank = float(np.clip(score + edge_r * 2.0, 0, 100))
-                    rows.append({
+                    row = {
                         "Score": score,
                         "Learned Rank": round(learned_rank, 2),
                         "Historical Edge R": round(edge_r, 3),
@@ -2888,7 +3029,12 @@ with tabs[1]:
                         "Relative Strength": parts["Relative Strength"],
                         "Safety Score": safe,
                         "Safety Flags": ", ".join(flags)
-                    })
+                    }
+                    win_prob = ml_win_probability(ml_model, row)
+                    if pd.isna(win_prob):
+                        win_prob = fallback_win_probability("INDIA", f"S{s}", float(score))
+                    row["Win Probability %"] = win_prob
+                    rows.append(row)
 
                 bar.progress((n+1)/max(1,len(data)))
 
@@ -3080,6 +3226,27 @@ with tabs[1]:
                         with st.expander("View S2 stock-by-stock audit"):
                             st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
+
+            st.subheader("🧠 ML Win Probability")
+            if ml_model.get("ready"):
+                m1,m2,m3,m4 = st.columns(4)
+                m1.metric("Training samples", ml_model["n_samples"])
+                m2.metric("GBC AUC", f"{ml_model['gbc_auc']:.2f}" if np.isfinite(ml_model['gbc_auc']) else "—")
+                m3.metric("GBC Brier", f"{ml_model['gbc_brier']:.3f}")
+                m4.metric("Logistic AUC (baseline)", f"{ml_model['logit_auc']:.2f}" if np.isfinite(ml_model['logit_auc']) else "—")
+                st.caption(
+                    "AUC 0.5 = no better than chance, 1.0 = perfect separation. Brier score is mean "
+                    "squared error of the probability (lower is better, 0 is perfect). With this few "
+                    "samples these numbers can swing a lot run to run — treat them as directional, not final."
+                )
+            else:
+                st.info(
+                    f"ML model not trained yet: {ml_model.get('n_samples',0)} completed learning "
+                    f"observations, needs ≥{ml_model['min_samples']}"
+                    + (f" ({ml_model['reason']})" if ml_model.get('reason') else "")
+                    + ". 'Win Probability %' falls back to the score-band historical edge table below "
+                      "(Historical Edge R / Learning Confidence) until then."
+                )
 
             st.subheader("🔎 Scanner Diagnostics")
             c1,c2,c3,c4,c5,c6 = st.columns(6)
