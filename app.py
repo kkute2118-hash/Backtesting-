@@ -917,6 +917,37 @@ def _rolling_count(condition, window, offset=1):
     # previous `window` observations, excluding the current bar.
     return condition.shift(offset).rolling(window, min_periods=1).sum()
 
+def s4_base_conditions(x):
+    """Every exact Strategy 4 condition EXCEPT the daily close<=1.03*EMA20
+    proximity rule. Shared by strategy_signal(s=4) (which ANDs the exact 3%
+    rule back in) and s4_ema20_extension_calibration(), which studies what
+    the historically best-performing EMA20 distance actually is instead of
+    assuming 3% without evidence."""
+    monthly_bull_cross = (
+        (x.mema10 > x.mema20) &
+        (x.mema10.shift(1) <= x.mema20.shift(1))
+    )
+    monthly_bull_cross_count = (
+        monthly_bull_cross.shift(1)
+        .rolling(20, min_periods=20)
+        .sum()
+    )
+    monthly_reclaim = (
+        (x.mclose > x.mema10) &
+        (x.mprevclose <= x.mema10)
+    )
+    return (
+        (x.mmom >= 20) &
+        (x.mrsi14 >= 50) &
+        (x.mema10 >= x.mema20) &
+        (x.vol30 >= 50000) &
+        (x.close >= 20) &
+        (
+            (monthly_bull_cross_count >= 1) |
+            monthly_reclaim
+        )
+    )
+
 def strategy_signal(x,s):
     if x.empty:
         return pd.Series(False,index=x.index)
@@ -1089,47 +1120,7 @@ def strategy_signal(x,s):
         # Monthly count uses completed monthly observations immediately
         # preceding the current month, exactly like the scanner's offset=1.
 
-        monthly_bull_cross = (
-            (x.mema10 > x.mema20) &
-            (x.mema10.shift(1) <= x.mema20.shift(1))
-        )
-
-        monthly_bull_cross_count = (
-            monthly_bull_cross.shift(1)
-            .rolling(20, min_periods=20)
-            .sum()
-        )
-
-        monthly_reclaim = (
-            (x.mclose > x.mema10) &
-            (x.mprevclose <= x.mema10)
-        )
-
-        return (
-            # monthly "close - 1 candle ago close / 1 candle ago close * 100" >= 20
-            (x.mmom >= 20) &
-
-            # monthly RSI(14) >= 50
-            (x.mrsi14 >= 50) &
-
-            # monthly EMA10 >= monthly EMA20
-            (x.mema10 >= x.mema20) &
-
-            # daily EMA(daily volume,30) >= 50000
-            (x.vol30 >= 50000) &
-
-            # daily close >= 20
-            (x.close >= 20) &
-
-            # monthly count >= 1 OR monthly reclaim
-            (
-                (monthly_bull_cross_count >= 1) |
-                monthly_reclaim
-            ) &
-
-            # daily close <= 1.03 * daily EMA20
-            (x.close <= 1.03 * x.ema20)
-        )
+        return s4_base_conditions(x) & (x.close <= 1.03 * x.ema20)
 
     return pd.Series(False,index=x.index)
 
@@ -2999,6 +2990,85 @@ def study_s4_recovery_walkforward(data,start_date,end_date,min_score=70):
             rows.append({"Date":dt.date(),"Ticker":str(ticker).replace('.NS',''),"Study":"S4 Recovery","Score":ev["Score"],**ev,"Outcome":outcome,"R":round(r,2),"Holding Bars":held})
     return pd.DataFrame(rows)
 
+S4_EXTENSION_BUCKETS = [
+    (-100.0, 0.0, "At/below EMA20"),
+    (0.0, 3.0, "0-3% above (exact S4 rule)"),
+    (3.0, 6.0, "3-6% above"),
+    (6.0, 10.0, "6-10% above"),
+    (10.0, 15.0, "10-15% above"),
+    (15.0, 25.0, "15-25% above"),
+    (25.0, 1000.0, ">25% above"),
+]
+S4_CALIBRATION_MIN_BUCKET_SAMPLES = 15
+
+def s4_ema20_extension_calibration(data, start_date, end_date, sl_pct=0.07, target_r=3.0):
+    """Backtest every exact Strategy 4 condition EXCEPT the fixed
+    close<=1.03*EMA20 rule (via s4_base_conditions), and record how far above
+    or below EMA20 price actually was at each qualifying signal, plus the
+    resulting trade outcome. This is the raw evidence behind
+    s4_extension_bucket_report() - it does not itself assume 3% is correct."""
+    rows=[]; start=pd.Timestamp(start_date); end=pd.Timestamp(end_date)
+    for ticker,df in data.items():
+        if df is None or len(df)<260: continue
+        try:
+            df=df.sort_index(); f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
+            if f.empty: continue
+            sig=s4_base_conditions(f).fillna(False).to_numpy()
+            for i in np.flatnonzero(sig):
+                dt=pd.Timestamp(f.index[i])
+                if dt<start or dt>end or i>=len(df)-1: continue
+                z=f.iloc[i]
+                if pd.isna(z.ema20) or z.ema20<=0 or pd.isna(z.close): continue
+                extension=(float(z.close)/float(z.ema20)-1)*100
+                regime,_=_regime_from_row(f,i)
+                entry_i=i+1; entry=float(df.close.iloc[entry_i])
+                if not np.isfinite(entry) or entry<=0: continue
+                stop=entry*(1-sl_pct); target=entry+target_r*(entry-stop)
+                outcome,exit_price,held=_fast_trade_outcome(df,entry_i,stop,target)
+                result_r=(exit_price-entry)/(entry-stop) if (entry-stop)>0 else 0.0
+                rows.append({
+                    'Date':dt.date(),'Ticker':str(ticker).replace('.NS',''),
+                    'EMA20 Extension %':round(extension,2),'Regime':regime,
+                    'Entry':round(entry,2),'Outcome':outcome,'R':round(float(result_r),3),
+                    'Holding Bars':int(held)
+                })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+def s4_extension_bucket_report(cal_df):
+    """Bucket s4_ema20_extension_calibration() output by EMA20 distance and
+    report win rate/avg R per bucket, flagging which buckets have enough
+    samples to be trusted (>=S4_CALIBRATION_MIN_BUCKET_SAMPLES)."""
+    if cal_df.empty:
+        return pd.DataFrame()
+    df=cal_df.copy()
+    edges=[b[0] for b in S4_EXTENSION_BUCKETS]+[S4_EXTENSION_BUCKETS[-1][1]]
+    labels=[b[2] for b in S4_EXTENSION_BUCKETS]
+    df["Bucket"]=pd.cut(df["EMA20 Extension %"],bins=edges,labels=labels,include_lowest=True)
+    df["Win"]=(df.R>0).astype(int)
+    g=df.groupby("Bucket",observed=False).agg(
+        Samples=("R","count"), WinRate=("Win","mean"), AvgR=("R","mean"), TotalR=("R","sum")
+    ).reset_index()
+    g["WinRate"]=(g.WinRate*100).round(1); g["AvgR"]=g.AvgR.round(3); g["TotalR"]=g.TotalR.round(2)
+    g["Reliable (>=%d samples)"%S4_CALIBRATION_MIN_BUCKET_SAMPLES]=g.Samples>=S4_CALIBRATION_MIN_BUCKET_SAMPLES
+    return g
+
+def s4_custom_dsl_from_bucket(bucket_label):
+    """Render a Custom Strategy DSL rule set replicating S4's other
+    conditions with the learned EMA20 distance swapped in for the fixed 3%
+    rule. The DSL is AND-only, so the 'OR reclaim' branch of exact S4 is
+    approximated by the monthly-cross-count condition alone - this is a
+    slightly narrower (fewer false positives, some missed reclaim-only
+    setups), not identical, scan."""
+    lo, hi, _ = next(b for b in S4_EXTENSION_BUCKETS if b[2] == bucket_label)
+    lines = ["MMOM >= 20", "MRSI14 >= 50", "MEMA10 >= MEMA20", "VOL30 >= 50000", "CLOSE >= 20", "M_CROSS_COUNT20 >= 1"]
+    if hi < 1000.0:
+        lines.append(f"CLOSE <= {round(1+hi/100,3)} * EMA20")
+    if lo > -100.0:
+        lines.append(f"CLOSE >= {round(1+lo/100,3)} * EMA20")
+    return "\n".join(lines)
+
 def research_metrics(df):
     if df.empty:return {"trades":0,"win_rate":0,"avg_r":0,"profit_factor":0}
     wins=df[df.R>0].R; losses=df[df.R<=0].R
@@ -4227,6 +4297,56 @@ with tabs[9]:
 These thresholds are research heuristics—not guaranteed probabilities. The system should rank and label the setup rather than force a purchase.
 """)
     st.warning("Important: the Study Score and BUY-TRIGGER are decision aids, not a probability of profit. Exact S4 remains unchanged.")
+
+    st.divider()
+    st.subheader("📐 EMA20 Extension Calibration — is 3% actually the best cutoff?")
+    st.caption(
+        "Exact S4 requires daily close <= 1.03 x EMA20 (within 3% above EMA20), a fixed assumption. "
+        "This runs every OTHER S4 condition unchanged and measures win rate/avg R by how far price "
+        "actually was from EMA20 at signal time, so the 3% cutoff can be replaced with evidence "
+        "instead of an assumption. Exact S4 itself is never changed by this."
+    )
+    ec1,ec2=st.columns(2)
+    ext_universe=ec1.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="s4ext_universe")
+    ext_period=ec2.selectbox("Backtest span",["1 Year","2 Years","3 Years"],index=1,key="s4ext_period")
+    if st.button("📐 Run EMA20 Extension Calibration",type="primary",key="s4ext_run"):
+        try:
+            tickers=index_universe(ext_universe)
+        except Exception as e:
+            st.error(f"Could not load index universe constituents (network/data issue): {e}")
+            tickers=[]
+        if tickers:
+            estart,eend=_bt_period(ext_period)
+            with st.spinner(f"Replaying Strategy 4's other conditions across {len(tickers):,} stocks..."):
+                data=load_local_backtest_data(tickers,estart,eend)
+                cal=s4_ema20_extension_calibration(data,estart,eend)
+            st.session_state["s4_ext_calibration"]=cal
+
+    cal=st.session_state.get("s4_ext_calibration",pd.DataFrame())
+    if cal.empty:
+        st.info("Run the calibration to see which EMA20 distance actually performed best historically.")
+    else:
+        report=s4_extension_bucket_report(cal)
+        reliable_col=f"Reliable (>={S4_CALIBRATION_MIN_BUCKET_SAMPLES} samples)"
+        st.dataframe(report,use_container_width=True,hide_index=True)
+        st.caption(f"Total qualifying signals (ignoring the 3% rule): {len(cal):,}. Buckets below {S4_CALIBRATION_MIN_BUCKET_SAMPLES} samples are marked unreliable — treat them as noise, not evidence.")
+
+        reliable=report[report[reliable_col]]
+        if reliable.empty:
+            st.warning("No bucket has enough samples yet to recommend a threshold. Try a longer span or wider universe.")
+        else:
+            best=reliable.sort_values(["WinRate","Samples"],ascending=[False,False]).iloc[0]
+            st.success(f"Best-performing reliable bucket: **{best['Bucket']}** — {best['WinRate']}% win rate, {best['AvgR']} avg R over {int(best['Samples'])} trades.")
+            exact_row=report[report.Bucket=="0-3% above (exact S4 rule)"]
+            if not exact_row.empty and exact_row.iloc[0][reliable_col]:
+                st.caption(f"For comparison, the exact-S4 0-3% rule: {exact_row.iloc[0]['WinRate']}% win rate, {exact_row.iloc[0]['AvgR']} avg R over {int(exact_row.iloc[0]['Samples'])} trades.")
+            st.markdown("#### Paste this into Custom Strategy Lab to scan with the learned threshold instead of the fixed 3% rule")
+            st.code(s4_custom_dsl_from_bucket(str(best["Bucket"])), language="text")
+            st.caption(
+                "This replicates S4's other rules but swaps the EMA20 distance for the bucket above. "
+                "The DSL is AND-only, so exact S4's 'OR monthly reclaim' branch is approximated here by "
+                "the monthly-cross-count condition alone — this scan is narrower than exact S4, not identical."
+            )
 
 with tabs[10]:
     st.subheader("🧪 Custom Strategy Lab")
