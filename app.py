@@ -3246,15 +3246,16 @@ with tabs[1]:
             # becoming another Dhan historical download.
             t0 = time.perf_counter()
             data = {}
-            con=_db()
-            try:
-                for ticker in tickers:
-                    clean=str(ticker).upper().replace(".NS","")
-                    d=_read_cache(con,clean,date.today()-timedelta(days=1000),date.today())
-                    if d is not None and len(d)>=260:
-                        data[ticker]=d
-            finally:
-                con.close()
+            with st.spinner(f"Loading local price cache for {len(tickers):,} stocks..."):
+                con=_db()
+                try:
+                    for ticker in tickers:
+                        clean=str(ticker).upper().replace(".NS","")
+                        d=_read_cache(con,clean,date.today()-timedelta(days=1000),date.today())
+                        if d is not None and len(d)>=260:
+                            data[ticker]=d
+                finally:
+                    con.close()
             scan_load_seconds = time.perf_counter() - t0
 
             if not data:
@@ -3642,8 +3643,8 @@ with tabs[1]:
                                 else:
                                     st.info(f"**{rank}. {r['Ticker']} — {score:.0f}**")
                                 st.caption(
-                                    f"HTF {r.get('HTF Demand','-')} | "
-                                    f"Footprint {r.get('Footprint','-')} | "
+                                    f"HTF {r.get('HTF Score','-')} | "
+                                    f"Footprint {r.get('Footprint Score','-')} | "
                                     f"Safety {r.get('Safety','-')} | {r.get('Regime','-')}"
                                 )
 
@@ -4025,12 +4026,17 @@ with tabs[5]:
     st.info("Twelve Data provides India fundamentals/press releases; Dhan's current API documentation exposes market data, instruments, quotes, positions and related trading/data APIs rather than a fundamental-financial-statement endpoint.")
     sym_text=st.text_input("Candidate symbols (comma separated)","RELIANCE,TCS,HDFCBANK",key="fund_symbols_final")
     if st.button("🔎 Enrich Fundamentals + News",key="fund_enrich_final"):
+        symbols=[x.strip().upper() for x in sym_text.split(',') if x.strip()]
         rows=[]
-        for sym in [x.strip().upper() for x in sym_text.split(',') if x.strip()]:
-            info,ff=company_info(sym)
-            items,sent,risk=news_snapshot(sym)
-            score,status,flags=_fundamental_score(info)
-            rows.append({"Ticker":sym,"Fundamental Score":score,"Status":status,"News Sentiment":round(sent,1),"News Risk":round(risk,1),"Flags":"; ".join(ff+flags),"News Items":len(items)})
+        with st.spinner(f"Enriching {len(symbols)} candidate(s)..."):
+            for sym in symbols:
+                try:
+                    info,ff=company_info(sym)
+                    items,sent,risk=news_snapshot(sym)
+                    score,status,flags=_fundamental_score(info)
+                    rows.append({"Ticker":sym,"Fundamental Score":score,"Status":status,"News Sentiment":round(sent,1),"News Risk":round(risk,1),"Flags":"; ".join(ff+flags),"News Items":len(items)})
+                except Exception as e:
+                    rows.append({"Ticker":sym,"Fundamental Score":np.nan,"Status":f"ERROR: {e}","News Sentiment":np.nan,"News Risk":np.nan,"Flags":"","News Items":0})
         st.session_state["fundamental_results_final"]=pd.DataFrame(rows)
     fr=st.session_state.get("fundamental_results_final",pd.DataFrame())
     if fr.empty: st.info("Enter candidates or feed the tab from the scanner's ≥85 queue.")
@@ -4255,16 +4261,17 @@ with tabs[9]:
     study_universe=st.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="s4study_universe")
     if st.button("🔬 Study S4 Recovery Pattern",type="primary",key="s4study_run"):
         try:
-            tickers=index_universe(study_universe)
-            data=load_local_market_dataset(tuple(tickers),date.today()-timedelta(days=1000),date.today(),160)
-            # Use custom impulse/base settings while retaining the research-only definition.
-            rows=[]
-            for ticker,d in data.items():
-                if len(d)<160: continue
-                sig=strategy4_recovery_signal(d,min_impulse=impulse_min,max_base_range=base_max,max_retracement=retr_max).iloc[-1]
-                score,parts=_s4_recovery_quality(d)
-                if bool(sig) and score>=s4_min_score:
-                    rows.append({"Ticker":str(ticker).replace(".NS",""),"Study Score":score,"Signal":"RECOVERY → HIGHER HIGH",**parts})
+            with st.spinner("Scanning for S4 recovery candidates..."):
+                tickers=index_universe(study_universe)
+                data=load_local_market_dataset(tuple(tickers),date.today()-timedelta(days=1000),date.today(),160)
+                # Use custom impulse/base settings while retaining the research-only definition.
+                rows=[]
+                for ticker,d in data.items():
+                    if len(d)<160: continue
+                    sig=strategy4_recovery_signal(d,min_impulse=impulse_min,max_base_range=base_max,max_retracement=retr_max).iloc[-1]
+                    score,parts=_s4_recovery_quality(d)
+                    if bool(sig) and score>=s4_min_score:
+                        rows.append({"Ticker":str(ticker).replace(".NS",""),"Study Score":score,"Signal":"RECOVERY → HIGHER HIGH",**parts})
             res=pd.DataFrame(rows)
             if res.empty:
                 st.warning("No recovery candidates found with the current research thresholds.")
@@ -4328,7 +4335,7 @@ These thresholds are research heuristics—not guaranteed probabilities. The sys
     else:
         report=s4_extension_bucket_report(cal)
         reliable_col=f"Reliable (>={S4_CALIBRATION_MIN_BUCKET_SAMPLES} samples)"
-        st.dataframe(report,use_container_width=True,hide_index=True)
+        st.dataframe(report,width='stretch',hide_index=True)
         st.caption(f"Total qualifying signals (ignoring the 3% rule): {len(cal):,}. Buckets below {S4_CALIBRATION_MIN_BUCKET_SAMPLES} samples are marked unreliable — treat them as noise, not evidence.")
 
         reliable=report[report[reliable_col]]
@@ -4553,9 +4560,10 @@ with tabs[11]:
     study_universe=c3.selectbox("Study universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="s4_walk_universe")
     if st.button("🔬 RUN S4 RECOVERY WALK-FORWARD STUDY",type="primary",key="s4_walk_run"):
         try:
-            sd,ed=_bt_period(study_years); ticks=index_universe(study_universe)
-            data=load_local_market_dataset(tuple(ticks),sd-timedelta(days=1000),ed,160)
-            study=study_s4_recovery_walkforward(data,sd,ed,study_threshold)
+            with st.spinner("Running S4 recovery walk-forward study..."):
+                sd,ed=_bt_period(study_years); ticks=index_universe(study_universe)
+                data=load_local_market_dataset(tuple(ticks),sd-timedelta(days=1000),ed,160)
+                study=study_s4_recovery_walkforward(data,sd,ed,study_threshold)
             st.session_state["s4_recovery_bt_final"]=study
         except Exception as ex: st.error(f"S4 Recovery study error: {ex}")
     s4bt=st.session_state.get("s4_recovery_bt_final",pd.DataFrame())
@@ -4604,12 +4612,18 @@ with tabs[12]:
             )
         else:
             st.markdown("### 📊 Win rate / Avg R by regime")
-            st.dataframe(report["regime_breakdown"], width='stretch', hide_index=True)
-            st.caption("Samples below ~10-15 per regime are too thin to draw conclusions from.")
+            if report["regime_breakdown"].empty:
+                st.info("No regime breakdown available yet.")
+            else:
+                st.dataframe(report["regime_breakdown"], width='stretch', hide_index=True)
+                st.caption("Samples below ~10-15 per regime are too thin to draw conclusions from.")
 
             st.markdown("### 🔬 Component win-rate split (high half vs low half)")
-            st.dataframe(report["component_breakdown"], width='stretch', hide_index=True)
-            st.caption("Splits each score component at its median for this strategy's history and compares the two halves.")
+            if report["component_breakdown"].empty:
+                st.info("No component split available yet (not enough score variance in this strategy's history).")
+            else:
+                st.dataframe(report["component_breakdown"], width='stretch', hide_index=True)
+                st.caption("Splits each score component at its median for this strategy's history and compares the two halves.")
 
         st.markdown("### 🌳 Auto-extracted rules")
         if report["tree_note"]:
