@@ -3416,7 +3416,7 @@ with tabs[1]:
                     if _best.empty:
                         st.info(f"No complete-rule setup currently meets the ≥{min_score} forward-test gate.")
                     else:
-                        st.dataframe(_best,use_container_width=True,hide_index=True)
+                        st.dataframe(_best,width='stretch',hide_index=True)
                     st.caption("Every displayed setup has already passed ALL rules of its own strategy. Score only ranks valid setups.")
 
 
@@ -3464,9 +3464,9 @@ with tabs[1]:
                             "Condition": list(s4df.columns[1:-1]),
                             "Passing stocks": [int(s4df[c].sum()) for c in s4df.columns[1:-1]]
                         })
-                        st.dataframe(s4counts, use_container_width=True, hide_index=True)
+                        st.dataframe(s4counts, width='stretch', hide_index=True)
                         with st.expander("View S4 stock-by-stock audit"):
-                            st.dataframe(s4df, use_container_width=True, hide_index=True)
+                            st.dataframe(s4df, width='stretch', hide_index=True)
 
                 # Strategy 2 condition audit — shown only when S2 is selected.
                 if 2 in selected_strategies and stats["usable"] > 0:
@@ -3547,9 +3547,9 @@ with tabs[1]:
                             "Condition": list(audit_df.columns[1:]),
                             "Passing stocks": [int(audit_df[c].sum()) for c in audit_df.columns[1:]]
                         })
-                        st.dataframe(counts, use_container_width=True, hide_index=True)
+                        st.dataframe(counts, width='stretch', hide_index=True)
                         with st.expander("View S2 stock-by-stock audit"):
-                            st.dataframe(audit_df, use_container_width=True, hide_index=True)
+                            st.dataframe(audit_df, width='stretch', hide_index=True)
 
 
             st.subheader("🧠 ML Win Probability")
@@ -3591,7 +3591,7 @@ with tabs[1]:
                 "Raw signals":[stats["signals"][1],stats["signals"][2],stats["signals"][3],stats["signals"][4]],
                 "Displayed/qualified":[stats["qualified"][1],stats["qualified"][2],stats["qualified"][3],stats["qualified"][4]]
             })
-            st.dataframe(diag,use_container_width=True,hide_index=True)
+            st.dataframe(diag,width='stretch',hide_index=True)
 
             if result.empty:
                 st.error(
@@ -3617,7 +3617,7 @@ with tabs[1]:
                     "Best":int(sr["Score"].max()) if not sr.empty else 0,
                     "Average":round(float(sr["Score"].mean()),1) if not sr.empty else 0
                 })
-            st.dataframe(pd.DataFrame(cov),use_container_width=True,hide_index=True)
+            st.dataframe(pd.DataFrame(cov),width='stretch',hide_index=True)
 
             if full_result.empty:
                 st.warning("No stock passed ALL rules of the selected strategies.")
@@ -3665,10 +3665,10 @@ with tabs[1]:
                 if conf.empty:
                     st.info("No stock currently passes the complete rules of 2 or more strategies.")
                 else:
-                    st.dataframe(conf,use_container_width=True,hide_index=True)
+                    st.dataframe(conf,width='stretch',hide_index=True)
 
                 st.subheader("📋 All Qualifying Setups")
-                st.dataframe(full_result,use_container_width=True,hide_index=True)
+                st.dataframe(full_result,width='stretch',hide_index=True)
 
                 forward=full_result[
                     (full_result["Score"]>=min_score) &
@@ -3678,7 +3678,7 @@ with tabs[1]:
                 if forward.empty:
                     st.info("No complete-rule setup currently meets the forward-test gate.")
                 else:
-                    st.dataframe(forward,use_container_width=True,hide_index=True)
+                    st.dataframe(forward,width='stretch',hide_index=True)
                     st.session_state["forward_queue"]=forward
                     added=add_forward_candidates(forward)
                     st.success(
@@ -3696,7 +3696,7 @@ with tabs[1]:
                         else:
                             st.dataframe(
                                 sr.sort_values("Score",ascending=False),
-                                use_container_width=True,
+                                width='stretch',
                                 hide_index=True
                             )
 
@@ -3910,7 +3910,7 @@ with tabs[2]:
         st.subheader("🏆 Historical Learning Dataset")
         a,b,c,d,e=st.columns(5)
         a.metric("Trades",len(bt));b.metric("S1",int((bt.Strategy=='S1').sum()));c.metric("S2",int((bt.Strategy=='S2').sum()));d.metric("S3",int((bt.Strategy=='S3').sum()));e.metric("S4",int((bt.Strategy=='S4').sum()))
-        st.dataframe(bt.sort_values(["Score","Date"],ascending=[False,False]),use_container_width=True,hide_index=True)
+        st.dataframe(bt.sort_values(["Score","Date"],ascending=[False,False]),width='stretch',hide_index=True)
 
         st.subheader("📈 Strategy Performance / ROI / Risk")
         perf=[]
@@ -3918,26 +3918,26 @@ with tabs[2]:
             wins=g[g['R']>0];loss=g[g['R']<=0];grossw=float(wins['R'].sum());grossl=abs(float(loss['R'].sum()))
             pf=grossw/grossl if grossl>0 else (99.99 if grossw>0 else 0)
             perf.append({'Strategy':strat,'Trades':len(g),'Win %':round((g.R>0).mean()*100,1),'Avg R':round(g.R.mean(),3),'Total R':round(g.R.sum(),2),'Profit Factor':round(pf,2),'Avg Return %':round(g['Return %'].mean(),2),'Avg MFE %':round(g['MFE %'].mean(),2),'Avg MAE %':round(g['MAE %'].mean(),2),'Best Score':int(g.Score.max())})
-        st.dataframe(pd.DataFrame(perf).sort_values('Avg R',ascending=False),use_container_width=True,hide_index=True)
+        st.dataframe(pd.DataFrame(perf).sort_values('Avg R',ascending=False),width='stretch',hide_index=True)
 
         st.subheader("💰 Capital / ROI Simulation")
         pc1,pc2,pc3=st.columns(3);capital=pc1.number_input("Starting capital ₹",10000,100000000,100000,10000,key='bt_capital');risk_pct=pc2.number_input("Risk per trade %",0.1,5.0,1.0,0.1,key='bt_risk');slots=pc3.number_input("Capital slots",1,50,5,1,key='bt_slots')
-        roi=portfolio_from_backtest(bt,float(capital),float(risk_pct),int(slots));st.dataframe(pd.DataFrame([roi]),use_container_width=True,hide_index=True)
+        roi=portfolio_from_backtest(bt,float(capital),float(risk_pct),int(slots));st.dataframe(pd.DataFrame([roi]),width='stretch',hide_index=True)
 
         st.subheader("🎯 Score Learning")
         bands=pd.cut(bt.Score,[84,89,94,100],labels=["85–89","90–94","95–100"],include_lowest=True);bx=bt.assign(Band=bands,Win=(bt.Outcome.str.upper()=='WIN').astype(int))
-        learn=bx.groupby('Band',observed=True).agg(Signals=('Ticker','count'),Wins=('Win','sum'),WinRate=('Win','mean'),AvgR=('R','mean'),TotalR=('R','sum'),AvgReturn=('Return %','mean'),AvgMFE=('MFE %','mean'),AvgMAE=('MAE %','mean')).reset_index();learn['WinRate']=(learn.WinRate*100).round(1);learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']]=learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']].round(2);st.dataframe(learn,use_container_width=True,hide_index=True)
+        learn=bx.groupby('Band',observed=True).agg(Signals=('Ticker','count'),Wins=('Win','sum'),WinRate=('Win','mean'),AvgR=('R','mean'),TotalR=('R','sum'),AvgReturn=('Return %','mean'),AvgMFE=('MFE %','mean'),AvgMAE=('MAE %','mean')).reset_index();learn['WinRate']=(learn.WinRate*100).round(1);learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']]=learn[['AvgR','TotalR','AvgReturn','AvgMFE','AvgMAE']].round(2);st.dataframe(learn,width='stretch',hide_index=True)
 
         st.subheader("🧠 Marking Conditions Used")
         st.info("A row exists only when ALL mandatory rules of its strategy passed. The columns below preserve the score components used to rank the historical setup; the strategy itself is independently re-evaluated from the full rule set.")
-        st.dataframe(bt[['Ticker','Date','Strategy','Score','Strategy Score','HTF','Footprint','Trend','Entry Quality','Relative Strength','Safety','Regime','Outcome','R','Return %','MFE %','MAE %','Holding Bars']].sort_values('Score',ascending=False),use_container_width=True,hide_index=True)
+        st.dataframe(bt[['Ticker','Date','Strategy','Score','Strategy Score','HTF','Footprint','Trend','Entry Quality','Relative Strength','Safety','Regime','Outcome','R','Return %','MFE %','MAE %','Holding Bars']].sort_values('Score',ascending=False),width='stretch',hide_index=True)
 
         st.subheader("🔎 Individual Strategy Results")
         stabs=st.tabs(['S1','S2','S3','S4'])
         for tab,ss in zip(stabs,[1,2,3,4]):
             with tab:
                 sr=bt[bt.Strategy==f'S{ss}'].sort_values(['Score','Date'],ascending=[False,False])
-                st.dataframe(sr,use_container_width=True,hide_index=True) if not sr.empty else st.info(f'S{ss}: no qualifying historical setups in this window.')
+                st.dataframe(sr,width='stretch',hide_index=True) if not sr.empty else st.info(f'S{ss}: no qualifying historical setups in this window.')
 
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
@@ -3965,13 +3965,13 @@ with tabs[3]:
         a.metric("Persistent signals",len(ft)); b.metric("Open",int((ft.Status=="ACTIVE").sum()))
         c.metric("Wins",wins); d.metric("Losses",losses); e.metric("Avg R",f"{avg_r:.2f}" if np.isfinite(avg_r) else "—")
         st.subheader("📋 Forward Positions")
-        st.dataframe(ft,use_container_width=True,hide_index=True)
+        st.dataframe(ft,width='stretch',hide_index=True)
         st.subheader("🏆 Strategy Performance Scorecard")
         try:
             fs=forward_summary_table()
         except Exception as e:
             fs=pd.DataFrame(); st.error(f"Strategy scorecard error: {e}")
-        if not fs.empty: st.dataframe(fs,use_container_width=True,hide_index=True)
+        if not fs.empty: st.dataframe(fs,width='stretch',hide_index=True)
         else: st.info("Waiting for completed forward-test outcomes.")
         st.subheader("🧠 What is being learned")
         st.write("The system tracks strategy, score, regime, entry/stop/target, MFE/MAE, R and final outcome. This is the permanent evidence base for future strategy ranking.")
@@ -3979,7 +3979,7 @@ with tabs[3]:
     st.subheader("🗃️ Persisted Scanner Signals")
     if signals.empty: st.info("No scanner signals saved for the forward-test gate yet.")
     else:
-        st.dataframe(signals.head(500),use_container_width=True,hide_index=True)
+        st.dataframe(signals.head(500),width='stretch',hide_index=True)
         st.download_button("⬇️ Download forward signal history",signals.to_csv(index=False).encode(),"forward_signal_history.csv","text/csv",key="download_forward_history")
 
 with tabs[4]:
@@ -3990,7 +3990,7 @@ with tabs[4]:
         fwd=pd.DataFrame(); st.error(f"Forward strategy leaderboard error: {e}")
     if not fwd.empty:
         st.subheader("🏆 Forward Strategy Leaderboard")
-        st.dataframe(fwd,use_container_width=True,hide_index=True)
+        st.dataframe(fwd,width='stretch',hide_index=True)
 
     bt=st.session_state.get('backtest_final',pd.DataFrame())
     if bt.empty:
@@ -4002,21 +4002,21 @@ with tabs[4]:
     else:
         if not bt.empty:
             st.subheader('📊 Historical Evidence')
-            st.dataframe(_learning_summary(bt),use_container_width=True,hide_index=True)
+            st.dataframe(_learning_summary(bt),width='stretch',hide_index=True)
             rows=[]
             for c in ['HTF','Footprint','Strategy Score','Safety','Entry Quality','Relative Strength']:
                 if c in bt.columns:
                     med=bt[c].median();hi=bt[bt[c]>=med];lo=bt[bt[c]<med]
                     rows.append({'Component':c,'High Samples':len(hi),'High Avg R':round(float(hi.R.mean()),3) if len(hi) else 0,'Low Samples':len(lo),'Low Avg R':round(float(lo.R.mean()),3) if len(lo) else 0,'High Win %':round(float((hi.Outcome.str.upper()=='WIN').mean()*100),1) if len(hi) else 0})
-            st.subheader('🔬 Marking Component Learning');st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            st.subheader('🔬 Marking Component Learning');st.dataframe(pd.DataFrame(rows),width='stretch',hide_index=True)
         st.subheader('🎯 Adaptive Score Edge')
         edge=adaptive_edge_table('INDIA')
-        st.dataframe(edge,use_container_width=True,hide_index=True) if not edge.empty else st.info('Not enough completed observations for adaptive edge estimates.')
+        st.dataframe(edge,width='stretch',hide_index=True) if not edge.empty else st.info('Not enough completed observations for adaptive edge estimates.')
         st.subheader('🗄️ Persistent Learning Database')
         st.metric('Completed observations',len(learn_db))
         if not learn_db.empty:
-            st.dataframe(adaptive_component_weights('INDIA'),use_container_width=True,hide_index=True)
-            st.dataframe(learn_db.head(500),use_container_width=True,hide_index=True)
+            st.dataframe(adaptive_component_weights('INDIA'),width='stretch',hide_index=True)
+            st.dataframe(learn_db.head(500),width='stretch',hide_index=True)
         st.caption('Learning ranks candidates using evidence; it never changes the deterministic S1–S4 qualification rules.')
 
 with tabs[5]:
@@ -4034,7 +4034,7 @@ with tabs[5]:
         st.session_state["fundamental_results_final"]=pd.DataFrame(rows)
     fr=st.session_state.get("fundamental_results_final",pd.DataFrame())
     if fr.empty: st.info("Enter candidates or feed the tab from the scanner's ≥85 queue.")
-    else: st.dataframe(fr.sort_values(["Fundamental Score","News Sentiment"],ascending=[False,False]),use_container_width=True,hide_index=True)
+    else: st.dataframe(fr.sort_values(["Fundamental Score","News Sentiment"],ascending=[False,False]),width='stretch',hide_index=True)
 
 with tabs[6]:
     st.subheader("🏢 Small/Micro Safety Engine")
@@ -4066,7 +4066,7 @@ with tabs[6]:
                 rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
             except Exception as e:
                 rows.append({"Stock":sym,"Safety Score":np.nan,"Status":f"ERROR: {e}","News Risk":np.nan,"Flags":""})
-        st.dataframe(pd.DataFrame(rows).sort_values("Safety Score",ascending=False),use_container_width=True,hide_index=True)
+        st.dataframe(pd.DataFrame(rows).sort_values("Safety Score",ascending=False),width='stretch',hide_index=True)
 
 
 with tabs[7]:
@@ -4106,7 +4106,7 @@ with tabs[7]:
         if q.empty:
             st.info("Waiting for the first Dhan WebSocket ticks...")
         else:
-            st.dataframe(q,use_container_width=True,hide_index=True)
+            st.dataframe(q,width='stretch',hide_index=True)
 
         st.caption(
             "The feed is persistent only while this Streamlit application process is running. "
@@ -4226,7 +4226,7 @@ with tabs[8]:
         st.markdown("### ⚠️ Recent Dhan data-build errors")
         st.dataframe(
             pd.DataFrame({"Error":_DHAN_LAST_DATA_ERRORS}),
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
 
@@ -4271,7 +4271,7 @@ with tabs[9]:
             else:
                 res=res.sort_values(["Study Score","RelVol"],ascending=[False,False])
                 st.success(f"Found {len(res)} research candidates. These are NOT S4 exact signals.")
-                st.dataframe(res,use_container_width=True,hide_index=True)
+                st.dataframe(res,width='stretch',hide_index=True)
                 st.download_button("⬇️ Download S4 study candidates",res.to_csv(index=False),"s4_recovery_candidates.csv","text/csv")
         except Exception as ex:
             st.error(f"S4 recovery study error: {ex}")
@@ -4396,7 +4396,7 @@ with tabs[10]:
                 st.metric("Live Price",st.session_state["td_live_px"])
             d=st.session_state.get("td_custom_data",pd.DataFrame())
             if not d.empty:
-                st.dataframe(d.tail(200),use_container_width=True)
+                st.dataframe(d.tail(200),width='stretch')
                 st.caption(f"Data source: Twelve Data | {market} | {symbol} | {tf}")
 
                 if market == "Crypto":
@@ -4409,7 +4409,7 @@ with tabs[10]:
                         ca.metric("Observations", len(cq))
                         cb.metric("Win %", round(float((cq.result_r > 0).mean()*100), 1))
                         cc.metric("Avg R", round(float(cq.result_r.mean()), 3))
-                        st.dataframe(cq.head(200), use_container_width=True, hide_index=True)
+                        st.dataframe(cq.head(200), width='stretch', hide_index=True)
 
     st.divider()
     st.subheader("Strategy Rules")
@@ -4498,7 +4498,7 @@ with tabs[10]:
                             row["Win Probability %"]=wp
                             today_rows.append(row)
                         if today_rows:
-                            st.dataframe(pd.DataFrame(today_rows).sort_values("Score",ascending=False),use_container_width=True,hide_index=True)
+                            st.dataframe(pd.DataFrame(today_rows).sort_values("Score",ascending=False),width='stretch',hide_index=True)
                         else:
                             st.info("No stock currently satisfies every custom rule.")
                     except Exception as ex:
@@ -4512,7 +4512,7 @@ with tabs[10]:
         b.metric("Win %",f"{(cbt.Outcome.str.upper()=='WIN').mean()*100:.1f}%")
         c.metric("Avg R",f"{cbt.R.mean():.2f}")
         d.metric("Total R",f"{cbt.R.sum():.2f}")
-        st.dataframe(cbt.sort_values(['Score','Date'],ascending=[False,False]),use_container_width=True,hide_index=True)
+        st.dataframe(cbt.sort_values(['Score','Date'],ascending=[False,False]),width='stretch',hide_index=True)
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
@@ -4543,7 +4543,7 @@ with tabs[11]:
         ["News/event risk","Candidate-only","Press releases cached; risk never creates signals"],
         ["Real orders","OFF","Research/paper trading only"],
     ],columns=["Control","Status","Purpose"])
-    st.dataframe(safeguards,use_container_width=True,hide_index=True)
+    st.dataframe(safeguards,width='stretch',hide_index=True)
 
     st.markdown("### 🧪 S4 Recovery — historical study")
     st.caption("Research hypothesis: large impulse → controlled consolidation/retracement → compression → reclaim → higher high. Exact S4 remains unchanged.")
@@ -4563,7 +4563,7 @@ with tabs[11]:
     else:
         m=research_metrics(s4bt)
         aa,bb,cc,dd=st.columns(4); aa.metric("Trades",m["trades"]); bb.metric("Win %",f"{m['win_rate']:.1f}%"); cc.metric("Avg R",f"{m['avg_r']:.2f}"); dd.metric("Profit Factor",f"{m['profit_factor']:.2f}")
-        st.dataframe(s4bt.sort_values(["Score","Date"],ascending=[False,False]).head(300),use_container_width=True,hide_index=True)
+        st.dataframe(s4bt.sort_values(["Score","Date"],ascending=[False,False]).head(300),width='stretch',hide_index=True)
         st.warning("Promotion rule: S4 Recovery is not allowed into the exact strategy until it survives out-of-sample/walk-forward evidence with adequate sample size and positive expectancy.")
 
     st.markdown("### 🛡️ Portfolio risk simulator")
@@ -4574,7 +4574,7 @@ with tabs[11]:
     if bt.empty: st.info("Run the local backtest first to simulate capital-aware portfolio results.")
     else:
         pr=portfolio_from_backtest(bt,float(capital),float(risk_pct),int(slots))
-        st.dataframe(pd.DataFrame([pr]),use_container_width=True,hide_index=True)
+        st.dataframe(pd.DataFrame([pr]),width='stretch',hide_index=True)
 
     st.markdown("### 🧭 Advocate mode")
     st.info("The system should reject a trade when deterministic rules fail, safety is unacceptable, data quality is poor, or the learned evidence is insufficient. It should never manufacture a reason to trade.")
@@ -4604,18 +4604,18 @@ with tabs[12]:
             )
         else:
             st.markdown("### 📊 Win rate / Avg R by regime")
-            st.dataframe(report["regime_breakdown"], use_container_width=True, hide_index=True)
+            st.dataframe(report["regime_breakdown"], width='stretch', hide_index=True)
             st.caption("Samples below ~10-15 per regime are too thin to draw conclusions from.")
 
             st.markdown("### 🔬 Component win-rate split (high half vs low half)")
-            st.dataframe(report["component_breakdown"], use_container_width=True, hide_index=True)
+            st.dataframe(report["component_breakdown"], width='stretch', hide_index=True)
             st.caption("Splits each score component at its median for this strategy's history and compares the two halves.")
 
         st.markdown("### 🌳 Auto-extracted rules")
         if report["tree_note"]:
             st.info(report["tree_note"])
         else:
-            st.dataframe(pd.DataFrame(report["tree_rules"]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(report["tree_rules"]), width='stretch', hide_index=True)
             st.caption(
                 "Each row is one path through a shallow (depth ≤3) decision tree fit on completed "
                 "outcomes, sorted by win rate then sample size. Read as: \"when these conditions held, "
