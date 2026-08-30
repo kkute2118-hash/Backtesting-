@@ -634,10 +634,15 @@ def live_forward_test_table():
 
     live = read_live_prices(q.symbol.tolist())
     if not live.empty:
-        q = q.merge(live[["symbol", "ts", "ltp"]], on="symbol", how="left")
-        q["LTP"] = q["ltp"]
+        # forward_tests already has its own 'ltp' column, and read_live_prices()
+        # also returns one — merging both without renaming makes pandas
+        # silently produce 'ltp_x'/'ltp_y' instead of a plain 'ltp', so
+        # q["ltp"] below raised KeyError once a live tick actually existed.
+        live_renamed = live[["symbol", "ts", "ltp"]].rename(columns={"ltp": "live_ltp", "ts": "live_ts"})
+        q = q.merge(live_renamed, on="symbol", how="left")
+        q["LTP"] = q["live_ltp"]
         q["P/L %"] = (q["LTP"] / q["entry"] - 1) * 100
-        q["Live Updated"] = q["ts"]
+        q["Live Updated"] = q["live_ts"]
     return q
 
 
@@ -4791,7 +4796,10 @@ with tabs[7]:
         if error:
             st.warning(f"Last WebSocket error: {error}")
 
-        q=live_forward_test_table()
+        try:
+            q=live_forward_test_table()
+        except Exception as e:
+            q=pd.DataFrame(); st.error(f"Live forward-test table error: {e}")
         if q.empty:
             st.info("Waiting for the first Dhan WebSocket ticks...")
         else:
