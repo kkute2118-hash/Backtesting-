@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta, datetime
 from pathlib import Path
 import math
+import bisect
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
@@ -1139,6 +1140,112 @@ def smc_ltf_trigger(ltf_df, htf_ctx, strong_body_pct=0.6, strong_close_beyond_pc
     }
 
 
+def _smc_precompute(df, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
+    """One-time precompute of swings/MSB/FVG/SFP for the FULL series.
+
+    Used by smc_backtest() so it can do an O(log n) 'as of bar i' lookup
+    per bar instead of what it did before: calling smc_htf_context()/
+    smc_ltf_trigger() (which each re-run detect_swings/detect_msb from
+    scratch) on an ever-growing slice ltf_df.iloc[:i+1] for every candidate
+    bar. That growing-slice recompute is O(n) per call and was being called
+    up to once per bar, making the whole backtest O(n^2) - this is what
+    made the backtest hang/never finish on a ~5000-bar LTF series.
+
+    This precompute is NOT a behavior change: detect_swings' fractal check
+    at index k only ever reads bars [k-left, k+right], and detect_msb
+    processes bars strictly in increasing order using only already-
+    confirmed swings, so the value at any prefix of the series is
+    identical whether computed on that prefix alone or on the full
+    series and then read as-of that point. Same principle as the
+    features_fast()/_regime_from_row() fix applied to the S1-S4 backtest.
+    """
+    swung = detect_swings(df)
+    atr_s = _atr(swung)
+    msbs = detect_msb(swung, atr_s, strong_body_pct, strong_close_beyond_pct)
+    fvgs = detect_fvg(swung, atr_s)
+    sfps = detect_sfp(swung, atr_s)
+    return {"swung": swung, "atr": atr_s, "msbs": msbs, "msb_idx": [m["idx"] for m in msbs], "fvgs": fvgs, "sfps": sfps}
+
+
+def _smc_htf_context_asof(pre, asof_idx):
+    """O(log n) equivalent of smc_htf_context(), reading _smc_precompute()'s
+    output as of bar asof_idx instead of recomputing from scratch."""
+    if asof_idx < 0:
+        return None
+    pos = bisect.bisect_right(pre["msb_idx"], asof_idx) - 1
+    if pos < 0:
+        return None
+    last_msb = pre["msbs"][pos]
+    if last_msb["strength"] != "strong":
+        return {"has_zone": False, "reason": "Last HTF MSB is weak — skip per guide's rule", "last_msb": last_msb}
+
+    d = pre["swung"]
+    ob = find_order_block(d, last_msb)
+    deepest_idx = last_msb["deepest_extreme_idx"]
+    origin_idx = last_msb["origin_swing_idx"]
+    if last_msb["direction"] == "bull":
+        swing_low_price = d["low"].iloc[deepest_idx]
+        swing_high_price = d["high"].iloc[origin_idx]
+    else:
+        swing_low_price = d["low"].iloc[origin_idx]
+        swing_high_price = d["high"].iloc[deepest_idx]
+
+    current_price = float(d["close"].iloc[asof_idx])
+    zone_label, pct, ote_low, ote_high = premium_discount_zone(
+        min(swing_low_price, swing_high_price), max(swing_low_price, swing_high_price), current_price
+    )
+
+    recent_fvgs = [f for f in pre["fvgs"] if deepest_idx <= f["idx"] <= asof_idx]
+    recent_sfps = [s for s in pre["sfps"] if deepest_idx <= s["idx"] <= asof_idx]
+    score, matched = confluence_score(current_price, ob, recent_fvgs, recent_sfps)
+
+    bias_ok = (last_msb["direction"] == "bull" and zone_label == "discount") or \
+              (last_msb["direction"] == "bear" and zone_label == "premium")
+
+    return {
+        "has_zone": True,
+        "direction": last_msb["direction"],
+        "msb": last_msb,
+        "order_block": ob,
+        "zone_label": zone_label,
+        "zone_pct": pct,
+        "ote_low": ote_low, "ote_high": ote_high,
+        "confluence_score": score,
+        "confluence_matched": matched,
+        "bias_ok": bias_ok,
+        "current_price": current_price,
+        "swing_low": min(swing_low_price, swing_high_price),
+        "swing_high": max(swing_low_price, swing_high_price),
+    }
+
+
+def _smc_ltf_trigger_asof(pre, asof_idx, htf_ctx):
+    """O(log n) equivalent of smc_ltf_trigger(), reading _smc_precompute()'s
+    output as of bar asof_idx instead of recomputing from scratch."""
+    if not htf_ctx or not htf_ctx.get("has_zone"):
+        return None
+    d = pre["swung"]
+    price = float(d["close"].iloc[asof_idx])
+    if not (htf_ctx["swing_low"] <= price <= htf_ctx["swing_high"]):
+        return None
+    pos = bisect.bisect_right(pre["msb_idx"], asof_idx) - 1
+    if pos < 0:
+        return None
+    last_micro = pre["msbs"][pos]
+    if last_micro["idx"] < asof_idx - 5:
+        return None
+    if last_micro["direction"] != htf_ctx["direction"]:
+        return None
+    recent_sfp = [s for s in pre["sfps"] if asof_idx - 5 <= s["idx"] <= asof_idx]
+    return {
+        "confirmed": True,
+        "micro_msb": last_micro,
+        "sfp_present": len(recent_sfp) > 0,
+        "entry_price": price,
+        "trigger_idx": last_micro["idx"],
+    }
+
+
 def smc_signal(htf_df, ltf_df, min_confluence=2, strong_body_pct=0.6, strong_close_beyond_pct=0.10):
     """Returns a signal dict if a valid trade setup exists right now,
     else None. Encodes the guide's stop/target rules directly.
@@ -1200,6 +1307,15 @@ def smc_backtest(htf_df, ltf_df, capital=100000, risk_pct=1.0, min_confluence=2,
     entry price (default 0.05%), not a real spread/liquidity/session model.
     Do not treat backtest R-multiples as production-accurate without this
     caveat in mind — the UI surfaces this same warning next to the results.
+
+    PERFORMANCE: uses _smc_precompute()/_smc_htf_context_asof()/
+    _smc_ltf_trigger_asof() rather than calling smc_htf_context()/
+    smc_ltf_trigger() on a growing ltf_df.iloc[:i+1] slice per bar - the
+    growing-slice version re-ran detect_swings/detect_msb from scratch on
+    every candidate bar (O(n) per call, called up to once per bar), making
+    the whole backtest O(n^2) and causing it to hang/never finish on a
+    full ~5000-bar LTF series. See _smc_precompute()'s docstring for why
+    this is a pure performance fix with no behavior change.
     """
     equity = float(capital)
     rows = []
@@ -1207,19 +1323,24 @@ def smc_backtest(htf_df, ltf_df, capital=100000, risk_pct=1.0, min_confluence=2,
     htf_recompute_every = 16  # ~ once per HTF bar equivalent (4h/15m = 16)
     i = 60  # warmup for swing/ATR detection
     n = len(ltf_df)
+    if n <= i + 1 or len(htf_df) < 60:
+        return pd.DataFrame(rows), equity_curve
+
+    htf_pre = _smc_precompute(htf_df, strong_body_pct, strong_close_beyond_pct)
+    ltf_pre = _smc_precompute(ltf_df, strong_body_pct, strong_close_beyond_pct)
     htf_ctx_cache = None
     pos = None
 
     while i < n - 1:
         if pos is None:
             if htf_ctx_cache is None or i % htf_recompute_every == 0:
-                htf_slice = htf_df[htf_df.index <= ltf_df.index[i]]
-                htf_ctx_cache = smc_htf_context(htf_slice, strong_body_pct, strong_close_beyond_pct) if len(htf_slice) >= 60 else None
+                htf_asof = int(htf_df.index.searchsorted(ltf_df.index[i], side="right")) - 1
+                htf_ctx_cache = _smc_htf_context_asof(htf_pre, htf_asof) if htf_asof >= 60 else None
 
             sig = None
             if htf_ctx_cache and htf_ctx_cache.get("has_zone") and htf_ctx_cache.get("bias_ok") \
                and htf_ctx_cache["confluence_score"] >= min_confluence:
-                ltf_trig = smc_ltf_trigger(ltf_df.iloc[:i+1], htf_ctx_cache, strong_body_pct, strong_close_beyond_pct)
+                ltf_trig = _smc_ltf_trigger_asof(ltf_pre, i, htf_ctx_cache)
                 if ltf_trig:
                     direction = htf_ctx_cache["direction"]
                     raw_entry = float(ltf_df["close"].iloc[i])
