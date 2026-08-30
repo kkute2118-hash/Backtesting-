@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import io
+import re
 import sqlite3
 import time
 import threading
@@ -657,7 +658,10 @@ def _ensure_research_tables():
 
 def _td_get(endpoint, params, timeout=30):
     if not twelvedata_configured(): return {}
-    r=requests.get(f"{TWELVE_BASE}/{endpoint}",headers=_td_headers(),params=params,timeout=timeout)
+    try:
+        r=requests.get(f"{TWELVE_BASE}/{endpoint}",headers=_td_headers(),params=params,timeout=timeout)
+    except Exception as exc:
+        return {"_error":f"Network error: {exc}"}
     if not r.ok: return {"_error":f"HTTP {r.status_code}"}
     try:j=r.json()
     except Exception:return {"_error":"Invalid JSON"}
@@ -1295,6 +1299,136 @@ def safety(info,d):
     score=max(0,min(100,score))
     status="ELIGIBLE" if score>=70 else ("CAUTION" if score>=50 else "REJECT")
     return score,status,flags
+
+def _regime_from_row(f,i):
+    """O(1) equivalent of regime_from_index(hist) — reads the already-computed
+    features_fast() frame at row i instead of recomputing features() from scratch
+    on a growing history slice for every signal (that recompute is O(len^2) per
+    call because of the weekly/monthly as-of loops, and was being called once per
+    signal per ticker per strategy inside the backtest — an O(n^3)-class hot path)."""
+    if i<30 or i-20<0:
+        return "UNKNOWN",0
+    z=f.iloc[i]
+    ema200_lag20=f.ema200.iloc[i-20]
+    req=(z.close,z.ema200,z.ema50,z.rsi14,z.ema20,z.relvol,ema200_lag20)
+    if any(pd.isna(v) for v in req):
+        return "UNKNOWN",0
+    score=0
+    score += 25 if z.close>z.ema200 else 0
+    score += 20 if z.ema50>z.ema200 else 0
+    score += 15 if z.ema200>ema200_lag20 else 0
+    score += 15 if z.rsi14>=55 else 0
+    score += 10 if z.close>z.ema20 else 0
+    score += 15 if z.relvol>=1 else 0
+    if score>=75: return "STRONG BULL",score
+    if score>=60: return "BULL",score
+    if score>=45: return "RECOVERY / SIDEWAYS",score
+    if score>=30: return "EARLY BEAR",score
+    return "BEAR",score
+
+def _safety_fast_series(df):
+    """Vectorized once-per-ticker precompute of the rolling stats safety() reads,
+    so the backtest hot loop can look them up in O(1) per signal instead of
+    re-slicing/re-computing tail(20)/tail(30) windows from scratch per signal."""
+    avg_value=(df.close*df.volume).rolling(20,min_periods=1).mean()
+    abnormal=(df.close.pct_change().abs()>.15).rolling(30,min_periods=1).sum()
+    return avg_value,abnormal
+
+def _safety_from_row(avg_value,abnormal,i):
+    """O(1) equivalent of safety({}, hist) for the backtest (info is always {}
+    there, so the debt/insider branches never fire)."""
+    score=100; flags=[]
+    av=avg_value.iloc[i]
+    if pd.notna(av):
+        if av<2_000_000: score-=30; flags.append("Low traded value")
+        if av<500_000: score-=20; flags.append("Very low liquidity")
+    ab=abnormal.iloc[i]
+    if pd.notna(ab) and ab>=3:
+        score-=15; flags.append("Abnormal volatility")
+    score=max(0,min(100,score))
+    status="ELIGIBLE" if score>=70 else ("CAUTION" if score>=50 else "REJECT")
+    return score,status,flags
+
+
+# ========================= CUSTOM STRATEGY DSL =========================
+# Whitelist-only rule language — never eval()/exec(). Each non-blank, non-
+# comment line must be "<COLUMN> <op> <RHS>" where COLUMN is one of the
+# known features_fast() columns and RHS is a number, another known column,
+# or "NUMBER * COLUMN" (e.g. "VOLUME > 1.5 * VOL20"). Lines are AND-combined.
+
+CUSTOM_DSL_COLUMNS = {
+    "open","high","low","close","volume",
+    "ema10","ema20","ema50","ema200","ema250","vol20","vol30","rsi14","relvol","atr14",
+    "wrsi14","wema20","wema50","wclose",
+    "mclose","mopen","mhigh","mlow","mrsi14","mema10","mema15","mema20","mmom","mmax20",
+    "mprevclose","mprevhigh","mprevlow","m_cross_count20","m_cross_10_20",
+}
+CUSTOM_DSL_OPS = {
+    ">": lambda a,b: a>b, ">=": lambda a,b: a>=b,
+    "<": lambda a,b: a<b, "<=": lambda a,b: a<=b,
+    "==": lambda a,b: a==b, "!=": lambda a,b: a!=b,
+}
+_CUSTOM_DSL_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(>=|<=|==|!=|>|<)\s*(.+?)\s*$")
+_CUSTOM_DSL_MUL_RE_NC = re.compile(r"^([0-9]*\.?[0-9]+)\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)$")
+_CUSTOM_DSL_MUL_RE_CN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\*\s*([0-9]*\.?[0-9]+)$")
+
+def parse_custom_strategy(text):
+    """Parse the DSL into a validated condition list. Returns (conditions, errors);
+    conditions is empty and errors non-empty when any line fails to validate —
+    callers must refuse to run a strategy with any error, not silently drop lines."""
+    conditions, errors = [], []
+    for lineno, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _CUSTOM_DSL_LINE_RE.match(line)
+        if not m:
+            errors.append(f"Line {lineno}: could not parse '{raw}'. Expected '<COLUMN> <op> <value>', e.g. 'RSI14 > 55'.")
+            continue
+        left_raw, op, rhs = m.group(1), m.group(2), m.group(3).strip()
+        left = left_raw.lower()
+        if left not in CUSTOM_DSL_COLUMNS:
+            errors.append(f"Line {lineno}: unknown column '{left_raw}'. Known columns: {', '.join(sorted(CUSTOM_DSL_COLUMNS))}.")
+            continue
+        try:
+            conditions.append({"left":left,"op":op,"rhs_kind":"number","rhs_value":float(rhs),"text":line})
+            continue
+        except ValueError:
+            pass
+        mm = _CUSTOM_DSL_MUL_RE_NC.match(rhs)
+        if mm:
+            mult,col = float(mm.group(1)), mm.group(2).lower()
+        else:
+            mm = _CUSTOM_DSL_MUL_RE_CN.match(rhs)
+            mult,col = (float(mm.group(2)), mm.group(1).lower()) if mm else (None,None)
+        if mm:
+            if col not in CUSTOM_DSL_COLUMNS:
+                errors.append(f"Line {lineno}: unknown column '{col}' on the right-hand side of '{raw}'.")
+                continue
+            conditions.append({"left":left,"op":op,"rhs_kind":"multiplier","rhs_value":(mult,col),"text":line})
+            continue
+        if rhs.lower() in CUSTOM_DSL_COLUMNS:
+            conditions.append({"left":left,"op":op,"rhs_kind":"column","rhs_value":rhs.lower(),"text":line})
+            continue
+        errors.append(f"Line {lineno}: right-hand side '{rhs}' is not a number, a known column, or 'NUMBER * COLUMN'.")
+    return conditions, errors
+
+def custom_strategy_signal(f, conditions):
+    """Vectorized AND of all parsed conditions against a features_fast() frame."""
+    if f.empty or not conditions:
+        return pd.Series(False, index=f.index)
+    sig = pd.Series(True, index=f.index)
+    for c in conditions:
+        left = f[c["left"]]
+        if c["rhs_kind"] == "number":
+            right = c["rhs_value"]
+        elif c["rhs_kind"] == "column":
+            right = f[c["rhs_value"]]
+        else:
+            mult, col = c["rhs_value"]
+            right = f[col] * mult
+        sig = sig & CUSTOM_DSL_OPS[c["op"]](left, right).fillna(False)
+    return sig
 
 
 # ========================= HTF DEMAND + FOOTPRINT =========================
@@ -2240,14 +2374,14 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
         try:
             df=df.sort_index();f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
             if f.empty:continue
+            avg_value,abnormal=_safety_fast_series(df)
             for s in strategies:
                 sig=strategy_signal(f,s).fillna(False).to_numpy()
                 for i in np.flatnonzero(sig):
                     dt=pd.Timestamp(f.index[i])
                     if dt<start or dt>end or i>=len(df)-1:continue
-                    hist=df.iloc[:i+1]
-                    regime,_=regime_from_index(hist)
-                    safe,_,_=safety({},hist)
+                    regime,_=_regime_from_row(f,i)
+                    safe,_,_=_safety_from_row(avg_value,abnormal,i)
                     score,parts=_row_score(f,i,s,regime,safe)
                     if score<int(threshold):continue
                     entry_i=i+1; entry=float(df.close.iloc[entry_i])
@@ -2275,6 +2409,54 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
                         'Trend':parts.get('Trend',0),'Entry Quality':parts.get('Entry Quality',0),'Relative Strength':parts.get('Relative Strength',0),
                         'Regime':regime,'Safety':safe
                     })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+def _custom_strategy_backtest(data,conditions,start_date,end_date,sl_pct=0.07,target_r=3.0,threshold=0):
+    """Local-only walk-forward replay of a validated Custom Strategy DSL rule
+    set. Same architecture/columns as _professional_bt (S1-S4) so the result
+    feeds _learn_from_backtest() unmodified, tagged strategy='CUSTOM'."""
+    rows=[];start=pd.Timestamp(start_date);end=pd.Timestamp(end_date)
+    for ticker,df in data.items():
+        if len(df)<260:continue
+        try:
+            df=df.sort_index();f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
+            if f.empty:continue
+            avg_value,abnormal=_safety_fast_series(df)
+            sig=custom_strategy_signal(f,conditions).fillna(False).to_numpy()
+            for i in np.flatnonzero(sig):
+                dt=pd.Timestamp(f.index[i])
+                if dt<start or dt>end or i>=len(df)-1:continue
+                regime,_=_regime_from_row(f,i)
+                safe,_,_=_safety_from_row(avg_value,abnormal,i)
+                score,parts=_row_score(f,i,"CUSTOM",regime,safe)
+                if score<int(threshold):continue
+                entry_i=i+1; entry=float(df.close.iloc[entry_i])
+                if not np.isfinite(entry) or entry<=0:continue
+                stop=entry*(1-sl_pct);target=entry+target_r*(entry-stop);risk=entry-stop
+                last=min(len(df)-1,entry_i+60);outcome='TIMEOUT';exit_price=float(df.close.iloc[last]);held=last-entry_i
+                max_high=entry;min_low=entry
+                for j in range(entry_i,last+1):
+                    bar=df.iloc[j];max_high=max(max_high,float(bar.high));min_low=min(min_low,float(bar.low))
+                    if bar.low<=stop:
+                        outcome='LOSS';exit_price=stop;held=j-entry_i;break
+                    if bar.high>=target:
+                        outcome='WIN';exit_price=target;held=j-entry_i;break
+                gross_pct=(exit_price/entry-1)*100
+                return_pct=gross_pct-BT_COST_PCT
+                r_mult=return_pct/((risk/entry)*100) if risk>0 else 0
+                mfe=(max_high/entry-1)*100;mae=(min_low/entry-1)*100
+                rows.append({
+                    'Date':dt.date(),'Ticker':str(ticker).replace('.NS',''),'Strategy':'CUSTOM',
+                    'Entry Date':df.index[entry_i].date(),'Exit Date':df.index[entry_i+held].date(),
+                    'Score':int(score),'≥85 Gate':bool(score>=85),'Entry':round(entry,2),'SL':round(stop,2),'Target':round(target,2),
+                    'Exit':round(exit_price,2),'Outcome':outcome,'Return %':round(return_pct,2),'R':round(float(r_mult),2),
+                    'Holding Bars':int(held),'MFE %':round(mfe,2),'MAE %':round(mae,2),
+                    'Strategy Score':parts.get('Strategy',0),'HTF':parts.get('HTF Demand',0),'Footprint':parts.get('Footprint',0),
+                    'Trend':parts.get('Trend',0),'Entry Quality':parts.get('Entry Quality',0),'Relative Strength':parts.get('Relative Strength',0),
+                    'Regime':regime,'Safety':safe
+                })
         except Exception:
             continue
     return pd.DataFrame(rows)
@@ -2309,8 +2491,10 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                 continue
 
             # Market regime is evaluated once at each candidate using only data
-            # known up to the candidate date. To keep execution sharp, use the
-            # precomputed daily regime columns where possible.
+            # known up to the candidate date. To keep execution sharp, use an
+            # O(1) lookup on the already-computed feature frame instead of
+            # recomputing features()/safety() from scratch per signal.
+            avg_value, abnormal = _safety_fast_series(df)
             for s in strategies:
                 sig = strategy_signal(f, s).fillna(False).to_numpy()
                 idxs = np.flatnonzero(sig)
@@ -2320,9 +2504,8 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                     if dt < start or i >= len(f)-1:
                         continue
 
-                    hist = f.iloc[:i+1]
-                    regime, _ = regime_from_index(hist)
-                    safe, _, _ = safety({}, df.iloc[:i+1])
+                    regime, _ = _regime_from_row(f, i)
+                    safe, _, _ = _safety_from_row(avg_value, abnormal, i)
                     score, parts = _row_score(f, i, s, regime, safe)
 
                     # IMPORTANT: keep every complete-rule historical signal for learning.
@@ -2428,6 +2611,270 @@ def current_candidate_edge(market, strategy, score):
     r = float(row.iloc[0]["Avg R (shrunk)"])
     conf = "HIGH" if int(row.iloc[0]["Samples"]) >= 100 else "MEDIUM"
     return r, conf
+
+def fallback_win_probability(market, strategy, score):
+    """Score-band historical win rate (adaptive_edge_table), used as the
+    Win Probability % estimate whenever the ML classifier isn't trained yet."""
+    q = adaptive_edge_table(market)
+    if q.empty:
+        return np.nan
+    band = "85-89" if 85 <= score <= 89 else "90-94" if score <= 94 else "95-100" if score >= 95 else "<85"
+    row = q[(q.Strategy == strategy) & (q["Score Band"] == band)]
+    if row.empty or int(row.iloc[0]["Samples"]) < 20:
+        return np.nan
+    return float(row.iloc[0]["Win % (shrunk)"])
+
+
+# ========================= ML WIN PROBABILITY =========================
+# Trained on learning_observations (completed backtest/forward-test trades).
+# Falls back to the existing score-band edge table (adaptive_edge_table) when
+# there isn't yet enough completed evidence to trust a classifier.
+
+ML_MIN_SAMPLES = 60
+ML_MIN_CLASS_SAMPLES = 15
+ML_FEATURE_COLUMNS = [
+    "score", "htf", "footprint", "strategy_score",
+    "entry_quality", "relative_strength", "safety_score"
+]
+
+@st.cache_resource(ttl=1800, show_spinner=False)
+def train_win_probability_model(market="INDIA"):
+    """Fit a win-probability classifier on completed learning_observations.
+
+    Returns a dict:
+      ready=False, n_samples=<n>, min_samples=<needed> when there isn't
+      enough completed evidence yet (or scikit-learn/data is unavailable) —
+      callers should fall back to adaptive_edge_table()/current_candidate_edge().
+      ready=True with the fitted models, feature schema, and honest
+      out-of-sample reliability metrics (AUC / Brier score) otherwise.
+    """
+    result = {"ready": False, "n_samples": 0, "min_samples": ML_MIN_SAMPLES}
+    q = learning_snapshot(market)
+    if q.empty or "result_r" not in q.columns:
+        return result
+    q = q.dropna(subset=["result_r"]).copy()
+    result["n_samples"] = len(q)
+    if len(q) < ML_MIN_SAMPLES:
+        return result
+
+    q["win"] = (pd.to_numeric(q["result_r"], errors="coerce") > 0).astype(int)
+    if q.win.sum() < ML_MIN_CLASS_SAMPLES or (len(q)-q.win.sum()) < ML_MIN_CLASS_SAMPLES:
+        result["reason"] = "Not enough win/loss diversity yet"
+        return result
+
+    try:
+        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import roc_auc_score, brier_score_loss
+    except ImportError:
+        result["reason"] = "scikit-learn is not installed"
+        return result
+
+    x_num = q[ML_FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    strat_dummies = pd.get_dummies(q["strategy"].astype(str).str.upper(), prefix="strategy")
+    regime_dummies = pd.get_dummies(q["regime"].astype(str), prefix="regime")
+    X = pd.concat([x_num, strat_dummies, regime_dummies], axis=1).fillna(0.0)
+    y = q["win"].to_numpy()
+
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.25, random_state=42, stratify=y
+        )
+    except ValueError:
+        X_train, X_test, y_train, y_test = X, X, y, y
+
+    gbc = GradientBoostingClassifier(random_state=42)
+    gbc.fit(X_train, y_train)
+    logit = LogisticRegression(max_iter=1000)
+    logit.fit(X_train, y_train)
+
+    def _reliability(model):
+        p = model.predict_proba(X_test)[:, 1]
+        try:
+            auc = float(roc_auc_score(y_test, p))
+        except ValueError:
+            auc = np.nan
+        return auc, float(brier_score_loss(y_test, p))
+
+    gbc_auc, gbc_brier = _reliability(gbc)
+    logit_auc, logit_brier = _reliability(logit)
+
+    # Refit on the full dataset for production inference; the held-out split
+    # above is only used to report honest reliability metrics.
+    gbc.fit(X, y)
+    logit.fit(X, y)
+
+    result.update({
+        "ready": True,
+        "gbc_model": gbc,
+        "logit_model": logit,
+        "feature_columns": list(X.columns),
+        "gbc_auc": gbc_auc, "gbc_brier": gbc_brier,
+        "logit_auc": logit_auc, "logit_brier": logit_brier,
+    })
+    return result
+
+def ml_win_probability(model_info, row):
+    """O(1) inference of win probability (0-100) for one candidate row using a
+    model dict from train_win_probability_model(). `row` may use either the
+    learning_observations naming (score/htf/...) or scanner naming
+    (Score/HTF Score/...). Returns np.nan when the model isn't ready."""
+    if not model_info or not model_info.get("ready"):
+        return np.nan
+
+    def g(*keys, default=0.0):
+        for k in keys:
+            v = row.get(k) if hasattr(row, "get") else None
+            if v is not None and pd.notna(v):
+                return v
+        return default
+
+    feat = {
+        "score": g("score", "Score"),
+        "htf": g("htf", "HTF Score", "HTF Demand", "HTF"),
+        "footprint": g("footprint", "Footprint Score", "Footprint"),
+        "strategy_score": g("strategy_score", "Strategy Score"),
+        "entry_quality": g("entry_quality", "Entry Quality"),
+        "relative_strength": g("relative_strength", "Relative Strength"),
+        "safety_score": g("safety_score", "Safety Score"),
+    }
+    strategy = str(g("strategy", "Strategy", default="")).upper()
+    regime = str(g("regime", "Regime", default=""))
+
+    x = pd.DataFrame([feat])
+    x[f"strategy_{strategy}"] = 1.0
+    x[f"regime_{regime}"] = 1.0
+    x = x.reindex(columns=model_info["feature_columns"], fill_value=0.0)
+    try:
+        p = model_info["gbc_model"].predict_proba(x)[0, 1]
+        return float(round(p*100, 1))
+    except Exception:
+        return np.nan
+
+
+# ========================= STRATEGY COACH =========================
+# Analyzes completed learning_observations per strategy: regime win-rate/avg-R
+# breakdown, high-vs-low component splits, and a shallow (max_depth<=3)
+# decision tree translated into plain-English rules. Never rewrites strategy
+# rules — this is read-only evidence with explicit sample-size caveats.
+
+STRATEGY_COACH_MIN_SAMPLES = 20
+STRATEGY_COACH_TREE_MIN_SAMPLES = 40
+
+def strategy_coach_regime_breakdown(q):
+    g = q.groupby("regime").agg(
+        Samples=("result_r", "count"),
+        WinRate=("win", "mean"),
+        AvgR=("result_r", "mean"),
+    ).reset_index().rename(columns={"regime": "Regime"})
+    g["WinRate"] = (g.WinRate * 100).round(1)
+    g["AvgR"] = g.AvgR.round(3)
+    return g.sort_values("Samples", ascending=False)
+
+def strategy_coach_component_breakdown(q):
+    rows = []
+    for c in ML_FEATURE_COLUMNS:
+        if c not in q.columns:
+            continue
+        vals = pd.to_numeric(q[c], errors="coerce")
+        med = vals.median()
+        if pd.isna(med):
+            continue
+        hi = q[vals >= med]; lo = q[vals < med]
+        if len(hi) == 0 or len(lo) == 0:
+            continue
+        rows.append({
+            "Component": c.replace("_", " ").title(),
+            "High Samples": len(hi), "High Win %": round(float(hi.win.mean()) * 100, 1),
+            "High Avg R": round(float(hi.result_r.mean()), 3),
+            "Low Samples": len(lo), "Low Win %": round(float(lo.win.mean()) * 100, 1),
+            "Low Avg R": round(float(lo.result_r.mean()), 3),
+        })
+    return pd.DataFrame(rows)
+
+def _coach_pretty_feature(name):
+    if name.startswith("regime_"):
+        return f"Regime == {name[len('regime_'):]}"
+    return name.replace("_", " ").upper()
+
+def _coach_extract_tree_rules(tree, feature_names, min_leaf_samples):
+    from sklearn.tree import _tree
+    t = tree.tree_
+    leaves = []
+    def recurse(node, path):
+        if t.feature[node] != _tree.TREE_UNDEFINED:
+            name = feature_names[t.feature[node]]
+            thresh = t.threshold[node]
+            recurse(t.children_left[node], path + [(name, "<=", thresh)])
+            recurse(t.children_right[node], path + [(name, ">", thresh)])
+        else:
+            n = int(t.n_node_samples[node])
+            # tree_.value stores per-node class PROPORTIONS (rows sum to 1),
+            # not raw counts, so this is already the leaf's win rate.
+            win_rate = float(t.value[node][0][1]) if t.value[node].shape[1] > 1 else 0.0
+            leaves.append((path, n, win_rate))
+    recurse(0, [])
+    leaves.sort(key=lambda x: (-x[2], -x[1]))
+    rules = []
+    for path, n, win_rate in leaves:
+        if n < min_leaf_samples:
+            continue
+        desc = " AND ".join(f"{_coach_pretty_feature(nm)} {op} {th:.1f}" for nm, op, th in path) or "Overall population"
+        rules.append({"Rule": desc, "Samples": n, "Win Rate %": round(win_rate * 100, 1)})
+    return rules[:5]
+
+def strategy_coach_tree_rules(q, max_depth=3, min_samples=STRATEGY_COACH_TREE_MIN_SAMPLES):
+    """Fit a shallow decision tree and translate its leaves into plain-English
+    rules, most winning first. Returns (rules, note); note explains why rules
+    are empty when there isn't enough evidence yet."""
+    if len(q) < min_samples:
+        return [], f"Need ≥{min_samples} completed observations to extract rules; have {len(q)}."
+    try:
+        from sklearn.tree import DecisionTreeClassifier
+    except ImportError:
+        return [], "scikit-learn is not installed."
+    feat_cols = [c for c in ML_FEATURE_COLUMNS if c in q.columns]
+    x_num = q[feat_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    regime_dummies = pd.get_dummies(q["regime"].astype(str), prefix="regime")
+    X = pd.concat([x_num, regime_dummies], axis=1)
+    y = q["win"].to_numpy()
+    if y.sum() < 5 or (len(y) - y.sum()) < 5:
+        return [], "Not enough win/loss diversity to extract rules yet."
+    min_leaf = max(10, len(q) // 20)
+    tree = DecisionTreeClassifier(max_depth=max_depth, min_samples_leaf=min_leaf, random_state=42)
+    tree.fit(X, y)
+    rules = _coach_extract_tree_rules(tree, list(X.columns), min_leaf)
+    if not rules:
+        return [], "No leaf had enough samples to report as a reliable rule."
+    return rules, None
+
+def strategy_coach_report(market, strategy):
+    """Full read-only coaching report for one strategy, or None when there
+    isn't at least one completed observation to analyze."""
+    q = learning_snapshot(market)
+    if q.empty or "strategy" not in q.columns:
+        return None
+    q = q[q.strategy.astype(str).str.upper() == str(strategy).upper()].copy()
+    q = q.dropna(subset=["result_r"])
+    if q.empty:
+        return None
+    q["result_r"] = pd.to_numeric(q["result_r"], errors="coerce")
+    q = q.dropna(subset=["result_r"])
+    if q.empty:
+        return None
+    q["win"] = (q.result_r > 0).astype(int)
+    n = len(q)
+    enough = n >= STRATEGY_COACH_MIN_SAMPLES
+    rules, rule_note = strategy_coach_tree_rules(q)
+    return {
+        "strategy": strategy, "n_samples": n, "enough_for_breakdown": enough,
+        "overall_win_rate": round(float(q.win.mean()) * 100, 1),
+        "overall_avg_r": round(float(q.result_r.mean()), 3),
+        "regime_breakdown": strategy_coach_regime_breakdown(q) if enough else pd.DataFrame(),
+        "component_breakdown": strategy_coach_component_breakdown(q) if enough else pd.DataFrame(),
+        "tree_rules": rules, "tree_note": rule_note,
+    }
 
 
 # ========================= BACKTEST =========================
@@ -2570,6 +3017,51 @@ def portfolio_from_backtest(bt,capital,risk_pct,slots):
         if equity<=0:equity=0;break
     return {"Starting Capital":round(capital,2),"Final Capital":round(equity,2),"Profit ₹":round(equity-capital,2),"ROI %":round((equity/capital-1)*100,2),"Max DD %":round(maxdd,2),"Trades":taken,"Risk/Trade %":risk_pct,"Slots (display)":slots}
 
+def add_forward_candidates(candidates):
+    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them."""
+    if candidates is None or len(candidates)==0:
+        return 0
+    con=_db(); added=0
+    try:
+        today=str(date.today())
+        for _,r in candidates.iterrows():
+            symbol=str(r.get("Ticker","")).upper().replace(".NS","")
+            strategy=str(r.get("Strategy","")).upper()
+            score=float(r.get("Score",0))
+            if not symbol or strategy not in {"S1","S2","S3","S4"}:
+                continue
+            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
+            target=float(r.get("Target",r.get("Target 3R",np.nan)))
+            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl) or not np.isfinite(target):
+                continue
+            exists=con.execute(
+                """SELECT id FROM forward_tests
+                   WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
+                (symbol,strategy,today)
+            ).fetchone()
+            if exists:
+                continue
+            now=datetime.now().isoformat(timespec="seconds")
+            snapshot={k:r.get(k,None) for k in r.index}
+            cur=con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
+                exit_price,result_r,updated_at,signal_date,signal_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                now,symbol,strategy,score,str(r.get("Regime","")).strip(),
+                entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
+                today,json.dumps(snapshot,default=str,allow_nan=True)
+            ))
+            fid=int(cur.lastrowid); added+=1
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
+                fid,now,today,entry,entry,entry,0.0,0.0,0.0,"ACTIVE"
+            ))
+        con.commit()
+    finally:
+        con.close()
+    return added
+
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab — Professional Final")
@@ -2583,11 +3075,12 @@ tabs=st.tabs([
     "🧠 Market Learning",
     "💎 Long-Term Fundamentals",
     "🏢 Small/Micro Safety",
-    "🧪 Custom Strategy",
+    "⚡ Live Monitor",
     "💾 Dhan Data Manager",
     "🧪 S4 Recovery Study",
+    "🧪 Custom Strategy",
     "🧬 Research & Risk Control",
-    "⚙️ System Diagnostics"
+    "🎓 Strategy Coach"
 ])
 
 with tabs[0]:
@@ -2718,6 +3211,7 @@ with tabs[1]:
                 "qualified": {1:0,2:0,3:0,4:0},
                 "safety_reject": 0
             }
+            ml_model = train_win_probability_model("INDIA")
 
             for n,(ticker,df) in enumerate(data.items()):
                 if len(df) < 260:
@@ -2767,7 +3261,7 @@ with tabs[1]:
                         "INDIA", f"S{s}", float(score)
                     )
                     learned_rank = float(np.clip(score + edge_r * 2.0, 0, 100))
-                    rows.append({
+                    row = {
                         "Score": score,
                         "Learned Rank": round(learned_rank, 2),
                         "Historical Edge R": round(edge_r, 3),
@@ -2790,7 +3284,12 @@ with tabs[1]:
                         "Relative Strength": parts["Relative Strength"],
                         "Safety Score": safe,
                         "Safety Flags": ", ".join(flags)
-                    })
+                    }
+                    win_prob = ml_win_probability(ml_model, row)
+                    if pd.isna(win_prob):
+                        win_prob = fallback_win_probability("INDIA", f"S{s}", float(score))
+                    row["Win Probability %"] = win_prob
+                    rows.append(row)
 
                 bar.progress((n+1)/max(1,len(data)))
 
@@ -2983,6 +3482,27 @@ with tabs[1]:
                             st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
 
+            st.subheader("🧠 ML Win Probability")
+            if ml_model.get("ready"):
+                m1,m2,m3,m4 = st.columns(4)
+                m1.metric("Training samples", ml_model["n_samples"])
+                m2.metric("GBC AUC", f"{ml_model['gbc_auc']:.2f}" if np.isfinite(ml_model['gbc_auc']) else "—")
+                m3.metric("GBC Brier", f"{ml_model['gbc_brier']:.3f}")
+                m4.metric("Logistic AUC (baseline)", f"{ml_model['logit_auc']:.2f}" if np.isfinite(ml_model['logit_auc']) else "—")
+                st.caption(
+                    "AUC 0.5 = no better than chance, 1.0 = perfect separation. Brier score is mean "
+                    "squared error of the probability (lower is better, 0 is perfect). With this few "
+                    "samples these numbers can swing a lot run to run — treat them as directional, not final."
+                )
+            else:
+                st.info(
+                    f"ML model not trained yet: {ml_model.get('n_samples',0)} completed learning "
+                    f"observations, needs ≥{ml_model['min_samples']}"
+                    + (f" ({ml_model['reason']})" if ml_model.get('reason') else "")
+                    + ". 'Win Probability %' falls back to the score-band historical edge table below "
+                      "(Historical Edge R / Learning Confidence) until then."
+                )
+
             st.subheader("🔎 Scanner Diagnostics")
             c1,c2,c3,c4,c5,c6 = st.columns(6)
             c1.metric("Universe stocks", len(tickers))
@@ -3114,51 +3634,6 @@ with tabs[1]:
             st.error(f"Scanner error: {e}")
 
 # ========================= RESEARCH MODULES =========================
-
-def add_forward_candidates(candidates):
-    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them."""
-    if candidates is None or len(candidates)==0:
-        return 0
-    con=_db(); added=0
-    try:
-        today=str(date.today())
-        for _,r in candidates.iterrows():
-            symbol=str(r.get("Ticker","")).upper().replace(".NS","")
-            strategy=str(r.get("Strategy","")).upper()
-            score=float(r.get("Score",0))
-            if not symbol or strategy not in {"S1","S2","S3","S4"}:
-                continue
-            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
-            target=float(r.get("Target",r.get("Target 3R",np.nan)))
-            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl) or not np.isfinite(target):
-                continue
-            exists=con.execute(
-                """SELECT id FROM forward_tests
-                   WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
-                (symbol,strategy,today)
-            ).fetchone()
-            if exists:
-                continue
-            now=datetime.now().isoformat(timespec="seconds")
-            snapshot={k:r.get(k,None) for k in r.index}
-            cur=con.execute("""INSERT INTO forward_tests(
-                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
-                exit_price,result_r,updated_at,signal_date,signal_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
-                now,symbol,strategy,score,str(r.get("Regime","")).strip(),
-                entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
-                today,json.dumps(snapshot,default=str,allow_nan=True)
-            ))
-            fid=int(cur.lastrowid); added+=1
-            con.execute("""INSERT OR IGNORE INTO forward_observations(
-                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
-            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
-                fid,now,today,entry,entry,entry,0.0,0.0,0.0,"ACTIVE"
-            ))
-        con.commit()
-    finally:
-        con.close()
-    return added
 
 def refresh_forward_positions():
     """Update active forward records using only locally stored daily candles."""
@@ -3295,7 +3770,12 @@ with tabs[2]:
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
     universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
     start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
-    tickers=sorted(set(sum([index_universe(u) for u in universes],[]))) if universes else []
+    tickers=[]
+    if universes:
+        try:
+            tickers=sorted(set(sum([index_universe(u) for u in universes],[])))
+        except Exception as e:
+            st.error(f"Could not load index universe constituents (network/data issue): {e}")
     st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | local SQLite only | forward gate ≥{threshold}")
 
     st.markdown("### 1️⃣ Local Dataset")
@@ -3483,17 +3963,26 @@ with tabs[6]:
     else:
         rows=[]
         for sym in syms.symbol:
-            
+
             con2=_db()
             try:
                 d=_read_cache(con2,str(sym).upper().replace('.NS',''),date.today()-timedelta(days=180),date.today())
             finally:
                 con2.close()
-            if d.empty:
-                d=download_prices([sym],date.today()-timedelta(days=180),date.today(),max_workers=1).get(sym,pd.DataFrame())
-            info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
-            sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
-            rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
+            # LOCAL-ONLY. Safety must never trigger a live Dhan download on a bare rerun.
+            if d is None or d.empty:
+                rows.append({
+                    "Stock":sym,"Safety Score":np.nan,
+                    "Status":"NO LOCAL DATA — sync this symbol in Data Manager first",
+                    "News Risk":np.nan,"Flags":""
+                })
+                continue
+            try:
+                info,_=company_info(sym); _,_,newsrisk=news_snapshot(sym)
+                sc,status,flags=advanced_small_micro_safety(info,d,newsrisk)
+                rows.append({"Stock":sym,"Safety Score":sc,"Status":status,"News Risk":round(newsrisk,1),"Flags":", ".join(flags)})
+            except Exception as e:
+                rows.append({"Stock":sym,"Safety Score":np.nan,"Status":f"ERROR: {e}","News Risk":np.nan,"Flags":""})
         st.dataframe(pd.DataFrame(rows).sort_values("Safety Score",ascending=False),use_container_width=True,hide_index=True)
 
 
@@ -3791,10 +4280,106 @@ with tabs[10]:
 
     st.divider()
     st.subheader("Strategy Rules")
-    st.text_area("Paste your strategy",height=180,key="custom_strategy",
-                 placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
+    st.caption(
+        "Whitelist rule DSL — never eval()/exec(). One condition per line, all lines AND-combined. "
+        "Format: `<COLUMN> <op> <value>` where op is one of > >= < <= == != and value is a number, "
+        "another known column, or `NUMBER * COLUMN`. Known columns: "
+        + ", ".join(sorted(CUSTOM_DSL_COLUMNS)) + "."
+    )
+    st.text_area(
+        "Strategy rules",height=160,key="custom_strategy",
+        placeholder="RSI14 > 55\nCLOSE > EMA200\nVOLUME > 1.5 * VOL20",
+        label_visibility="collapsed"
+    )
     if st.button("🔍 Validate Strategy",key="custom_validate"):
-        st.success("Strategy received. Convert ambiguous language into explicit testable rules before backtesting.")
+        _,verr=parse_custom_strategy(st.session_state.get("custom_strategy",""))
+        if verr:
+            for e in verr: st.error(e)
+        else:
+            st.success("Strategy is valid. Ready to scan + backtest below.")
+
+    st.markdown("### Indian Stocks — local-only scan + backtest")
+    st.caption("Reuses the same local candle cache, fast features, and O(1) regime/safety lookups as the Daily Scanner and Backtest tabs. Makes zero Dhan/API calls.")
+    cc1,cc2,cc3,cc4=st.columns(4)
+    custom_universes=cc1.multiselect(
+        "Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        default=["Nifty 500"],key="custom_universe"
+    )
+    custom_period=cc2.selectbox("Backtest span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="custom_period")
+    custom_sl_pct=cc3.slider("Stop loss %",1.0,15.0,7.0,0.5,key="custom_sl_pct")/100
+    custom_target_r=cc4.number_input("Target (R multiple)",1.0,10.0,3.0,0.5,key="custom_target_r")
+
+    if st.button("🔬 Run Custom Strategy Scan + Backtest",type="primary",key="custom_run"):
+        conditions,cerr=parse_custom_strategy(st.session_state.get("custom_strategy",""))
+        if cerr:
+            for e in cerr: st.error(e)
+        elif not conditions:
+            st.warning("Enter at least one rule line before running.")
+        elif not custom_universes:
+            st.warning("Select at least one universe.")
+        else:
+            try:
+                tickers=sorted(set(sum([index_universe(u) for u in custom_universes],[])))
+            except Exception as e:
+                st.error(f"Could not load index universe constituents (network/data issue): {e}")
+                tickers=[]
+            if tickers:
+                cstart,cend=_bt_period(custom_period)
+                status=local_backtest_status(tickers,cstart,cend)
+                ready=int(status.Ready.sum()) if not status.empty else 0
+                if ready==0:
+                    st.error("No local candle data for this universe. Use Data Manager → SYNC ONLY MISSING DATA first.")
+                else:
+                    try:
+                        with st.spinner(f"Replaying {ready:,} locally cached stocks against the custom rules..."):
+                            data=load_local_backtest_data(tickers,cstart,cend)
+                            cbt=_custom_strategy_backtest(data,conditions,cstart,cend,custom_sl_pct,float(custom_target_r))
+                        st.session_state["custom_backtest"]=cbt
+                        learned=_learn_from_backtest(cbt)
+                        st.success(f"{len(cbt):,} historical CUSTOM setups found; {learned:,} saved to the learning database as strategy='CUSTOM'.")
+
+                        st.subheader("📡 Today's Custom Strategy Candidates")
+                        ml_model_custom=train_win_probability_model("INDIA")
+                        today_rows=[]
+                        for ticker,df in data.items():
+                            if len(df)<260: continue
+                            f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
+                            if f.empty or len(f)<260: continue
+                            if not bool(custom_strategy_signal(f,conditions).iloc[-1]): continue
+                            i=len(f)-1
+                            avg_value,abnormal=_safety_fast_series(df)
+                            regime,_=_regime_from_row(f,i)
+                            safe,safe_status,_=_safety_from_row(avg_value,abnormal,i)
+                            score,parts=final_setup_score(f,"CUSTOM",regime,safe)
+                            entry=float(f.close.iloc[-1]); stop=entry*(1-custom_sl_pct)
+                            target=entry+float(custom_target_r)*(entry-stop)
+                            row={
+                                "Ticker":str(ticker).replace(".NS",""),"Score":score,"Regime":regime,
+                                "Safety":safe_status,"Entry":round(entry,2),"Stop":round(stop,2),
+                                "Target":round(target,2),"HTF Score":parts["HTF Demand"],
+                                "Footprint Score":parts["Footprint"],"Entry Quality":parts["Entry Quality"],
+                                "Relative Strength":parts["Relative Strength"],"Strategy":"CUSTOM",
+                            }
+                            wp=ml_win_probability(ml_model_custom,row)
+                            if pd.isna(wp): wp=fallback_win_probability("INDIA","CUSTOM",float(score))
+                            row["Win Probability %"]=wp
+                            today_rows.append(row)
+                        if today_rows:
+                            st.dataframe(pd.DataFrame(today_rows).sort_values("Score",ascending=False),use_container_width=True,hide_index=True)
+                        else:
+                            st.info("No stock currently satisfies every custom rule.")
+                    except Exception as ex:
+                        st.error(f"Custom strategy backtest error: {ex}")
+
+    cbt=st.session_state.get("custom_backtest",pd.DataFrame())
+    if not cbt.empty:
+        st.subheader("🏆 Custom Strategy — Historical Results")
+        a,b,c,d=st.columns(4)
+        a.metric("Trades",len(cbt))
+        b.metric("Win %",f"{(cbt.Outcome.str.upper()=='WIN').mean()*100:.1f}%")
+        c.metric("Avg R",f"{cbt.R.mean():.2f}")
+        d.metric("Total R",f"{cbt.R.sum():.2f}")
+        st.dataframe(cbt.sort_values(['Score','Date'],ascending=[False,False]),use_container_width=True,hide_index=True)
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
@@ -3860,6 +4445,51 @@ with tabs[11]:
 
     st.markdown("### 🧭 Advocate mode")
     st.info("The system should reject a trade when deterministic rules fail, safety is unacceptable, data quality is poor, or the learned evidence is insufficient. It should never manufacture a reason to trade.")
+
+with tabs[12]:
+    st.subheader("🎓 Strategy Coach")
+    st.caption(
+        "Read-only analysis of completed trades per strategy: regime win-rate/avg-R, high-vs-low "
+        "component splits, and a shallow decision tree translated into plain-English rules. "
+        "This never changes S1-S4/CUSTOM rules — it only reports what the evidence shows so far."
+    )
+    coach_strategy = st.selectbox("Strategy", ["S1", "S2", "S3", "S4", "CUSTOM"], key="coach_strategy")
+    report = strategy_coach_report("INDIA", coach_strategy)
+
+    if report is None:
+        st.info(f"No completed {coach_strategy} observations yet. Run a backtest or complete forward-test trades first.")
+    else:
+        a, b = st.columns(2)
+        a.metric("Completed observations", report["n_samples"])
+        b.metric("Overall win % / avg R", f"{report['overall_win_rate']}% / {report['overall_avg_r']}")
+
+        if not report["enough_for_breakdown"]:
+            st.warning(
+                f"Only {report['n_samples']} completed {coach_strategy} observations — need "
+                f"≥{STRATEGY_COACH_MIN_SAMPLES} before the regime/component breakdown is shown. "
+                "Treat any pattern below this threshold as noise, not evidence."
+            )
+        else:
+            st.markdown("### 📊 Win rate / Avg R by regime")
+            st.dataframe(report["regime_breakdown"], use_container_width=True, hide_index=True)
+            st.caption("Samples below ~10-15 per regime are too thin to draw conclusions from.")
+
+            st.markdown("### 🔬 Component win-rate split (high half vs low half)")
+            st.dataframe(report["component_breakdown"], use_container_width=True, hide_index=True)
+            st.caption("Splits each score component at its median for this strategy's history and compares the two halves.")
+
+        st.markdown("### 🌳 Auto-extracted rules")
+        if report["tree_note"]:
+            st.info(report["tree_note"])
+        else:
+            st.dataframe(pd.DataFrame(report["tree_rules"]), use_container_width=True, hide_index=True)
+            st.caption(
+                "Each row is one path through a shallow (depth ≤3) decision tree fit on completed "
+                "outcomes, sorted by win rate then sample size. Read as: \"when these conditions held, "
+                "this strategy's setups won at this rate over this many trades.\" These are patterns in "
+                "past evidence, not guaranteed future performance — the smaller the sample, the less "
+                "the rule should influence live decisions."
+            )
 
 st.markdown("---")
 st.caption(f"{APP_VERSION} • {ARCHITECTURE_STANDARD} • Research only • Real-money order execution disabled")
