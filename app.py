@@ -104,8 +104,9 @@ def _db():
     )""")
     con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_date
                    ON scanner_signals(signal_date)""")
-    con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_forward
-                   ON scanner_signals(selected_for_forward,status)""") if False else None
+    if False:
+        con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_forward
+                       ON scanner_signals(selected_for_forward,status)""")
     con.execute("""CREATE TABLE IF NOT EXISTS forward_observations(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         forward_id INTEGER NOT NULL,
@@ -2470,6 +2471,18 @@ def learning_snapshot(market="INDIA"):
         """, con, params=(market,))
     finally:
         con.close()
+    # learned_score/holding_bars are legacy columns added via ALTER TABLE
+    # migration (ensure_learning_tables) and never populated by any INSERT
+    # (_learn_from_backtest only writes the original column set). When every
+    # value in a SQL column is NULL, pandas has nothing to infer a numeric
+    # dtype from, so the column stays dtype=object holding literal Python
+    # None instead of NaN - and st.dataframe() renders that as the literal
+    # text "None" (this is what showed up in the Market Learning tab's
+    # "Persistent Learning Database" table). Coercing explicitly avoids that
+    # regardless of whether every row happens to be NULL.
+    for _col in ("learned_score", "holding_bars"):
+        if _col in q.columns:
+            q[_col] = pd.to_numeric(q[_col], errors="coerce")
     return q
 
 def adaptive_component_weights(market="INDIA", strategy=None):
@@ -4626,7 +4639,10 @@ with tabs[2]:
         for tab,ss in zip(stabs,[1,2,3,4]):
             with tab:
                 sr=bt[bt.Strategy==f'S{ss}'].sort_values(['Score','Date'],ascending=[False,False])
-                st.dataframe(sr,width='stretch',hide_index=True) if not sr.empty else st.info(f'S{ss}: no qualifying historical setups in this window.')
+                if not sr.empty:
+                    st.dataframe(sr,width='stretch',hide_index=True)
+                else:
+                    st.info(f'S{ss}: no qualifying historical setups in this window.')
 
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
@@ -4700,7 +4716,10 @@ with tabs[4]:
             st.subheader('🔬 Marking Component Learning');st.dataframe(pd.DataFrame(rows),width='stretch',hide_index=True)
         st.subheader('🎯 Adaptive Score Edge')
         edge=adaptive_edge_table('INDIA')
-        st.dataframe(edge,width='stretch',hide_index=True) if not edge.empty else st.info('Not enough completed observations for adaptive edge estimates.')
+        if not edge.empty:
+            st.dataframe(edge,width='stretch',hide_index=True)
+        else:
+            st.info('Not enough completed observations for adaptive edge estimates.')
         st.subheader('🗄️ Persistent Learning Database')
         st.metric('Completed observations',len(learn_db))
         if not learn_db.empty:
@@ -5485,9 +5504,15 @@ with tabs[13]:
                         sh = d_swung[d_swung.swing_high][["close"]].rename(columns={"close": "Swing High"})
                         sl = d_swung[d_swung.swing_low][["close"]].rename(columns={"close": "Swing Low"})
                         st.markdown("**Swing highs:**")
-                        st.dataframe(sh, width='stretch') if not sh.empty else st.info("None detected.")
+                        if not sh.empty:
+                            st.dataframe(sh, width='stretch')
+                        else:
+                            st.info("None detected.")
                         st.markdown("**Swing lows:**")
-                        st.dataframe(sl, width='stretch') if not sl.empty else st.info("None detected.")
+                        if not sl.empty:
+                            st.dataframe(sl, width='stretch')
+                        else:
+                            st.info("None detected.")
                         st.markdown("**MSB events:**")
                         if d_msbs:
                             msb_rows = [{
