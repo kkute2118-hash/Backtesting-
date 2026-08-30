@@ -66,7 +66,76 @@ def _db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, symbol TEXT,
         strategy TEXT, score REAL, regime TEXT, entry REAL, sl REAL, target REAL,
         status TEXT DEFAULT 'ACTIVE', ltp REAL, mfe REAL DEFAULT 0,
-        mae REAL DEFAULT 0, exit_price REAL, result_r REAL, updated_at TEXT)""")
+        mae REAL DEFAULT 0, exit_price REAL, result_r REAL, updated_at TEXT,
+        signal_date TEXT, signal_json TEXT)""")
+    existing_cols={r[1] for r in con.execute("PRAGMA table_info(forward_tests)").fetchall()}
+    for col,typ in [("signal_date","TEXT"),("signal_json","TEXT")]:
+        if col not in existing_cols:
+            con.execute(f"ALTER TABLE forward_tests ADD COLUMN {col} {typ}")
+    con.execute("""CREATE TABLE IF NOT EXISTS scanner_signals(
+        signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_key TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        signal_date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        score REAL,
+        learned_rank REAL,
+        historical_edge_r REAL,
+        learning_confidence TEXT,
+        regime TEXT,
+        safety_status TEXT,
+        safety_score REAL,
+        entry REAL,
+        stop REAL,
+        target REAL,
+        rr REAL,
+        rsi REAL,
+        relvol REAL,
+        htf_score REAL,
+        footprint_score REAL,
+        strategy_score REAL,
+        entry_quality REAL,
+        relative_strength REAL,
+        safety_flags TEXT,
+        selected_for_forward INTEGER DEFAULT 0
+    )""")
+    con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_date
+                   ON scanner_signals(signal_date)""")
+    con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_forward
+                   ON scanner_signals(selected_for_forward,status)""") if False else None
+    con.execute("""CREATE TABLE IF NOT EXISTS forward_observations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        forward_id INTEGER NOT NULL,
+        observed_at TEXT NOT NULL,
+        dt TEXT NOT NULL,
+        ltp REAL,
+        high REAL,
+        low REAL,
+        unrealized_return_pct REAL,
+        mfe_pct REAL,
+        mae_pct REAL,
+        status TEXT,
+        UNIQUE(forward_id,dt)
+    )""")
+    con.execute("""CREATE TABLE IF NOT EXISTS forward_results(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        forward_id INTEGER NOT NULL UNIQUE,
+        symbol TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        signal_date TEXT NOT NULL,
+        entry REAL,
+        exit_price REAL,
+        result_r REAL,
+        return_pct REAL,
+        outcome TEXT,
+        holding_bars INTEGER,
+        mfe_pct REAL,
+        mae_pct REAL,
+        regime TEXT,
+        score REAL,
+        closed_at TEXT
+    )""")
     con.commit(); return con
 
 @st.cache_data(ttl=86400,show_spinner=False)
@@ -2095,83 +2164,72 @@ def load_local_market_dataset(tickers,start_date,end_date,min_bars=160):
 
 
 def build_local_backtest_dataset(tickers,start_date,end_date):
-    """Materialise the backtest dataset from LOCAL candles only.
-
-    IMPORTANT: this function NEVER calls Dhan.  Historical data acquisition is
-    owned exclusively by sync_missing_backtest_data().  If candles already
-    exist in market_data.sqlite3, they are copied into the per-symbol research
-    cache without any network request.
-    """
-    data_start=_bt_required_data_start(start_date)
-    con=_db(); ready=0; missing=[]
-    try:
-        for t in tickers:
-            s=str(t).upper().replace('.NS','')
-            d=_read_cache(con,s,data_start,end_date)
-            if d is None or d.empty or len(d)<260:
-                missing.append(s); continue
-            d.sort_index().to_pickle(_bt_file(s)); ready+=1
-    finally: con.close()
-    return ready,missing
+    """Compatibility wrapper. Never creates a second market-data cache."""
+    data=load_local_market_dataset(tickers,start_date,end_date,min_bars=260)
+    return len(data), [str(t).replace(".NS","") for t in tickers if t not in data]
 
 def sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5):
-    """EXPLICIT DATA SYNC: the only backtest function allowed to call Dhan.
-
-    It first checks the persistent candle database. Dhan is contacted only for
-    symbols whose local range is missing/incomplete. After sync, the local
-    backtest cache is materialised from SQLite.
-    """
+    """Explicit acquisition stage only. Backtest itself never calls this."""
     data_start=_bt_required_data_start(start_date)
-    # update_dhan_symbol() itself performs range-aware missing-range downloads.
     return download_prices(tuple(tickers),data_start,end_date,max_workers=max_workers)
 
 def local_backtest_status(tickers,start_date,end_date):
-    """Readiness check from the persistent LOCAL candle database.
-
-    This check never contacts Dhan and never downloads anything.  It also
-    materialises a missing per-symbol pickle from SQLite when sufficient local
-    candles already exist, eliminating the old repeated-download behaviour.
-    """
+    """Single-batch readiness query against the persistent SQLite candle store."""
     data_start=_bt_required_data_start(start_date)
-    rows=[]
+    symbols=[str(t).upper().replace(".NS","") for t in tickers]
+    if not symbols:
+        return pd.DataFrame(columns=["Ticker","Bars","Ready","Start","End"])
     con=_db()
     try:
-        for t in tickers:
-            s=str(t).upper().replace('.NS','')
-            d=_read_cache(con,s,data_start,end_date)
-            n=len(d) if d is not None else 0
-            ok=n>=260
-            a=d.index.min().date() if ok and not d.empty else None
-            b=d.index.max().date() if ok and not d.empty else None
-            if ok:
-                f=_bt_file(s)
-                try:
-                    # Re-materialise only when absent/stale; still LOCAL ONLY.
-                    rewrite=True
-                    if f.exists():
-                        cached=pd.read_pickle(f)
-                        cached.index=pd.to_datetime(cached.index)
-                        rewrite = (len(cached)<260 or cached.index.min()>pd.Timestamp(data_start) or cached.index.max()<pd.Timestamp(end_date))
-                    if rewrite:
-                        d.sort_index().to_pickle(f)
-                except Exception:
-                    d.sort_index().to_pickle(f)
-            rows.append({'Ticker':str(t).replace('.NS',''),'Bars':n,'Ready':ok,'Start':a,'End':b})
+        qmarks=",".join(["?"]*len(symbols))
+        params=symbols+[pd.Timestamp(data_start).strftime("%Y-%m-%d"),
+                        pd.Timestamp(end_date).strftime("%Y-%m-%d")]
+        q=pd.read_sql_query(
+            f"""SELECT symbol,COUNT(*) AS Bars,MIN(dt) AS Start,MAX(dt) AS End
+                FROM candles
+                WHERE symbol IN ({qmarks}) AND dt>=? AND dt<=?
+                GROUP BY symbol""",
+            con,params=params
+        )
     finally:
         con.close()
+    by={str(r.symbol).upper():r for r in q.itertuples()}
+    rows=[]
+    for t,s in zip(tickers,symbols):
+        r=by.get(s)
+        n=int(r.Bars) if r is not None else 0
+        rows.append({
+            "Ticker":str(t).replace(".NS",""),
+            "Bars":n,
+            "Ready":bool(n>=260),
+            "Start":pd.to_datetime(r.Start).date() if r is not None else None,
+            "End":pd.to_datetime(r.End).date() if r is not None else None
+        })
     return pd.DataFrame(rows)
 
 def load_local_backtest_data(tickers,start_date,end_date):
+    """Direct, batch SQLite read. Backtest never uses a second market-data cache."""
     data_start=_bt_required_data_start(start_date)
+    symbols=[str(t).upper().replace(".NS","") for t in tickers]
+    if not symbols:return {}
+    con=_db()
+    try:
+        qmarks=",".join(["?"]*len(symbols))
+        q=pd.read_sql_query(
+            f"""SELECT symbol,dt,open,high,low,close,volume FROM candles
+                WHERE symbol IN ({qmarks}) AND dt>=? AND dt<=?
+                ORDER BY symbol,dt""",
+            con,params=symbols+[pd.Timestamp(data_start).strftime("%Y-%m-%d"),
+                                pd.Timestamp(end_date).strftime("%Y-%m-%d")]
+        )
+    finally:con.close()
     out={}
-    for t in tickers:
-        f=_bt_file(t)
-        if not f.exists():continue
-        try:
-            d=pd.read_pickle(f);d.index=pd.to_datetime(d.index)
-            d=d.loc[(d.index>=pd.Timestamp(data_start))&(d.index<=pd.Timestamp(end_date))].sort_index()
-            if len(d)>=260:out[t]=d
-        except Exception:pass
+    if q.empty:return out
+    for s,g in q.groupby("symbol",sort=False):
+        d=g.drop(columns=["symbol"]).copy(); d.dt=pd.to_datetime(d.dt); d=d.set_index("dt"); d.index.name="date"
+        if len(d)>=260:
+            original=next((t for t in tickers if str(t).upper().replace(".NS","")==str(s).upper()),s)
+            out[original]=d
     return out
 
 def _professional_bt(data,strategies,threshold,start_date,end_date):
@@ -2235,7 +2293,7 @@ def run_local_backtest(tickers,start_date,end_date,threshold=85):
 
 def _bt_period(period):
     days={'6 Months':183,'1 Year':365,'2 Years':730,'3 Years':1095}
-    end=date.today(); return end-timedelta(days=days[period]),end
+    end=last_expected_nse_session(); return end-timedelta(days=days[period]),end
 
 def _fast_score_learning_backtest(data, strategies, threshold=85):
     rows = []
@@ -2410,6 +2468,41 @@ def stats(t):
             "Profit Factor":round(gp/gl,2) if gl else np.nan}
 
 # ========================= FINAL RESEARCH ENGINES =========================
+def s4_entry_plan(d,i):
+    """Research-only S4 timing plan; uses only bars up to i."""
+    if d is None or len(d)<80 or i<40 or i>=len(d):
+        return {"State":"INSUFFICIENT DATA"}
+    x=d.iloc[:i+1].copy()
+    e20=float(ema(x.close,20).iloc[-1]); e50=float(ema(x.close,50).iloc[-1]); e200=float(ema(x.close,200).iloc[-1])
+    swing_high=float(x.high.iloc[-60:].max())
+    impulse_low=float(x.low.iloc[-60:-20].min()) if len(x)>=60 else float(x.low.iloc[:-20].min())
+    close=float(x.close.iloc[-1]); high=float(x.high.iloc[-1]); low=float(x.low.iloc[-1])
+    impulse=max(swing_high-impulse_low,1e-9)
+    retr=(swing_high-close)/impulse
+    vol20=float(sma(x.volume,20).iloc[-1]) if pd.notna(sma(x.volume,20).iloc[-1]) else np.nan
+    relvol=float(x.volume.iloc[-1]/vol20) if np.isfinite(vol20) and vol20>0 else 0
+    prior_high=float(x.high.iloc[-2])
+    prior_low=float(x.low.iloc[-20:-1].min())
+    reclaim=close>e20 and float(x.close.iloc[-2])<=float(ema(x.close,20).iloc[-2])
+    higher_high=close>prior_high
+    trend=(close>e50>e200)
+    in_zone=(0.382<=retr<=0.618)
+    pullback_low=float(x.low.iloc[-10:].min())
+    stop=min(pullback_low,e20*0.98)
+    # Prefer prior swing as first target; require at least 2.5R before a new high.
+    risk=max(close-stop,1e-9)
+    target1=swing_high
+    rr1=(target1-close)/risk
+    target3=close+3*risk
+    confirmation=(trend and in_zone and (reclaim or higher_high) and relvol>=1.2)
+    state="BUY-TRIGGER" if confirmation and rr1>=2.5 else "WATCH" if trend and in_zone else "WAIT"
+    return {
+        "State":state,"Retracement %":round(retr*100,1),"Entry":round(close,2),
+        "Stop":round(stop,2),"Swing Target":round(target1,2),"3R Target":round(target3,2),
+        "RR to Swing":round(rr1,2),"RelVol":round(relvol,2),
+        "Trend OK":trend,"Reclaim":bool(reclaim),"Higher High":bool(higher_high),
+    }
+
 def _s4_recovery_event(d,i):
     if i<80 or i>=len(d)-2:return None
     close=d.close; high=d.high; low=d.low; vol=d.volume
@@ -2703,6 +2796,47 @@ with tabs[1]:
 
             result = pd.DataFrame(rows)
 
+            # Persist every scanner-qualified signal; mark only the configured
+            # forward-test gate as selected. This survives Streamlit reruns.
+            if not result.empty:
+                con=_db()
+                try:
+                    now=datetime.now().isoformat(timespec="seconds")
+                    for _,r in result.iterrows():
+                        sym=str(r.get("Ticker","")).upper().replace(".NS","")
+                        strat=str(r.get("Strategy","")).upper()
+                        signal_date=str(date.today())
+                        signal_key=f"{signal_date}|{sym}|{strat}"
+                        con.execute("""INSERT OR REPLACE INTO scanner_signals(
+                            signal_key,created_at,signal_date,symbol,strategy,score,learned_rank,
+                            historical_edge_r,learning_confidence,regime,safety_status,safety_score,
+                            entry,stop,target,rr,rsi,relvol,htf_score,footprint_score,
+                            strategy_score,entry_quality,relative_strength,safety_flags,selected_for_forward
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                            signal_key,now,signal_date,sym,strat,
+                            float(r.get("Score",0)),float(r.get("Learned Rank",0)),
+                            float(r.get("Historical Edge R",0)),str(r.get("Learning Confidence","")),
+                            str(r.get("Regime","")),str(r.get("Safety","")),
+                            float(r.get("Safety Score",0)),float(r.get("Entry",np.nan)),
+                            float(r.get("SL 7%",r.get("SL",np.nan))),
+                            float(r.get("Target 3R",r.get("Target",np.nan))),
+                            3.0,float(r.get("RSI",np.nan)),float(r.get("RelVol",np.nan)),
+                            float(r.get("HTF Score",r.get("HTF Demand",0))),
+                            float(r.get("Footprint Score",r.get("Footprint",0))),
+                            float(r.get("Strategy Score",0)),float(r.get("Entry Quality",0)),
+                            float(r.get("Relative Strength",0)),str(r.get("Safety Flags","")),
+                            int(float(r.get("Score",0))>=min_score)
+                        ))
+                    con.commit()
+                finally:
+                    con.close()
+
+                # Convert selected signals into durable forward-test records.
+                added=add_forward_candidates(
+                    result[result["Score"]>=min_score].copy()
+                )
+                st.session_state["forward_last_added"]=int(added)
+
             with best_top_placeholder.container():
                 st.subheader("🏆 BEST SETUPS — Score Highest First")
                 if result.empty:
@@ -2982,41 +3116,140 @@ with tabs[1]:
 # ========================= RESEARCH MODULES =========================
 
 def add_forward_candidates(candidates):
-    """Persist current >=85 qualifying setups for forward testing.
-
-    Only complete strategy-rule candidates supplied by the scanner are added.
-    Existing ACTIVE records for the same symbol/strategy are not duplicated.
-    """
+    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them."""
     if candidates is None or len(candidates)==0:
         return 0
     con=_db(); added=0
     try:
+        today=str(date.today())
         for _,r in candidates.iterrows():
             symbol=str(r.get("Ticker","")).upper().replace(".NS","")
             strategy=str(r.get("Strategy","")).upper()
             score=float(r.get("Score",0))
-            if not symbol or strategy not in {"S1","S2","S3","S4"} or score < 85:
+            if not symbol or strategy not in {"S1","S2","S3","S4"}:
+                continue
+            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
+            target=float(r.get("Target",r.get("Target 3R",np.nan)))
+            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl) or not np.isfinite(target):
                 continue
             exists=con.execute(
-                "SELECT 1 FROM forward_tests WHERE symbol=? AND strategy=? AND status='ACTIVE' LIMIT 1",
-                (symbol,strategy)
+                """SELECT id FROM forward_tests
+                   WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
+                (symbol,strategy,today)
             ).fetchone()
             if exists:
                 continue
-            entry=float(r.get("Entry",np.nan))
-            sl=float(r.get("SL",r.get("SL 7%",np.nan)))
-            target=float(r.get("Target",r.get("Target 3R",np.nan)))
-            regime=str(r.get("Regime","")).strip()
             now=datetime.now().isoformat(timespec="seconds")
-            con.execute("""INSERT INTO forward_tests(
-                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,exit_price,result_r,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (now,symbol,strategy,score,regime,entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now))
-            added += 1
+            snapshot={k:r.get(k,None) for k in r.index}
+            cur=con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
+                exit_price,result_r,updated_at,signal_date,signal_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                now,symbol,strategy,score,str(r.get("Regime","")).strip(),
+                entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
+                today,json.dumps(snapshot,default=str,allow_nan=True)
+            ))
+            fid=int(cur.lastrowid); added+=1
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
+                fid,now,today,entry,entry,entry,0.0,0.0,0.0,"ACTIVE"
+            ))
         con.commit()
     finally:
         con.close()
     return added
+
+def refresh_forward_positions():
+    """Update active forward records using only locally stored daily candles."""
+    con=_db()
+    try:
+        active=pd.read_sql_query(
+            """SELECT id,created_at,signal_date,symbol,strategy,score,regime,entry,sl,target
+               FROM forward_tests WHERE status='ACTIVE' ORDER BY created_at DESC""",con
+        )
+    finally: con.close()
+    if active.empty:return 0
+
+    today=last_expected_nse_session(); updates=0
+    con=_db()
+    try:
+        for r in active.itertuples():
+            s=str(r.symbol).upper().replace(".NS","")
+            signal_date=pd.to_datetime(r.signal_date or r.created_at).date()
+            d=_read_cache(con,s,signal_date,today)
+            if d is None or d.empty: continue
+
+            entry=float(r.entry);stop=float(r.sl);target=float(r.target)
+            last_dt=pd.Timestamp(d.index[-1]).date(); close=float(d.close.iloc[-1])
+            mfe=max(0.0,(float(d.high.max())/entry-1)*100)
+            mae=min(0.0,(float(d.low.min())/entry-1)*100)
+            ret=(close/entry-1)*100; held=max(0,len(d)-1)
+            status="ACTIVE";exitp=None;result_r=None;closed_at=None
+
+            for _,bar in d.iterrows():
+                if float(bar.low)<=stop:
+                    status="STOP";exitp=stop;result_r=(exitp-entry)/(entry-stop);closed_at=datetime.now().isoformat(timespec="seconds");break
+                if float(bar.high)>=target:
+                    status="TARGET";exitp=target;result_r=(exitp-entry)/(entry-stop);closed_at=datetime.now().isoformat(timespec="seconds");break
+
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
+                int(r.id),datetime.now().isoformat(timespec="seconds"),str(last_dt),
+                close,float(d.high.iloc[-1]),float(d.low.iloc[-1]),ret,mfe,mae,status
+            ))
+
+            if status!="ACTIVE":
+                con.execute("""UPDATE forward_tests
+                    SET status=?,ltp=?,mfe=?,mae=?,exit_price=?,result_r=?,updated_at=?
+                    WHERE id=?""",
+                    (status,exitp,mfe,mae,exitp,result_r,closed_at,int(r.id)))
+                con.execute("""INSERT OR IGNORE INTO forward_results(
+                    forward_id,symbol,strategy,signal_date,entry,exit_price,result_r,
+                    return_pct,outcome,holding_bars,mfe_pct,mae_pct,regime,score,closed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                    int(r.id),s,str(r.strategy),str(signal_date),entry,exitp,result_r,
+                    (exitp/entry-1)*100,status,held,mfe,mae,str(r.regime),float(r.score),closed_at
+                ))
+            else:
+                con.execute("""UPDATE forward_tests SET ltp=?,mfe=?,mae=?,updated_at=? WHERE id=?""",
+                            (close,mfe,mae,datetime.now().isoformat(timespec="seconds"),int(r.id)))
+            updates+=1
+        con.commit()
+    finally: con.close()
+    return updates
+
+def forward_summary_table():
+    """Persistent strategy scorecard from forward-test records."""
+    con=_db()
+    try:
+        q=pd.read_sql_query(
+            """SELECT strategy AS Strategy,
+                      COUNT(*) AS Records,
+                      SUM(CASE WHEN status='ACTIVE' THEN 1 ELSE 0 END) AS Open,
+                      SUM(CASE WHEN status IN ('TARGET','STOP','EXIT','EXPIRED') THEN 1 ELSE 0 END) AS Closed,
+                      SUM(CASE WHEN result_r>0 THEN 1 ELSE 0 END) AS Wins,
+                      SUM(CASE WHEN result_r<=0 AND result_r IS NOT NULL THEN 1 ELSE 0 END) AS Losses,
+                      AVG(result_r) AS AvgR,
+                      SUM(result_r) AS TotalR,
+                      AVG(CASE WHEN result_r IS NOT NULL THEN (result_r*100.0/3.0) END) AS AvgROIProxy,
+                      AVG(mfe) AS AvgMFE,
+                      AVG(mae) AS AvgMAE
+               FROM forward_tests GROUP BY strategy ORDER BY AvgR DESC""",con
+        )
+    finally:
+        con.close()
+    if q.empty:return q
+    q["Win %"]=np.where((q["Wins"]+q["Losses"])>0,q["Wins"]/(q["Wins"]+q["Losses"])*100,np.nan)
+    q["Status"]=np.where(q["Closed"]<3,"BUILDING SAMPLE",
+                         np.where(q["AvgR"]>0.75,"STRONG",
+                                  np.where(q["AvgR"]>0.2,"POSITIVE",
+                                           np.where(q["AvgR"]>-0.1,"NEUTRAL","WEAK"))))
+    q["AvgR"]=q["AvgR"].round(3);q["TotalR"]=q["TotalR"].round(2)
+    q["Win %"]=q["Win %"].round(1);q["AvgMFE"]=q["AvgMFE"].round(2);q["AvgMAE"]=q["AvgMAE"].round(2)
+    return q
+
 
 def crypto_learning_summary(symbol=None):
     """Summarise persisted crypto research observations; safe when empty."""
@@ -3056,14 +3289,14 @@ def _learning_summary(bt):
 
 with tabs[2]:
     st.subheader("📊 Professional Walk-Forward Backtest")
-    st.caption("Dhan is used ONLY by the explicit SYNC button. Backtest readiness and backtest execution are strictly local-only and make ZERO Dhan/API calls.")
+    st.caption("Dhan is used ONLY by the explicit Data Manager sync. Backtest reads the same SQLite candle store and makes ZERO Dhan/API calls.")
     c1,c2,c3=st.columns(3)
     period=c1.selectbox("Time Span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="bt_period_final")
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
     universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
     start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
     tickers=sorted(set(sum([index_universe(u) for u in universes],[]))) if universes else []
-    st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | learning keeps ALL complete-rule signals | forward gate ≥{threshold}")
+    st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | local SQLite only | forward gate ≥{threshold}")
 
     st.markdown("### 1️⃣ Local Dataset")
     status=local_backtest_status(tickers,start_date,end_date) if tickers else pd.DataFrame()
@@ -3077,7 +3310,7 @@ with tabs[2]:
     d.metric("Warm-up",f"{BT_WARMUP_DAYS} days")
 
     if total and ready==total:
-        st.success("✅ Local dataset ready. Backtest will make ZERO Dhan/API calls.")
+        st.success("✅ Local SQLite dataset ready. Backtest will make ZERO Dhan/API calls.")
     elif total:
         st.warning(
             f"⚠️ {total-ready:,} stocks are missing required local history. "
@@ -3150,23 +3383,52 @@ with tabs[2]:
                 st.dataframe(sr,use_container_width=True,hide_index=True) if not sr.empty else st.info(f'S{ss}: no qualifying historical setups in this window.')
 
 with tabs[3]:
-    st.subheader('🔬 Forward Testing')
+    st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
+    changed=refresh_forward_positions()
+    st.caption("Every scanner-selected ≥gate signal is stored in SQLite with its original conditions. Refreshing the page does not clear it.")
     con=_db()
-    try:ft=pd.read_sql_query('SELECT * FROM forward_tests ORDER BY created_at DESC',con)
+    try:
+        ft=pd.read_sql_query("""SELECT id,signal_date AS Signal_Date,symbol AS Ticker,strategy AS Strategy,
+            score AS Score,regime AS Regime,entry AS Entry,sl AS Stop,target AS Target,status AS Status,
+            ltp AS Current_Price,mfe AS MFE_pct,mae AS MAE_pct,exit_price AS Exit,result_r AS R,
+            updated_at AS Updated FROM forward_tests ORDER BY signal_date DESC,score DESC""",con)
+        signals=pd.read_sql_query("""SELECT signal_date AS Date,symbol AS Ticker,strategy AS Strategy,
+            score AS Score,entry AS Entry,stop AS Stop,target AS Target,rr AS RR,regime AS Regime,
+            safety_status AS Safety,historical_edge_r AS Historical_Edge_R
+            FROM scanner_signals WHERE selected_for_forward=1
+            ORDER BY signal_date DESC,score DESC""",con)
     finally:con.close()
+
     if ft.empty:
-        st.info('No active forward-test records yet. This is expected until a current scanner run produces complete-rule ≥85 candidates. Historical backtest trades are NOT treated as live trades.')
-        q=st.session_state.get('forward_queue',pd.DataFrame())
-        if q is not None and not q.empty:
-            st.subheader('🚀 Latest Live Candidate Queue')
-            st.dataframe(q.sort_values('Score',ascending=False),use_container_width=True,hide_index=True)
-            st.caption('These are current scanner candidates; they become forward-test records when added by the scanner. Historical backtest results remain separate.')
+        st.info("No persistent forward-test records yet. Run Daily Scanner and let the ≥85 gate create them.")
     else:
-        a,b,c,d=st.columns(4);a.metric('Total',len(ft));b.metric('Active',int((ft.status=='ACTIVE').sum()));c.metric('Positive R',int((ft.result_r>0).sum()));d.metric('Average R',round(float(ft.result_r.dropna().mean()),2) if ft.result_r.notna().any() else 0)
-        st.dataframe(ft.sort_values('score',ascending=False),use_container_width=True,hide_index=True)
+        closed=ft[ft.Status!="ACTIVE"]; wins=int((closed.R>0).sum()); losses=int((closed.R<=0).sum())
+        avg_r=float(closed.R.mean()) if not closed.empty else np.nan
+        a,b,c,d,e=st.columns(5)
+        a.metric("Persistent signals",len(ft)); b.metric("Open",int((ft.Status=="ACTIVE").sum()))
+        c.metric("Wins",wins); d.metric("Losses",losses); e.metric("Avg R",f"{avg_r:.2f}" if np.isfinite(avg_r) else "—")
+        st.subheader("📋 Forward Positions")
+        st.dataframe(ft,use_container_width=True,hide_index=True)
+        st.subheader("🏆 Strategy Performance Scorecard")
+        fs=forward_summary_table()
+        if not fs.empty: st.dataframe(fs,use_container_width=True,hide_index=True)
+        else: st.info("Waiting for completed forward-test outcomes.")
+        st.subheader("🧠 What is being learned")
+        st.write("The system tracks strategy, score, regime, entry/stop/target, MFE/MAE, R and final outcome. This is the permanent evidence base for future strategy ranking.")
+
+    st.subheader("🗃️ Persisted Scanner Signals")
+    if signals.empty: st.info("No scanner signals saved for the forward-test gate yet.")
+    else:
+        st.dataframe(signals.head(500),use_container_width=True,hide_index=True)
+        st.download_button("⬇️ Download forward signal history",signals.to_csv(index=False).encode(),"forward_signal_history.csv","text/csv",key="download_forward_history")
 
 with tabs[4]:
     st.subheader("🧠 Adaptive Market Learning")
+    fwd=forward_summary_table()
+    if not fwd.empty:
+        st.subheader("🏆 Forward Strategy Leaderboard")
+        st.dataframe(fwd,use_container_width=True,hide_index=True)
+
     bt=st.session_state.get('backtest_final',pd.DataFrame())
     if bt.empty:
         bt,_run=_load_latest_backtest()
@@ -3401,7 +3663,16 @@ with tabs[8]:
         st.success("Dhan WebSocket stop requested.")
 
 with tabs[9]:
-    st.subheader("🧪 Strategy 4 Recovery Study")
+    st.subheader("🧪 Strategy 4 Recovery Study + Entry Timing")
+    st.markdown("### 🎯 Higher-quality S4 retracement entry")
+    st.info("Research rule: do not buy merely because price reaches a retracement zone. Prefer trend + controlled pullback + reclaim/confirmation + sufficient reward-to-risk. The 38.2–61.8% zone is a heuristic, not a proven probability edge.")
+    s4a,s4b,s4c,s4d=st.columns(4)
+    s4a.metric("Preferred retracement","38.2–61.8%")
+    s4b.metric("Minimum target","≥ 3R")
+    s4c.metric("Confirmation","Reclaim + higher high")
+    s4d.metric("Risk stop","Below pullback low")
+    st.caption("The engine should label setups WAIT / WATCH / BUY-TRIGGER, rather than force a purchase.")
+
     st.caption("Research layer only — exact S4 remains unchanged. This study searches for big-move → consolidation/retracement → reclaim → higher-high structures that the strict daily EMA20-close condition can miss.")
     c1,c2,c3,c4=st.columns(4)
     s4_min_score=c1.slider("Study score",50,95,70,1,key="s4study_score")
@@ -3443,7 +3714,17 @@ with tabs[9]:
 - **Higher-high confirmation:** evidence that the recovery is actually resuming, not merely bouncing.
 - **Out-of-sample expectancy:** the pattern only becomes a candidate for a future rule change if it survives walk-forward testing.
 """)
-    st.warning("Important: the Study Score is a research ranking, not a probability of profit. We will never silently modify S4 based on historical optimization.")
+    st.subheader("🎯 S4 Entry Timing — preferred retracement workflow")
+    st.markdown("""
+**WAIT:** trend/structure is not ready.
+
+**WATCH:** price reaches roughly the 38.2–61.8% pullback zone while the broader trend remains intact.
+
+**BUY-TRIGGER:** only after confirmation such as EMA20 reclaim or a higher high, volume confirmation, and at least ~2.5R to the prior swing high. Stop goes below the pullback low. Prefer a 3R planning target when the structure supports it.
+
+These thresholds are research heuristics—not guaranteed probabilities. The system should rank and label the setup rather than force a purchase.
+""")
+    st.warning("Important: the Study Score and BUY-TRIGGER are decision aids, not a probability of profit. Exact S4 remains unchanged.")
 
 with tabs[10]:
     st.subheader("🧪 Custom Strategy Lab")
