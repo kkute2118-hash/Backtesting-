@@ -2753,6 +2753,130 @@ def ml_win_probability(model_info, row):
         return np.nan
 
 
+# ========================= STRATEGY COACH =========================
+# Analyzes completed learning_observations per strategy: regime win-rate/avg-R
+# breakdown, high-vs-low component splits, and a shallow (max_depth<=3)
+# decision tree translated into plain-English rules. Never rewrites strategy
+# rules — this is read-only evidence with explicit sample-size caveats.
+
+STRATEGY_COACH_MIN_SAMPLES = 20
+STRATEGY_COACH_TREE_MIN_SAMPLES = 40
+
+def strategy_coach_regime_breakdown(q):
+    g = q.groupby("regime").agg(
+        Samples=("result_r", "count"),
+        WinRate=("win", "mean"),
+        AvgR=("result_r", "mean"),
+    ).reset_index().rename(columns={"regime": "Regime"})
+    g["WinRate"] = (g.WinRate * 100).round(1)
+    g["AvgR"] = g.AvgR.round(3)
+    return g.sort_values("Samples", ascending=False)
+
+def strategy_coach_component_breakdown(q):
+    rows = []
+    for c in ML_FEATURE_COLUMNS:
+        if c not in q.columns:
+            continue
+        vals = pd.to_numeric(q[c], errors="coerce")
+        med = vals.median()
+        if pd.isna(med):
+            continue
+        hi = q[vals >= med]; lo = q[vals < med]
+        if len(hi) == 0 or len(lo) == 0:
+            continue
+        rows.append({
+            "Component": c.replace("_", " ").title(),
+            "High Samples": len(hi), "High Win %": round(float(hi.win.mean()) * 100, 1),
+            "High Avg R": round(float(hi.result_r.mean()), 3),
+            "Low Samples": len(lo), "Low Win %": round(float(lo.win.mean()) * 100, 1),
+            "Low Avg R": round(float(lo.result_r.mean()), 3),
+        })
+    return pd.DataFrame(rows)
+
+def _coach_pretty_feature(name):
+    if name.startswith("regime_"):
+        return f"Regime == {name[len('regime_'):]}"
+    return name.replace("_", " ").upper()
+
+def _coach_extract_tree_rules(tree, feature_names, min_leaf_samples):
+    from sklearn.tree import _tree
+    t = tree.tree_
+    leaves = []
+    def recurse(node, path):
+        if t.feature[node] != _tree.TREE_UNDEFINED:
+            name = feature_names[t.feature[node]]
+            thresh = t.threshold[node]
+            recurse(t.children_left[node], path + [(name, "<=", thresh)])
+            recurse(t.children_right[node], path + [(name, ">", thresh)])
+        else:
+            n = int(t.n_node_samples[node])
+            # tree_.value stores per-node class PROPORTIONS (rows sum to 1),
+            # not raw counts, so this is already the leaf's win rate.
+            win_rate = float(t.value[node][0][1]) if t.value[node].shape[1] > 1 else 0.0
+            leaves.append((path, n, win_rate))
+    recurse(0, [])
+    leaves.sort(key=lambda x: (-x[2], -x[1]))
+    rules = []
+    for path, n, win_rate in leaves:
+        if n < min_leaf_samples:
+            continue
+        desc = " AND ".join(f"{_coach_pretty_feature(nm)} {op} {th:.1f}" for nm, op, th in path) or "Overall population"
+        rules.append({"Rule": desc, "Samples": n, "Win Rate %": round(win_rate * 100, 1)})
+    return rules[:5]
+
+def strategy_coach_tree_rules(q, max_depth=3, min_samples=STRATEGY_COACH_TREE_MIN_SAMPLES):
+    """Fit a shallow decision tree and translate its leaves into plain-English
+    rules, most winning first. Returns (rules, note); note explains why rules
+    are empty when there isn't enough evidence yet."""
+    if len(q) < min_samples:
+        return [], f"Need ≥{min_samples} completed observations to extract rules; have {len(q)}."
+    try:
+        from sklearn.tree import DecisionTreeClassifier
+    except ImportError:
+        return [], "scikit-learn is not installed."
+    feat_cols = [c for c in ML_FEATURE_COLUMNS if c in q.columns]
+    x_num = q[feat_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    regime_dummies = pd.get_dummies(q["regime"].astype(str), prefix="regime")
+    X = pd.concat([x_num, regime_dummies], axis=1)
+    y = q["win"].to_numpy()
+    if y.sum() < 5 or (len(y) - y.sum()) < 5:
+        return [], "Not enough win/loss diversity to extract rules yet."
+    min_leaf = max(10, len(q) // 20)
+    tree = DecisionTreeClassifier(max_depth=max_depth, min_samples_leaf=min_leaf, random_state=42)
+    tree.fit(X, y)
+    rules = _coach_extract_tree_rules(tree, list(X.columns), min_leaf)
+    if not rules:
+        return [], "No leaf had enough samples to report as a reliable rule."
+    return rules, None
+
+def strategy_coach_report(market, strategy):
+    """Full read-only coaching report for one strategy, or None when there
+    isn't at least one completed observation to analyze."""
+    q = learning_snapshot(market)
+    if q.empty or "strategy" not in q.columns:
+        return None
+    q = q[q.strategy.astype(str).str.upper() == str(strategy).upper()].copy()
+    q = q.dropna(subset=["result_r"])
+    if q.empty:
+        return None
+    q["result_r"] = pd.to_numeric(q["result_r"], errors="coerce")
+    q = q.dropna(subset=["result_r"])
+    if q.empty:
+        return None
+    q["win"] = (q.result_r > 0).astype(int)
+    n = len(q)
+    enough = n >= STRATEGY_COACH_MIN_SAMPLES
+    rules, rule_note = strategy_coach_tree_rules(q)
+    return {
+        "strategy": strategy, "n_samples": n, "enough_for_breakdown": enough,
+        "overall_win_rate": round(float(q.win.mean()) * 100, 1),
+        "overall_avg_r": round(float(q.result_r.mean()), 3),
+        "regime_breakdown": strategy_coach_regime_breakdown(q) if enough else pd.DataFrame(),
+        "component_breakdown": strategy_coach_component_breakdown(q) if enough else pd.DataFrame(),
+        "tree_rules": rules, "tree_note": rule_note,
+    }
+
+
 # ========================= BACKTEST =========================
 
 def run_backtest(d,sig,capital,risk,sl,rr,slip=.001):
@@ -2955,7 +3079,8 @@ tabs=st.tabs([
     "💾 Dhan Data Manager",
     "🧪 S4 Recovery Study",
     "🧪 Custom Strategy",
-    "🧬 Research & Risk Control"
+    "🧬 Research & Risk Control",
+    "🎓 Strategy Coach"
 ])
 
 with tabs[0]:
@@ -4320,6 +4445,51 @@ with tabs[11]:
 
     st.markdown("### 🧭 Advocate mode")
     st.info("The system should reject a trade when deterministic rules fail, safety is unacceptable, data quality is poor, or the learned evidence is insufficient. It should never manufacture a reason to trade.")
+
+with tabs[12]:
+    st.subheader("🎓 Strategy Coach")
+    st.caption(
+        "Read-only analysis of completed trades per strategy: regime win-rate/avg-R, high-vs-low "
+        "component splits, and a shallow decision tree translated into plain-English rules. "
+        "This never changes S1-S4/CUSTOM rules — it only reports what the evidence shows so far."
+    )
+    coach_strategy = st.selectbox("Strategy", ["S1", "S2", "S3", "S4", "CUSTOM"], key="coach_strategy")
+    report = strategy_coach_report("INDIA", coach_strategy)
+
+    if report is None:
+        st.info(f"No completed {coach_strategy} observations yet. Run a backtest or complete forward-test trades first.")
+    else:
+        a, b = st.columns(2)
+        a.metric("Completed observations", report["n_samples"])
+        b.metric("Overall win % / avg R", f"{report['overall_win_rate']}% / {report['overall_avg_r']}")
+
+        if not report["enough_for_breakdown"]:
+            st.warning(
+                f"Only {report['n_samples']} completed {coach_strategy} observations — need "
+                f"≥{STRATEGY_COACH_MIN_SAMPLES} before the regime/component breakdown is shown. "
+                "Treat any pattern below this threshold as noise, not evidence."
+            )
+        else:
+            st.markdown("### 📊 Win rate / Avg R by regime")
+            st.dataframe(report["regime_breakdown"], use_container_width=True, hide_index=True)
+            st.caption("Samples below ~10-15 per regime are too thin to draw conclusions from.")
+
+            st.markdown("### 🔬 Component win-rate split (high half vs low half)")
+            st.dataframe(report["component_breakdown"], use_container_width=True, hide_index=True)
+            st.caption("Splits each score component at its median for this strategy's history and compares the two halves.")
+
+        st.markdown("### 🌳 Auto-extracted rules")
+        if report["tree_note"]:
+            st.info(report["tree_note"])
+        else:
+            st.dataframe(pd.DataFrame(report["tree_rules"]), use_container_width=True, hide_index=True)
+            st.caption(
+                "Each row is one path through a shallow (depth ≤3) decision tree fit on completed "
+                "outcomes, sorted by win rate then sample size. Read as: \"when these conditions held, "
+                "this strategy's setups won at this rate over this many trades.\" These are patterns in "
+                "past evidence, not guaranteed future performance — the smaller the sample, the less "
+                "the rule should influence live decisions."
+            )
 
 st.markdown("---")
 st.caption(f"{APP_VERSION} • {ARCHITECTURE_STANDARD} • Research only • Real-money order execution disabled")
