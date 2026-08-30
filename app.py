@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import io
+import re
 import sqlite3
 import time
 import threading
@@ -1349,6 +1350,87 @@ def _safety_from_row(avg_value,abnormal,i):
     return score,status,flags
 
 
+# ========================= CUSTOM STRATEGY DSL =========================
+# Whitelist-only rule language — never eval()/exec(). Each non-blank, non-
+# comment line must be "<COLUMN> <op> <RHS>" where COLUMN is one of the
+# known features_fast() columns and RHS is a number, another known column,
+# or "NUMBER * COLUMN" (e.g. "VOLUME > 1.5 * VOL20"). Lines are AND-combined.
+
+CUSTOM_DSL_COLUMNS = {
+    "open","high","low","close","volume",
+    "ema10","ema20","ema50","ema200","ema250","vol20","vol30","rsi14","relvol","atr14",
+    "wrsi14","wema20","wema50","wclose",
+    "mclose","mopen","mhigh","mlow","mrsi14","mema10","mema15","mema20","mmom","mmax20",
+    "mprevclose","mprevhigh","mprevlow","m_cross_count20","m_cross_10_20",
+}
+CUSTOM_DSL_OPS = {
+    ">": lambda a,b: a>b, ">=": lambda a,b: a>=b,
+    "<": lambda a,b: a<b, "<=": lambda a,b: a<=b,
+    "==": lambda a,b: a==b, "!=": lambda a,b: a!=b,
+}
+_CUSTOM_DSL_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(>=|<=|==|!=|>|<)\s*(.+?)\s*$")
+_CUSTOM_DSL_MUL_RE_NC = re.compile(r"^([0-9]*\.?[0-9]+)\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)$")
+_CUSTOM_DSL_MUL_RE_CN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\*\s*([0-9]*\.?[0-9]+)$")
+
+def parse_custom_strategy(text):
+    """Parse the DSL into a validated condition list. Returns (conditions, errors);
+    conditions is empty and errors non-empty when any line fails to validate —
+    callers must refuse to run a strategy with any error, not silently drop lines."""
+    conditions, errors = [], []
+    for lineno, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _CUSTOM_DSL_LINE_RE.match(line)
+        if not m:
+            errors.append(f"Line {lineno}: could not parse '{raw}'. Expected '<COLUMN> <op> <value>', e.g. 'RSI14 > 55'.")
+            continue
+        left_raw, op, rhs = m.group(1), m.group(2), m.group(3).strip()
+        left = left_raw.lower()
+        if left not in CUSTOM_DSL_COLUMNS:
+            errors.append(f"Line {lineno}: unknown column '{left_raw}'. Known columns: {', '.join(sorted(CUSTOM_DSL_COLUMNS))}.")
+            continue
+        try:
+            conditions.append({"left":left,"op":op,"rhs_kind":"number","rhs_value":float(rhs),"text":line})
+            continue
+        except ValueError:
+            pass
+        mm = _CUSTOM_DSL_MUL_RE_NC.match(rhs)
+        if mm:
+            mult,col = float(mm.group(1)), mm.group(2).lower()
+        else:
+            mm = _CUSTOM_DSL_MUL_RE_CN.match(rhs)
+            mult,col = (float(mm.group(2)), mm.group(1).lower()) if mm else (None,None)
+        if mm:
+            if col not in CUSTOM_DSL_COLUMNS:
+                errors.append(f"Line {lineno}: unknown column '{col}' on the right-hand side of '{raw}'.")
+                continue
+            conditions.append({"left":left,"op":op,"rhs_kind":"multiplier","rhs_value":(mult,col),"text":line})
+            continue
+        if rhs.lower() in CUSTOM_DSL_COLUMNS:
+            conditions.append({"left":left,"op":op,"rhs_kind":"column","rhs_value":rhs.lower(),"text":line})
+            continue
+        errors.append(f"Line {lineno}: right-hand side '{rhs}' is not a number, a known column, or 'NUMBER * COLUMN'.")
+    return conditions, errors
+
+def custom_strategy_signal(f, conditions):
+    """Vectorized AND of all parsed conditions against a features_fast() frame."""
+    if f.empty or not conditions:
+        return pd.Series(False, index=f.index)
+    sig = pd.Series(True, index=f.index)
+    for c in conditions:
+        left = f[c["left"]]
+        if c["rhs_kind"] == "number":
+            right = c["rhs_value"]
+        elif c["rhs_kind"] == "column":
+            right = f[c["rhs_value"]]
+        else:
+            mult, col = c["rhs_value"]
+            right = f[col] * mult
+        sig = sig & CUSTOM_DSL_OPS[c["op"]](left, right).fillna(False)
+    return sig
+
+
 # ========================= HTF DEMAND + FOOTPRINT =========================
 
 def _zone_score(x, lookback, tolerance=0.035):
@@ -2327,6 +2409,54 @@ def _professional_bt(data,strategies,threshold,start_date,end_date):
                         'Trend':parts.get('Trend',0),'Entry Quality':parts.get('Entry Quality',0),'Relative Strength':parts.get('Relative Strength',0),
                         'Regime':regime,'Safety':safe
                     })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+def _custom_strategy_backtest(data,conditions,start_date,end_date,sl_pct=0.07,target_r=3.0,threshold=0):
+    """Local-only walk-forward replay of a validated Custom Strategy DSL rule
+    set. Same architecture/columns as _professional_bt (S1-S4) so the result
+    feeds _learn_from_backtest() unmodified, tagged strategy='CUSTOM'."""
+    rows=[];start=pd.Timestamp(start_date);end=pd.Timestamp(end_date)
+    for ticker,df in data.items():
+        if len(df)<260:continue
+        try:
+            df=df.sort_index();f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
+            if f.empty:continue
+            avg_value,abnormal=_safety_fast_series(df)
+            sig=custom_strategy_signal(f,conditions).fillna(False).to_numpy()
+            for i in np.flatnonzero(sig):
+                dt=pd.Timestamp(f.index[i])
+                if dt<start or dt>end or i>=len(df)-1:continue
+                regime,_=_regime_from_row(f,i)
+                safe,_,_=_safety_from_row(avg_value,abnormal,i)
+                score,parts=_row_score(f,i,"CUSTOM",regime,safe)
+                if score<int(threshold):continue
+                entry_i=i+1; entry=float(df.close.iloc[entry_i])
+                if not np.isfinite(entry) or entry<=0:continue
+                stop=entry*(1-sl_pct);target=entry+target_r*(entry-stop);risk=entry-stop
+                last=min(len(df)-1,entry_i+60);outcome='TIMEOUT';exit_price=float(df.close.iloc[last]);held=last-entry_i
+                max_high=entry;min_low=entry
+                for j in range(entry_i,last+1):
+                    bar=df.iloc[j];max_high=max(max_high,float(bar.high));min_low=min(min_low,float(bar.low))
+                    if bar.low<=stop:
+                        outcome='LOSS';exit_price=stop;held=j-entry_i;break
+                    if bar.high>=target:
+                        outcome='WIN';exit_price=target;held=j-entry_i;break
+                gross_pct=(exit_price/entry-1)*100
+                return_pct=gross_pct-BT_COST_PCT
+                r_mult=return_pct/((risk/entry)*100) if risk>0 else 0
+                mfe=(max_high/entry-1)*100;mae=(min_low/entry-1)*100
+                rows.append({
+                    'Date':dt.date(),'Ticker':str(ticker).replace('.NS',''),'Strategy':'CUSTOM',
+                    'Entry Date':df.index[entry_i].date(),'Exit Date':df.index[entry_i+held].date(),
+                    'Score':int(score),'≥85 Gate':bool(score>=85),'Entry':round(entry,2),'SL':round(stop,2),'Target':round(target,2),
+                    'Exit':round(exit_price,2),'Outcome':outcome,'Return %':round(return_pct,2),'R':round(float(r_mult),2),
+                    'Holding Bars':int(held),'MFE %':round(mfe,2),'MAE %':round(mae,2),
+                    'Strategy Score':parts.get('Strategy',0),'HTF':parts.get('HTF Demand',0),'Footprint':parts.get('Footprint',0),
+                    'Trend':parts.get('Trend',0),'Entry Quality':parts.get('Entry Quality',0),'Relative Strength':parts.get('Relative Strength',0),
+                    'Regime':regime,'Safety':safe
+                })
         except Exception:
             continue
     return pd.DataFrame(rows)
@@ -4025,10 +4155,106 @@ with tabs[10]:
 
     st.divider()
     st.subheader("Strategy Rules")
-    st.text_area("Paste your strategy",height=180,key="custom_strategy",
-                 placeholder="Example: RSI > 55, close > 200 EMA, volume > 1.5x 20-day average. SL 7%, target 3R.")
+    st.caption(
+        "Whitelist rule DSL — never eval()/exec(). One condition per line, all lines AND-combined. "
+        "Format: `<COLUMN> <op> <value>` where op is one of > >= < <= == != and value is a number, "
+        "another known column, or `NUMBER * COLUMN`. Known columns: "
+        + ", ".join(sorted(CUSTOM_DSL_COLUMNS)) + "."
+    )
+    st.text_area(
+        "Strategy rules",height=160,key="custom_strategy",
+        placeholder="RSI14 > 55\nCLOSE > EMA200\nVOLUME > 1.5 * VOL20",
+        label_visibility="collapsed"
+    )
     if st.button("🔍 Validate Strategy",key="custom_validate"):
-        st.success("Strategy received. Convert ambiguous language into explicit testable rules before backtesting.")
+        _,verr=parse_custom_strategy(st.session_state.get("custom_strategy",""))
+        if verr:
+            for e in verr: st.error(e)
+        else:
+            st.success("Strategy is valid. Ready to scan + backtest below.")
+
+    st.markdown("### Indian Stocks — local-only scan + backtest")
+    st.caption("Reuses the same local candle cache, fast features, and O(1) regime/safety lookups as the Daily Scanner and Backtest tabs. Makes zero Dhan/API calls.")
+    cc1,cc2,cc3,cc4=st.columns(4)
+    custom_universes=cc1.multiselect(
+        "Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        default=["Nifty 500"],key="custom_universe"
+    )
+    custom_period=cc2.selectbox("Backtest span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="custom_period")
+    custom_sl_pct=cc3.slider("Stop loss %",1.0,15.0,7.0,0.5,key="custom_sl_pct")/100
+    custom_target_r=cc4.number_input("Target (R multiple)",1.0,10.0,3.0,0.5,key="custom_target_r")
+
+    if st.button("🔬 Run Custom Strategy Scan + Backtest",type="primary",key="custom_run"):
+        conditions,cerr=parse_custom_strategy(st.session_state.get("custom_strategy",""))
+        if cerr:
+            for e in cerr: st.error(e)
+        elif not conditions:
+            st.warning("Enter at least one rule line before running.")
+        elif not custom_universes:
+            st.warning("Select at least one universe.")
+        else:
+            try:
+                tickers=sorted(set(sum([index_universe(u) for u in custom_universes],[])))
+            except Exception as e:
+                st.error(f"Could not load index universe constituents (network/data issue): {e}")
+                tickers=[]
+            if tickers:
+                cstart,cend=_bt_period(custom_period)
+                status=local_backtest_status(tickers,cstart,cend)
+                ready=int(status.Ready.sum()) if not status.empty else 0
+                if ready==0:
+                    st.error("No local candle data for this universe. Use Data Manager → SYNC ONLY MISSING DATA first.")
+                else:
+                    try:
+                        with st.spinner(f"Replaying {ready:,} locally cached stocks against the custom rules..."):
+                            data=load_local_backtest_data(tickers,cstart,cend)
+                            cbt=_custom_strategy_backtest(data,conditions,cstart,cend,custom_sl_pct,float(custom_target_r))
+                        st.session_state["custom_backtest"]=cbt
+                        learned=_learn_from_backtest(cbt)
+                        st.success(f"{len(cbt):,} historical CUSTOM setups found; {learned:,} saved to the learning database as strategy='CUSTOM'.")
+
+                        st.subheader("📡 Today's Custom Strategy Candidates")
+                        ml_model_custom=train_win_probability_model("INDIA")
+                        today_rows=[]
+                        for ticker,df in data.items():
+                            if len(df)<260: continue
+                            f=features_fast(str(ticker),df).replace([np.inf,-np.inf],np.nan)
+                            if f.empty or len(f)<260: continue
+                            if not bool(custom_strategy_signal(f,conditions).iloc[-1]): continue
+                            i=len(f)-1
+                            avg_value,abnormal=_safety_fast_series(df)
+                            regime,_=_regime_from_row(f,i)
+                            safe,safe_status,_=_safety_from_row(avg_value,abnormal,i)
+                            score,parts=final_setup_score(f,"CUSTOM",regime,safe)
+                            entry=float(f.close.iloc[-1]); stop=entry*(1-custom_sl_pct)
+                            target=entry+float(custom_target_r)*(entry-stop)
+                            row={
+                                "Ticker":str(ticker).replace(".NS",""),"Score":score,"Regime":regime,
+                                "Safety":safe_status,"Entry":round(entry,2),"Stop":round(stop,2),
+                                "Target":round(target,2),"HTF Score":parts["HTF Demand"],
+                                "Footprint Score":parts["Footprint"],"Entry Quality":parts["Entry Quality"],
+                                "Relative Strength":parts["Relative Strength"],"Strategy":"CUSTOM",
+                            }
+                            wp=ml_win_probability(ml_model_custom,row)
+                            if pd.isna(wp): wp=fallback_win_probability("INDIA","CUSTOM",float(score))
+                            row["Win Probability %"]=wp
+                            today_rows.append(row)
+                        if today_rows:
+                            st.dataframe(pd.DataFrame(today_rows).sort_values("Score",ascending=False),use_container_width=True,hide_index=True)
+                        else:
+                            st.info("No stock currently satisfies every custom rule.")
+                    except Exception as ex:
+                        st.error(f"Custom strategy backtest error: {ex}")
+
+    cbt=st.session_state.get("custom_backtest",pd.DataFrame())
+    if not cbt.empty:
+        st.subheader("🏆 Custom Strategy — Historical Results")
+        a,b,c,d=st.columns(4)
+        a.metric("Trades",len(cbt))
+        b.metric("Win %",f"{(cbt.Outcome.str.upper()=='WIN').mean()*100:.1f}%")
+        c.metric("Avg R",f"{cbt.R.mean():.2f}")
+        d.metric("Total R",f"{cbt.R.sum():.2f}")
+        st.dataframe(cbt.sort_values(['Score','Date'],ascending=[False,False]),use_container_width=True,hide_index=True)
 
 st.markdown("---")
 st.caption("Research / paper-testing system. Real-money Dhan order execution is intentionally disabled.")
