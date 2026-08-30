@@ -3716,13 +3716,20 @@ def forward_summary_table():
     finally:
         con.close()
     if q.empty:return q
+    # SQLite AVG()/SUM() return NULL when every row is still ACTIVE (no closed
+    # trades yet for that strategy), which pd.read_sql_query surfaces as an
+    # object-dtype column of Nones rather than numeric NaN — .round() raises
+    # TypeError on an object dtype, so coerce to numeric first.
+    for col in ["AvgR","TotalR","AvgROIProxy","AvgMFE","AvgMAE"]:
+        q[col]=pd.to_numeric(q[col],errors="coerce")
     q["Win %"]=np.where((q["Wins"]+q["Losses"])>0,q["Wins"]/(q["Wins"]+q["Losses"])*100,np.nan)
     q["Status"]=np.where(q["Closed"]<3,"BUILDING SAMPLE",
                          np.where(q["AvgR"]>0.75,"STRONG",
                                   np.where(q["AvgR"]>0.2,"POSITIVE",
                                            np.where(q["AvgR"]>-0.1,"NEUTRAL","WEAK"))))
     q["AvgR"]=q["AvgR"].round(3);q["TotalR"]=q["TotalR"].round(2)
-    q["Win %"]=q["Win %"].round(1);q["AvgMFE"]=q["AvgMFE"].round(2);q["AvgMAE"]=q["AvgMAE"].round(2)
+    q["Win %"]=pd.to_numeric(q["Win %"],errors="coerce").round(1)
+    q["AvgMFE"]=q["AvgMFE"].round(2);q["AvgMAE"]=q["AvgMAE"].round(2)
     return q
 
 
@@ -3890,7 +3897,10 @@ with tabs[3]:
         st.subheader("📋 Forward Positions")
         st.dataframe(ft,use_container_width=True,hide_index=True)
         st.subheader("🏆 Strategy Performance Scorecard")
-        fs=forward_summary_table()
+        try:
+            fs=forward_summary_table()
+        except Exception as e:
+            fs=pd.DataFrame(); st.error(f"Strategy scorecard error: {e}")
         if not fs.empty: st.dataframe(fs,use_container_width=True,hide_index=True)
         else: st.info("Waiting for completed forward-test outcomes.")
         st.subheader("🧠 What is being learned")
@@ -3904,7 +3914,10 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("🧠 Adaptive Market Learning")
-    fwd=forward_summary_table()
+    try:
+        fwd=forward_summary_table()
+    except Exception as e:
+        fwd=pd.DataFrame(); st.error(f"Forward strategy leaderboard error: {e}")
     if not fwd.empty:
         st.subheader("🏆 Forward Strategy Leaderboard")
         st.dataframe(fwd,use_container_width=True,hide_index=True)
