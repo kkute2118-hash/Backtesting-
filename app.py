@@ -4390,12 +4390,14 @@ with tabs[10]:
                     st.error(str(e))
             if st.button("⚡ Get Live Price",key="td_live_price"):
                 try:
-                    px=td_price(symbol)
+                    with st.spinner(f"Fetching live price for {symbol}..."):
+                        px=td_price(symbol)
                     st.session_state["td_live_px"]=px
                 except Exception as e:
                     st.error(str(e))
             if st.button("🧪 Test Symbol",key="td_test_symbol"):
-                ok,n,msg=td_validate_symbol(symbol,market)
+                with st.spinner(f"Validating {symbol}..."):
+                    ok,n,msg=td_validate_symbol(symbol,market)
                 if ok: st.success(f"Working: {symbol} — {n} recent daily candles available.")
                 else: st.error(f"Symbol test failed: {msg}")
 
