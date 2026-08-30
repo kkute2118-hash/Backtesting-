@@ -1352,7 +1352,7 @@ CUSTOM_DSL_COLUMNS = {
     "ema10","ema20","ema50","ema200","ema250","vol20","vol30","rsi14","relvol","atr14",
     "wrsi14","wema20","wema50","wclose",
     "mclose","mopen","mhigh","mlow","mrsi14","mema10","mema15","mema20","mmom","mmax20",
-    "mprevclose","mprevhigh","mprevlow","m_cross_count20","m_cross_10_20",
+    "mprevclose","mprevhigh","mprevlow","m_cross_count20","m_cross_10_20","m_cross_or_reclaim",
 }
 CUSTOM_DSL_OPS = {
     ">": lambda a,b: a>b, ">=": lambda a,b: a>=b,
@@ -2133,6 +2133,13 @@ def features_fast(symbol, df):
     fields={"mclose":"close","mopen":"open","mhigh":"high","mlow":"low","mrsi14":"rsi14","mema10":"ema10","mema15":"ema15","mema20":"ema20","mmom":"mom","mmax20":"mom20max","mprevclose":"prev_close","mprevhigh":"prev_high","mprevlow":"prev_low","m_cross_count20":"cross_count20","m_cross_10_20":"cross_10_20"}
     for out,src in fields.items():
         x[out]=[mo_map.get(p,{}).get(src,np.nan) for p in mo_key]
+    # Exact S4's "monthly cross count>=1 OR monthly reclaim" gate as a single
+    # column, so the AND-only Custom Strategy DSL can express it exactly
+    # instead of approximating with the cross-count condition alone.
+    x["m_cross_or_reclaim"]=(
+        (x.m_cross_count20>=1) |
+        ((x.mclose>x.mema10)&(x.mprevclose<=x.mema10))
+    ).astype(float)
     x=x.replace([np.inf,-np.inf],np.nan)
     try:_save_feature_snapshot(symbol,x)
     except Exception:pass
@@ -3056,13 +3063,10 @@ def s4_extension_bucket_report(cal_df):
 
 def s4_custom_dsl_from_bucket(bucket_label):
     """Render a Custom Strategy DSL rule set replicating S4's other
-    conditions with the learned EMA20 distance swapped in for the fixed 3%
-    rule. The DSL is AND-only, so the 'OR reclaim' branch of exact S4 is
-    approximated by the monthly-cross-count condition alone - this is a
-    slightly narrower (fewer false positives, some missed reclaim-only
-    setups), not identical, scan."""
+    conditions exactly (via the m_cross_or_reclaim gate column) with the
+    learned EMA20 distance swapped in for the fixed 3% rule."""
     lo, hi, _ = next(b for b in S4_EXTENSION_BUCKETS if b[2] == bucket_label)
-    lines = ["MMOM >= 20", "MRSI14 >= 50", "MEMA10 >= MEMA20", "VOL30 >= 50000", "CLOSE >= 20", "M_CROSS_COUNT20 >= 1"]
+    lines = ["MMOM >= 20", "MRSI14 >= 50", "MEMA10 >= MEMA20", "VOL30 >= 50000", "CLOSE >= 20", "M_CROSS_OR_RECLAIM >= 1"]
     if hi < 1000.0:
         lines.append(f"CLOSE <= {round(1+hi/100,3)} * EMA20")
     if lo > -100.0:
@@ -4342,11 +4346,7 @@ These thresholds are research heuristics—not guaranteed probabilities. The sys
                 st.caption(f"For comparison, the exact-S4 0-3% rule: {exact_row.iloc[0]['WinRate']}% win rate, {exact_row.iloc[0]['AvgR']} avg R over {int(exact_row.iloc[0]['Samples'])} trades.")
             st.markdown("#### Paste this into Custom Strategy Lab to scan with the learned threshold instead of the fixed 3% rule")
             st.code(s4_custom_dsl_from_bucket(str(best["Bucket"])), language="text")
-            st.caption(
-                "This replicates S4's other rules but swaps the EMA20 distance for the bucket above. "
-                "The DSL is AND-only, so exact S4's 'OR monthly reclaim' branch is approximated here by "
-                "the monthly-cross-count condition alone — this scan is narrower than exact S4, not identical."
-            )
+            st.caption("This exactly replicates every other S4 rule and swaps only the EMA20 distance for the bucket above.")
 
 with tabs[10]:
     st.subheader("🧪 Custom Strategy Lab")
