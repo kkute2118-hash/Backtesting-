@@ -4033,8 +4033,18 @@ with tabs[1]:
                         "INDIA", f"S{s}", float(score)
                     )
                     learned_rank = float(np.clip(score + edge_r * 2.0, 0, 100))
+                    # Per-component adaptive weighting (adaptive_candidate_score) was
+                    # built but never wired into the scan loop - it was computed
+                    # nowhere and had zero effect. This does NOT change which stocks
+                    # qualify (already decided by `signal` above) or replace Learned
+                    # Rank; it's blended 70% raw / 30% learned inside the function
+                    # itself, shown as an independent extra column for comparison.
+                    adaptive_score = adaptive_candidate_score(
+                        float(score), "INDIA", f"S{s}", parts
+                    )
                     row = {
                         "Score": score,
+                        "Adaptive Score": round(adaptive_score, 2),
                         "Learned Rank": round(learned_rank, 2),
                         "Historical Edge R": round(edge_r, 3),
                         "Learning Confidence": learn_conf,
@@ -4416,9 +4426,10 @@ def refresh_forward_positions():
                FROM forward_tests WHERE status='ACTIVE' ORDER BY created_at DESC""",con
         )
     finally: con.close()
-    if active.empty:return 0
+    if active.empty:return 0,0
 
     today=last_expected_nse_session(); updates=0
+    newly_closed=[]
     con=_db()
     try:
         for r in active.itertuples():
@@ -4459,13 +4470,29 @@ def refresh_forward_positions():
                     int(r.id),s,str(r.strategy),str(signal_date),entry,exitp,result_r,
                     (exitp/entry-1)*100,status,held,mfe,mae,str(r.regime),float(r.score),closed_at
                 ))
+                newly_closed.append({
+                    "symbol": s, "strategy": str(r.strategy), "signal_time": str(signal_date),
+                    "score": float(r.score), "regime": str(r.regime), "entry": entry,
+                    "exit_price": exitp, "result_r": result_r,
+                    "outcome": "WIN" if status == "TARGET" else "LOSS" if status == "STOP" else status,
+                    "holding_minutes": held * 24 * 60,  # daily-bar strategy; bars converted to minutes for schema consistency
+                })
             else:
                 con.execute("""UPDATE forward_tests SET ltp=?,mfe=?,mae=?,updated_at=? WHERE id=?""",
                             (close,mfe,mae,datetime.now().isoformat(timespec="seconds"),int(r.id)))
             updates+=1
         con.commit()
     finally: con.close()
-    return updates
+
+    # Feed the learning DB only after the connection above is committed and
+    # closed, so this never contends with it for the SQLite write lock.
+    # Previously forward-test outcomes closed here (forward_tests/forward_results)
+    # but never reached learning_observations at all - the learning engine only
+    # ever learned from backtests, never from real forward performance.
+    for trade in newly_closed:
+        _record_learning_trade("INDIA", trade, source="forward")
+
+    return updates, len(newly_closed)
 
 def forward_summary_table():
     """Persistent strategy scorecard from forward-test records."""
@@ -4646,7 +4673,9 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
-    changed=refresh_forward_positions()
+    changed,newly_closed_count=refresh_forward_positions()
+    if newly_closed_count:
+        st.success(f"✅ {newly_closed_count} forward test(s) resolved this refresh and recorded to the learning database.")
     st.caption("Every scanner-selected ≥gate signal is stored in SQLite with its original conditions. Refreshing the page does not clear it.")
     con=_db()
     try:
