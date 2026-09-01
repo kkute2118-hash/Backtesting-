@@ -328,11 +328,25 @@ streamlit run app.py
 ---
 🔑 Streamlit Secrets
 Dhan credentials should be stored in Streamlit Secrets rather than hard-coded in Python.
-Required Dhan configuration:
+Dhan access tokens expire every 24 hours (SEBI/exchange requirement) with no refresh-token
+flow for a bare access token. Two ways to configure Dhan:
+
+Manual (token must be regenerated in Dhan's console and pasted here daily):
 ```toml
 DHAN_CLIENT_ID = "YOUR_DHAN_CLIENT_ID"
 DHAN_ACCESS_TOKEN = "YOUR_DHAN_ACCESS_TOKEN"
 ```
+Automatic renewal (recommended — the app mints a fresh token itself via headless
+PIN+TOTP login once the cached one is ~23h old):
+```toml
+DHAN_CLIENT_ID = "YOUR_DHAN_CLIENT_ID"
+DHAN_PIN = "YOUR_DHAN_TRADING_PIN"
+DHAN_TOTP_SECRET = "YOUR_DHAN_TOTP_BASE32_SECRET"
+```
+`DHAN_TOTP_SECRET` is the base32 secret shown once when enabling TOTP-based API login in
+Dhan's console (the same kind of secret an authenticator app would be seeded with) — not a
+6-digit code. If both PIN+TOTP and a manual access token are present, PIN+TOTP auto-renewal
+takes priority; the manual token remains a fallback if PIN+TOTP secrets are ever removed.
 For Twelve Data features:
 ```toml
 TWELVEDATA_API_KEY = "YOUR_TWELVE_DATA_API_KEY"
