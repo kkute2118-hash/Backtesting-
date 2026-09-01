@@ -46,15 +46,100 @@ _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
 _DHAN_LAST_DATA_ERRORS=[]
 
-def dhan_configured():
+# Dhan access tokens are only valid 24h (SEBI/exchange requirement) with no
+# refresh-token flow for a bare access token - PIN+TOTP (or a browser OAuth
+# login) is required to mint a new one. If DHAN_PIN and DHAN_TOTP_SECRET are
+# configured, the app renews the token itself once the cached one is older
+# than DHAN_TOKEN_MAX_AGE_HOURS, instead of a manual daily Secrets paste.
+# DHAN_ACCESS_TOKEN remains supported as a manual fallback when PIN+TOTP
+# aren't configured.
+DHAN_TOKEN_MAX_AGE_HOURS = 23
+_DHAN_TOKEN_LOCK = threading.Lock()
+
+def _dhan_pin_totp_configured():
     try:
-        return bool(st.secrets["DHAN_CLIENT_ID"]) and bool(st.secrets["DHAN_ACCESS_TOKEN"])
+        return bool(st.secrets["DHAN_CLIENT_ID"]) and bool(st.secrets["DHAN_PIN"]) and bool(st.secrets["DHAN_TOTP_SECRET"])
     except Exception:
         return False
 
+def _dhan_manual_token_configured():
+    try:
+        return bool(st.secrets["DHAN_ACCESS_TOKEN"])
+    except Exception:
+        return False
+
+def dhan_configured():
+    try:
+        if not st.secrets["DHAN_CLIENT_ID"]:
+            return False
+    except Exception:
+        return False
+    return _dhan_pin_totp_configured() or _dhan_manual_token_configured()
+
+def _read_cached_dhan_token():
+    con=_db()
+    try:
+        row=con.execute("SELECT access_token,issued_at FROM dhan_token_cache WHERE id=1").fetchone()
+    finally:
+        con.close()
+    return (row[0],row[1]) if row else (None,None)
+
+def _write_cached_dhan_token(token):
+    con=_db()
+    try:
+        con.execute("""INSERT INTO dhan_token_cache(id,access_token,issued_at) VALUES(1,?,?)
+            ON CONFLICT(id) DO UPDATE SET access_token=excluded.access_token,issued_at=excluded.issued_at""",
+            (token,datetime.now().isoformat(timespec="seconds")))
+        con.commit()
+    finally:
+        con.close()
+
+def _dhan_generate_fresh_token():
+    """Headless PIN+TOTP login (no browser step). Requires DHAN_PIN and
+    DHAN_TOTP_SECRET (the base32 secret shown once when enabling TOTP-based
+    API login in Dhan's console) alongside DHAN_CLIENT_ID in Streamlit Secrets."""
+    import pyotp
+    from dhanhq import DhanLogin
+    code = pyotp.TOTP(str(st.secrets["DHAN_TOTP_SECRET"])).now()
+    login = DhanLogin(str(st.secrets["DHAN_CLIENT_ID"]))
+    result = login.generate_token(str(st.secrets["DHAN_PIN"]), code)
+    token = None
+    if isinstance(result, str):
+        token = result
+    elif isinstance(result, dict):
+        for key in ("accessToken", "access_token", "token"):
+            v = result.get(key)
+            if isinstance(v, str) and v:
+                token = v
+                break
+    if not token:
+        # Unknown response shape from the dhanhq SDK - fail loudly rather than
+        # silently caching a bad value. Whatever `result` actually looks like
+        # here tells us exactly which key name to add above.
+        raise RuntimeError(f"Dhan generate_token() returned an unrecognized response: {result!r}")
+    _write_cached_dhan_token(token)
+    return token
+
+def _dhan_ensure_fresh_token():
+    """Returns a valid Dhan access token, auto-renewing via PIN+TOTP if the
+    cached one is missing/expired. Falls back to a manually-pasted
+    DHAN_ACCESS_TOKEN secret when PIN+TOTP aren't configured."""
+    if not _dhan_pin_totp_configured():
+        return str(st.secrets["DHAN_ACCESS_TOKEN"])
+    with _DHAN_TOKEN_LOCK:
+        token, issued_at = _read_cached_dhan_token()
+        fresh = False
+        if token and issued_at:
+            try:
+                age_hours = (datetime.now() - datetime.fromisoformat(issued_at)).total_seconds() / 3600
+                fresh = age_hours < DHAN_TOKEN_MAX_AGE_HOURS
+            except Exception:
+                fresh = False
+        return token if fresh else _dhan_generate_fresh_token()
+
 def _dhan_headers():
     return {
-        "access-token":str(st.secrets["DHAN_ACCESS_TOKEN"]),
+        "access-token":_dhan_ensure_fresh_token(),
         "client-id":str(st.secrets["DHAN_CLIENT_ID"]),
         "Content-Type":"application/json","Accept":"application/json"
     }
@@ -64,6 +149,8 @@ def _db():
     con.execute("""CREATE TABLE IF NOT EXISTS candles(
         symbol TEXT NOT NULL, dt TEXT NOT NULL, open REAL, high REAL, low REAL,
         close REAL, volume REAL, PRIMARY KEY(symbol,dt))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS dhan_token_cache(
+        id INTEGER PRIMARY KEY CHECK (id=1), access_token TEXT, issued_at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS forward_tests(
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, symbol TEXT,
         strategy TEXT, score REAL, regime TEXT, entry REAL, sl REAL, target REAL,
@@ -4861,6 +4948,30 @@ with tabs[7]:
 with tabs[8]:
     st.subheader("💾 Dhan Data Manager")
     st.caption("Dhan is the primary Indian-equity market-data source. Historical candles are cached locally; backtests use the local dataset after it is built.")
+
+    # ---- Access token status (Dhan tokens expire every 24h) -------------------
+    st.markdown("### 🔑 Access Token Status")
+    if _dhan_pin_totp_configured():
+        _tok, _issued = _read_cached_dhan_token()
+        if _tok and _issued:
+            try:
+                _age_h = (datetime.now() - datetime.fromisoformat(_issued)).total_seconds() / 3600
+                st.success(f"🟢 Auto-renewal active (PIN+TOTP). Cached token is {_age_h:.1f}h old (renews automatically past {DHAN_TOKEN_MAX_AGE_HOURS}h).")
+            except Exception:
+                st.info("Auto-renewal active (PIN+TOTP). Token cached, age unknown.")
+        else:
+            st.info("Auto-renewal active (PIN+TOTP). No token generated yet — one will be minted on first Dhan call.")
+        if st.button("🔄 Force-renew token now", key="dhan_force_renew"):
+            with st.spinner("Generating a fresh Dhan access token via PIN+TOTP..."):
+                try:
+                    _dhan_generate_fresh_token()
+                    st.success("✅ New access token generated and cached.")
+                except Exception as e:
+                    st.error(f"Token renewal failed: {e}")
+    elif _dhan_manual_token_configured():
+        st.warning("Using a manually-pasted DHAN_ACCESS_TOKEN. Dhan tokens expire every 24h — you'll need to regenerate it in Dhan's console and update Streamlit Secrets daily. Add DHAN_PIN and DHAN_TOTP_SECRET to Secrets to switch to automatic renewal.")
+    else:
+        st.error("No Dhan credentials configured. Add DHAN_CLIENT_ID plus either (DHAN_PIN + DHAN_TOTP_SECRET) for auto-renewal, or DHAN_ACCESS_TOKEN for manual daily renewal, to Streamlit Secrets.")
 
     # ---- Explicit, read-only Dhan health check --------------------------------
     st.markdown("### 🔌 Dhan Connection Test")
