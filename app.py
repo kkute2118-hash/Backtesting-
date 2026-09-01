@@ -14,6 +14,8 @@ from datetime import date, timedelta, datetime
 from pathlib import Path
 import math
 import bisect
+import os
+import base64
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
@@ -41,6 +43,97 @@ def index_universe(name):
 # ========================= DHAN PERSISTENT DATA ENGINE =========================
 DHAN_BASE_URL="https://api.dhan.co/v2"
 DATA_DB="market_data.sqlite3"
+
+# ---- GitHub-based DB backup/restore (Tier 1 fix for Streamlit Cloud's
+# ephemeral filesystem: every reboot/redeploy clones a fresh container from
+# GitHub, and DATA_DB is not committed to git, so accumulated learning data
+# would otherwise vanish on any restart). This is a stopgap, not a permanent
+# architecture - it commits a binary SQLite file to git on every backup,
+# which will bloat the repo's history over months. A hosted SQLite-compatible
+# DB (e.g. Turso) is the real long-term fix; this just prevents data loss now.
+GITHUB_BACKUP_PATH = "backups/market_data.sqlite3"
+
+def _github_configured():
+    try:
+        return bool(st.secrets.get("GITHUB_TOKEN")) and bool(st.secrets.get("GITHUB_REPO"))
+    except Exception:
+        return False
+
+def _github_headers():
+    return {
+        "Authorization": f"token {st.secrets['GITHUB_TOKEN']}",
+        "Accept": "application/vnd.github+json",
+    }
+
+def restore_db_from_github():
+    """Call once at app startup, before any _db() call. If the local DB file
+    is missing or empty, pulls the last backup from GitHub so learning data
+    survives a Streamlit Cloud reboot. Never raises - a failed restore just
+    means the app starts fresh, same as today's behavior without this patch."""
+    if not _github_configured():
+        return False
+    if os.path.exists(DATA_DB) and os.path.getsize(DATA_DB) > 0:
+        return False  # local file already present this container session
+    try:
+        repo = st.secrets["GITHUB_REPO"]
+        url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
+        r = requests.get(url, headers=_github_headers(), timeout=30)
+        if r.status_code != 200:
+            return False  # no backup exists yet, or auth issue - fail quiet
+        content_b64 = r.json().get("content", "")
+        raw = base64.b64decode(content_b64)
+        with open(DATA_DB, "wb") as f:
+            f.write(raw)
+        return True
+    except Exception:
+        return False
+
+def backup_db_to_github():
+    """Uploads the current local DB file to GitHub, overwriting the last
+    backup. Returns True on success, False otherwise (never raises)."""
+    if not _github_configured():
+        return False
+    if not os.path.exists(DATA_DB):
+        return False
+    try:
+        repo = st.secrets["GITHUB_REPO"]
+        url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
+        with open(DATA_DB, "rb") as f:
+            content_b64 = base64.b64encode(f.read()).decode()
+        # Need the current file's SHA if it already exists, else GitHub
+        # rejects the update as a conflicting create.
+        sha = None
+        r = requests.get(url, headers=_github_headers(), timeout=30)
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+        payload = {
+            "message": f"Auto-backup DB {datetime.now().isoformat(timespec='seconds')}",
+            "content": content_b64,
+        }
+        if sha:
+            payload["sha"] = sha
+        put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=60)
+        return put_r.status_code in (200, 201)
+    except Exception:
+        return False
+
+def maybe_backup_db(min_interval_minutes=15):
+    """Rate-limited backup trigger - call after any write worth protecting
+    (a learning trade recorded, a forward test closed, a candidate added).
+    Only actually uploads if enough time has passed since the last backup
+    this session, so routine activity doesn't spam GitHub commits."""
+    key = "_last_db_backup_ts"
+    last = st.session_state.get(key)
+    now = datetime.now()
+    if last is not None and (now - last).total_seconds() < min_interval_minutes * 60:
+        return False
+    ok = backup_db_to_github()
+    if ok:
+        st.session_state[key] = now
+    return ok
+
+restore_db_from_github()
+
 DHAN_MIN_INTERVAL=0.205  # stay below the documented 5 data-API requests/sec
 _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
@@ -1583,6 +1676,8 @@ def add_smc_forward_candidates(candidates):
         con.commit()
     finally:
         con.close()
+    if added:
+        maybe_backup_db()
     return added
 
 
@@ -2538,6 +2633,7 @@ def _record_learning_trade(market, row, source="forward"):
             source
         ))
         con.commit()
+        maybe_backup_db()
     except Exception:
         # Learning must never break scanning/forward monitoring.
         pass
@@ -3346,6 +3442,8 @@ def _learn_from_backtest(bt):
             except Exception:continue
         con.commit()
     finally:con.close()
+    if n:
+        maybe_backup_db()
     return n
 
 def adaptive_edge_table(market="INDIA"):
@@ -3917,6 +4015,8 @@ def add_forward_candidates(candidates):
         con.commit()
     finally:
         con.close()
+    if added:
+        maybe_backup_db()
     return added
 
 # ========================= UI =========================
@@ -4972,6 +5072,19 @@ with tabs[8]:
         st.warning("Using a manually-pasted DHAN_ACCESS_TOKEN. Dhan tokens expire every 24h — you'll need to regenerate it in Dhan's console and update Streamlit Secrets daily. Add DHAN_PIN and DHAN_TOTP_SECRET to Secrets to switch to automatic renewal.")
     else:
         st.error("No Dhan credentials configured. Add DHAN_CLIENT_ID plus either (DHAN_PIN + DHAN_TOTP_SECRET) for auto-renewal, or DHAN_ACCESS_TOKEN for manual daily renewal, to Streamlit Secrets.")
+
+    # ---- GitHub DB backup status (Streamlit Cloud's filesystem is ephemeral) --
+    st.markdown("### 🗄️ Database Backup (GitHub)")
+    if _github_configured():
+        st.success("🟢 GitHub backup configured — learning data is protected against Streamlit Cloud reboots. Auto-backs up after every closed forward test, learned backtest batch, and added candidate (rate-limited to once per 15 minutes).")
+    else:
+        st.error("🔴 GitHub backup NOT configured — accumulated learning data will be LOST on the next Streamlit Cloud reboot/redeploy. Add GITHUB_TOKEN and GITHUB_REPO to Streamlit Secrets to enable it.")
+    if st.button("💾 Backup DB Now", key="db_backup_now"):
+        with st.spinner("Uploading market_data.sqlite3 to GitHub..."):
+            if backup_db_to_github():
+                st.success("✅ Backed up.")
+            else:
+                st.error("Backup failed — check GITHUB_TOKEN/GITHUB_REPO in Streamlit Secrets, and that the token has Contents: Read and write access to this repo.")
 
     # ---- Explicit, read-only Dhan health check --------------------------------
     st.markdown("### 🔌 Dhan Connection Test")
