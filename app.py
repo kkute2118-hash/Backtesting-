@@ -208,6 +208,11 @@ def _db():
         status TEXT,
         UNIQUE(forward_id,dt)
     )""")
+    con.execute("""CREATE TABLE IF NOT EXISTS sync_diagnostics(
+        symbol TEXT PRIMARY KEY, checked_at TEXT, bar_count INTEGER, reason TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS sync_freshness_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, synced_at TEXT,
+        most_recent_date_pulled TEXT, symbols_updated INTEGER)""")
     con.execute("""CREATE TABLE IF NOT EXISTS forward_results(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         forward_id INTEGER NOT NULL UNIQUE,
@@ -273,6 +278,78 @@ def last_expected_nse_session(day=None):
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
+
+
+# NSE cash-market close, IST wall-clock. The whole app already treats
+# datetime.now()/date.today() as local wall-clock time (see the Dhan token
+# cache above), so this follows the same convention rather than introducing
+# timezone-aware datetimes into a codebase that has none.
+NSE_MARKET_CLOSE_HOUR = 15
+NSE_MARKET_CLOSE_MINUTE = 30
+
+def latest_completed_nse_session(now=None):
+    """Most recently *completed* NSE cash session: weekday-aware (via
+    last_expected_nse_session) AND time-of-day aware (rolls back one more
+    day before today's 15:30 IST close). Distinct from
+    last_expected_nse_session(), which is date-only and used for sync/backtest
+    date-range bounds where an off-by-one before market close is harmless.
+
+    `now` is an injectable datetime for testing; defaults to wall-clock now.
+    """
+    now = now if now is not None else datetime.now()
+    close_today = now.replace(hour=NSE_MARKET_CLOSE_HOUR, minute=NSE_MARKET_CLOSE_MINUTE,
+                               second=0, microsecond=0)
+    d = now.date()
+    if now < close_today:
+        d -= timedelta(days=1)
+    return last_expected_nse_session(d)
+
+
+def data_freshness_status(tickers, now=None):
+    """Compare the MAX cached candle date across `tickers` against the most
+    recently completed NSE session. Read-only diagnostics — never syncs."""
+    expected = latest_completed_nse_session(now)
+    symbols = sorted({str(t).upper().replace(".NS", "") for t in tickers}) if tickers else []
+    latest = None
+    if symbols:
+        con = _db()
+        try:
+            qmarks = ",".join(["?"] * len(symbols))
+            row = con.execute(f"SELECT MAX(dt) FROM candles WHERE symbol IN ({qmarks})", symbols).fetchone()
+        finally:
+            con.close()
+        if row and row[0]:
+            latest = pd.Timestamp(row[0]).date()
+    if latest is None:
+        return {"expected": expected, "latest": None, "current": False, "days_behind": None}
+    if latest >= expected:
+        days_behind = 0
+    else:
+        days_behind = len(pd.bdate_range(start=latest + timedelta(days=1), end=expected))
+    return {"expected": expected, "latest": latest, "current": latest >= expected, "days_behind": int(days_behind)}
+
+
+def render_data_freshness_banner(tickers, now=None):
+    """Prominent, read-only freshness indicator for the Scanner/Backtest tabs.
+    Visibility only — per the app's explicit-sync architecture, this never
+    triggers a sync itself."""
+    if not tickers:
+        st.info("Select a universe to check local data freshness.")
+        return None
+    status = data_freshness_status(tickers, now=now)
+    if status["latest"] is None:
+        st.error("⚠️ No local candle data found for this universe yet. Run Data Manager → SYNC ONLY MISSING DATA before scanning.")
+    elif status["current"]:
+        st.success(f"✅ Data current as of {status['latest'].strftime('%d-%b-%Y')}")
+    else:
+        n = status["days_behind"]
+        unit = "day" if n == 1 else "days"
+        st.warning(
+            f"⚠️ Local data is {n} {unit} behind — latest cached session is "
+            f"{status['latest'].strftime('%d-%b-%Y')}, but {status['expected'].strftime('%d-%b-%Y')} "
+            "has already closed. Run SYNC ONLY MISSING DATA before scanning, or signals will be based on stale prices."
+        )
+    return status
 
 
 def dhan_history(symbol,start_date,end_date):
@@ -3085,6 +3162,102 @@ def sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5):
     data_start=_bt_required_data_start(start_date)
     return download_prices(tuple(tickers),data_start,end_date,max_workers=max_workers)
 
+
+def compute_and_store_sync_diagnostics(tickers):
+    """For every symbol below the 260-bar backtest-readiness threshold, work
+    out WHY and persist it to sync_diagnostics (upserted per symbol) so the
+    Data Manager can show an actionable list instead of a silent gap.
+
+    Distinguishes three root causes:
+      - not present in the Dhan instrument master at all (symbol mismatch,
+        e.g. index reconstitution renamed/added/removed a constituent)
+      - a real Dhan API error recorded on the last sync attempt
+      - a successful download that simply doesn't have 260 bars yet
+        (e.g. a recently listed stock), or zero bars (never synced)
+    Never raises: a failure to reach the instrument master itself (e.g. no
+    network/credentials) is reported as a reason, not swallowed.
+    """
+    symbols = sorted({str(t).upper().replace(".NS", "") for t in tickers}) if tickers else []
+    if not symbols:
+        return pd.DataFrame(columns=["symbol", "bar_count", "reason"])
+
+    con = _db()
+    try:
+        qmarks = ",".join(["?"] * len(symbols))
+        rows = con.execute(
+            f"SELECT symbol,COUNT(*) FROM candles WHERE symbol IN ({qmarks}) GROUP BY symbol", symbols
+        ).fetchall()
+    finally:
+        con.close()
+    bar_counts = {r[0]: r[1] for r in rows}
+    for s in symbols:
+        bar_counts.setdefault(s, 0)
+
+    below = [s for s in symbols if bar_counts[s] < 260]
+    if not below:
+        return pd.DataFrame(columns=["symbol", "bar_count", "reason"])
+
+    mapping = None
+    map_error = None
+    try:
+        mapping = dhan_map()
+    except Exception as exc:
+        map_error = str(exc)
+
+    err_by_symbol = {}
+    for e in _DHAN_LAST_DATA_ERRORS:
+        if ":" in e:
+            sym, msg = e.split(":", 1)
+            err_by_symbol[str(sym).strip().upper().replace(".NS", "")] = msg.strip()
+
+    out = []
+    checked_at = datetime.now().isoformat(timespec="seconds")
+    for s in below:
+        bc = bar_counts[s]
+        if mapping is not None and s not in mapping:
+            reason = "Not found in Dhan instrument master — likely a symbol mismatch (index reconstitution: addition/removal/rename)"
+        elif s in err_by_symbol:
+            reason = f"Dhan API error on last sync: {err_by_symbol[s]}"
+        elif mapping is None:
+            reason = f"Could not verify Dhan instrument-master mapping ({map_error})" if map_error else "Instrument-master mapping unavailable"
+        elif bc == 0:
+            reason = "No candles downloaded yet — symbol not synced"
+        else:
+            reason = f"Only {bc} trading bar(s) available in Dhan history (likely a recently listed stock)"
+        out.append({"symbol": s, "bar_count": bc, "reason": reason})
+
+    con = _db()
+    try:
+        for row in out:
+            con.execute(
+                """INSERT INTO sync_diagnostics(symbol,checked_at,bar_count,reason)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(symbol) DO UPDATE SET checked_at=excluded.checked_at,
+                       bar_count=excluded.bar_count, reason=excluded.reason""",
+                (row["symbol"], checked_at, row["bar_count"], row["reason"]),
+            )
+        con.commit()
+    finally:
+        con.close()
+    return pd.DataFrame(out).sort_values("bar_count").reset_index(drop=True)
+
+
+def _log_sync_freshness(most_recent_date_pulled, symbols_updated):
+    """One-line log entry: a sync pulled a new most-recent trading day's
+    candle for at least one symbol. Lets the app owner observe, over real
+    trading sessions, how soon after close Dhan's data actually becomes
+    available."""
+    con = _db()
+    try:
+        con.execute(
+            "INSERT INTO sync_freshness_log(synced_at,most_recent_date_pulled,symbols_updated) VALUES(?,?,?)",
+            (datetime.now().isoformat(timespec="seconds"), str(most_recent_date_pulled), int(symbols_updated)),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def local_backtest_status(tickers,start_date,end_date):
     """Single-batch readiness query against the persistent SQLite candle store."""
     data_start=_bt_required_data_start(start_date)
@@ -3993,6 +4166,17 @@ with tabs[1]:
         key="scan_result_mode_v4"
     )
 
+    st.markdown("### 📅 Data Freshness")
+    try:
+        _freshness_universe=set()
+        for u in universes:
+            _freshness_universe.update(index_universe(u))
+        scan_freshness_tickers=sorted(_freshness_universe)
+    except Exception as ex:
+        scan_freshness_tickers=[]
+        st.caption(f"Could not verify data freshness (index universe fetch failed): {ex}")
+    render_data_freshness_banner(scan_freshness_tickers)
+
     st.info(
         "Every selected stock is tested independently against every selected strategy. "
         "A stock appears under a strategy only when ALL rules of that strategy pass. "
@@ -4671,6 +4855,9 @@ with tabs[2]:
             st.error(f"Could not load index universe constituents (network/data issue): {e}")
     st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | local SQLite only | forward gate ≥{threshold}")
 
+    st.markdown("### 📅 Data Freshness")
+    render_data_freshness_banner(tickers)
+
     st.markdown("### 1️⃣ Local Dataset")
     status=local_backtest_status(tickers,start_date,end_date) if tickers else pd.DataFrame()
     ready=int(status.Ready.sum()) if not status.empty else 0
@@ -5040,6 +5227,15 @@ with tabs[8]:
     if st.button("🔄 SYNC ONLY MISSING DATA",type="primary",key="dm_sync_missing"):
         try:
             sync_tickers=index_universe(sync_universe)
+            sync_symbols=[str(t).upper().replace(".NS","") for t in sync_tickers]
+            con=_db()
+            try:
+                qmarks=",".join(["?"]*len(sync_symbols))
+                pre_max={r[0]:r[1] for r in con.execute(
+                    f"SELECT symbol,MAX(dt) FROM candles WHERE symbol IN ({qmarks})",sync_symbols).fetchall()}
+            finally:
+                con.close()
+
             with st.spinner(f"Checking local ranges and downloading ONLY missing data for {len(sync_tickers):,} stocks..."):
                 sync_missing_backtest_data(
                     sync_tickers,
@@ -5050,6 +5246,25 @@ with tabs[8]:
             st.success("Sync completed. Existing local candles were reused; only missing ranges were requested from Dhan.")
             if _DHAN_LAST_DATA_ERRORS:
                 st.warning("Recent Dhan data errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
+
+            # One-line freshness log: did this sync actually pull a NEW
+            # most-recent trading day's candle for at least one symbol?
+            con=_db()
+            try:
+                post_rows=con.execute(
+                    f"SELECT symbol,MAX(dt) FROM candles WHERE symbol IN ({qmarks}) GROUP BY symbol",
+                    sync_symbols).fetchall()
+            finally:
+                con.close()
+            post_max={r[0]:r[1] for r in post_rows}
+            newest_pulled=max((v for v in post_max.values() if v),default=None)
+            if newest_pulled:
+                advanced=sum(1 for s in sync_symbols if post_max.get(s)==newest_pulled and pre_max.get(s)!=newest_pulled)
+                if advanced>0:
+                    _log_sync_freshness(newest_pulled,advanced)
+
+            # Refresh the per-symbol sync-diagnostics table for this universe.
+            compute_and_store_sync_diagnostics(sync_tickers)
             st.rerun()
         except Exception as ex:
             st.error(f"Data sync error: {ex}")
@@ -5085,6 +5300,57 @@ with tabs[8]:
             width='stretch',
             hide_index=True
         )
+
+    with st.expander("⚠️ Sync Diagnostics — why are stocks below the 260-bar threshold?"):
+        st.caption(
+            "Backtest/Scanner silently drop any stock with fewer than 260 usable local bars. "
+            "This lists every such stock in the selected universe(s) with a specific reason, "
+            "computed fresh each time this expander is rendered and persisted to sync_diagnostics."
+        )
+        diag_universes=st.multiselect(
+            "Universe(s) to diagnose",
+            ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+            default=[sync_universe],
+            key="dm_diag_universes"
+        )
+        if diag_universes:
+            try:
+                diag_tickers=sorted(set(sum([index_universe(u) for u in diag_universes],[])))
+                diag_df=compute_and_store_sync_diagnostics(diag_tickers)
+                if diag_df.empty:
+                    st.success(f"✅ All {len(diag_tickers):,} stocks in the selected universe(s) have ≥260 local bars.")
+                else:
+                    st.warning(f"{len(diag_df):,} of {len(diag_tickers):,} stocks are below the 260-bar threshold.")
+                    st.dataframe(
+                        diag_df.rename(columns={"symbol":"Symbol","bar_count":"Bar Count","reason":"Reason"}),
+                        width='stretch',
+                        hide_index=True
+                    )
+            except Exception as ex:
+                st.error(f"Could not compute sync diagnostics (index universe fetch failed): {ex}")
+        else:
+            st.info("Select at least one universe to diagnose.")
+
+    with st.expander("🕒 Sync Freshness Log — last 10 syncs that pulled a new session"):
+        st.caption(
+            "One entry each time SYNC ONLY MISSING DATA successfully pulled a new most-recent "
+            "trading day's candle for at least one symbol. Use this to observe, over real "
+            "trading sessions, how soon after close Dhan's data actually becomes available."
+        )
+        con=_db()
+        try:
+            log_df=pd.read_sql_query(
+                """SELECT synced_at AS "Synced At", most_recent_date_pulled AS "Most Recent Date Pulled",
+                          symbols_updated AS "Symbols Updated"
+                   FROM sync_freshness_log ORDER BY id DESC LIMIT 10""",
+                con
+            )
+        finally:
+            con.close()
+        if log_df.empty:
+            st.info("No freshness-log entries yet. This fills in as syncs pull new trading sessions.")
+        else:
+            st.dataframe(log_df,width='stretch',hide_index=True)
 
     if st.button("⛔ Stop Live WebSocket",key="stop_ws"):
         stop_persistent_live_feed()
