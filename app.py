@@ -16,6 +16,7 @@ import math
 import bisect
 import os
 import base64
+import anthropic
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
@@ -1031,6 +1032,402 @@ def twelvedata_configured():
 
 def _td_headers():
     return {"Authorization":f"apikey {str(st.secrets['TWELVEDATA_API_KEY'])}"}
+
+
+# ============================================================================
+# FUNDAMENTAL SCREENS A & B (Phase 2) — universe-wide quality screens built
+# from raw Twelve Data financial statements, since Twelve Data has no direct
+# "Piotroski score" field.
+#
+# UNVERIFIED ASSUMPTION — FLAGGED, NOT SILENTLY FIXED: this sandbox has no
+# TWELVEDATA_API_KEY / live network access, so the exact field names inside
+# Twelve Data's income_statement/balance_sheet/cash_flow responses have never
+# been confirmed against a real response. _stmt_num() below tries several
+# plausible key spellings per field, but they are GUESSES, exactly like the
+# original patch this was built from. Do not trust a Piotroski score, ROCE
+# fallback, or Screen A/B pass/fail without spot-checking it against a real
+# filing first — see the st.info() caveat rendered in the Screen A/B tab.
+# ============================================================================
+
+def _td_get_statements(sym, outputsize=2):
+    """Fetch income statement, balance sheet, cash flow (annual periods).
+    outputsize defaults to 2 (enough for Screen A's YoY Piotroski checks);
+    Screen B's 5-year sales-growth check needs 5 years of history, so its
+    caller (run_fundamental_screens) passes outputsize=5 explicitly rather
+    than this function always requesting 5 years regardless of which screen
+    is running (that would cost extra Twelve Data API weight for history
+    Screen A never uses).
+    Returns dict with keys: income, balance, cashflow — each a list of
+    period dicts (most recent first) or [] on failure. Never raises.
+    """
+    if not twelvedata_configured():
+        return {"income": [], "balance": [], "cashflow": []}
+    out = {}
+    for key, ep in [("income", "income_statement"),
+                     ("balance", "balance_sheet"),
+                     ("cashflow", "cash_flow")]:
+        try:
+            j = _td_get(ep, {"symbol": sym, "exchange": "XNSE",
+                              "period": "annual", "outputsize": outputsize})
+            if isinstance(j, dict) and "_error" not in j:
+                rows = j.get(key + "_statement", j.get("statement", []))
+                if not rows:
+                    for v in j.values():
+                        if isinstance(v, list):
+                            rows = v
+                            break
+                out[key] = rows if isinstance(rows, list) else []
+            else:
+                out[key] = []
+        except Exception:
+            out[key] = []
+    return out
+
+
+def _stmt_num(period_dict, *keys):
+    """Pull a numeric field from one statement period, trying several
+    possible key spellings (Twelve Data naming varies by statement type)."""
+    if not isinstance(period_dict, dict):
+        return np.nan
+    flat = {}
+    for section in period_dict.values():
+        if isinstance(section, dict):
+            flat.update(section)
+    flat.update(period_dict)
+    for k in keys:
+        v = flat.get(k)
+        try:
+            if v is not None:
+                return float(v)
+        except Exception:
+            pass
+    return np.nan
+
+
+def piotroski_score(statements):
+    """Standard 9-point Piotroski F-Score using 2 years of statements.
+    Returns (score:int 0-9, detail:dict) — missing data scores that test 0
+    rather than raising, so a partial statement still returns a usable score.
+    """
+    inc = statements.get("income", [])
+    bal = statements.get("balance", [])
+    cf = statements.get("cashflow", [])
+    if len(inc) < 2 or len(bal) < 2 or len(cf) < 1:
+        return 0, {"error": "Insufficient statement history (need 2 years)"}
+
+    cur_inc, prev_inc = inc[0], inc[1]
+    cur_bal, prev_bal = bal[0], bal[1]
+    cur_cf = cf[0]
+
+    net_income = _stmt_num(cur_inc, "net_income", "netIncome")
+    total_assets_cur = _stmt_num(cur_bal, "total_assets", "totalAssets")
+    total_assets_prev = _stmt_num(prev_bal, "total_assets", "totalAssets")
+    cfo = _stmt_num(cur_cf, "operating_cash_flow", "cash_from_operating_activities")
+    lt_debt_cur = _stmt_num(cur_bal, "long_term_debt", "longTermDebt")
+    lt_debt_prev = _stmt_num(prev_bal, "long_term_debt", "longTermDebt")
+    cur_assets_cur = _stmt_num(cur_bal, "total_current_assets", "totalCurrentAssets")
+    cur_liab_cur = _stmt_num(cur_bal, "total_current_liabilities", "totalCurrentLiabilities")
+    cur_assets_prev = _stmt_num(prev_bal, "total_current_assets", "totalCurrentAssets")
+    cur_liab_prev = _stmt_num(prev_bal, "total_current_liabilities", "totalCurrentLiabilities")
+    shares_cur = _stmt_num(cur_bal, "common_shares_outstanding", "shares_outstanding")
+    shares_prev = _stmt_num(prev_bal, "common_shares_outstanding", "shares_outstanding")
+    gross_profit_cur = _stmt_num(cur_inc, "gross_profit", "grossProfit")
+    revenue_cur = _stmt_num(cur_inc, "sales", "total_revenue", "revenue")
+    gross_profit_prev = _stmt_num(prev_inc, "gross_profit", "grossProfit")
+    revenue_prev = _stmt_num(prev_inc, "sales", "total_revenue", "revenue")
+    net_income_prev = _stmt_num(prev_inc, "net_income", "netIncome")
+
+    def safe_div(a, b):
+        return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
+
+    roa_cur = safe_div(net_income, total_assets_cur)
+    roa_prev = safe_div(net_income_prev, total_assets_prev)
+    leverage_cur = safe_div(lt_debt_cur, total_assets_cur)
+    leverage_prev = safe_div(lt_debt_prev, total_assets_prev)
+    current_ratio_cur = safe_div(cur_assets_cur, cur_liab_cur)
+    current_ratio_prev = safe_div(cur_assets_prev, cur_liab_prev)
+    gross_margin_cur = safe_div(gross_profit_cur, revenue_cur)
+    gross_margin_prev = safe_div(gross_profit_prev, revenue_prev)
+    asset_turnover_cur = safe_div(revenue_cur, total_assets_cur)
+    asset_turnover_prev = safe_div(revenue_prev, total_assets_prev)
+
+    tests = {}
+    tests["positive_roa"] = pd.notna(roa_cur) and roa_cur > 0
+    tests["positive_cfo"] = pd.notna(cfo) and cfo > 0
+    tests["roa_improving"] = pd.notna(roa_cur) and pd.notna(roa_prev) and roa_cur > roa_prev
+    tests["cfo_gt_netincome"] = pd.notna(cfo) and pd.notna(net_income) and cfo > net_income
+    tests["leverage_decreasing"] = pd.notna(leverage_cur) and pd.notna(leverage_prev) and leverage_cur < leverage_prev
+    tests["current_ratio_improving"] = pd.notna(current_ratio_cur) and pd.notna(current_ratio_prev) and current_ratio_cur > current_ratio_prev
+    tests["no_new_shares"] = pd.notna(shares_cur) and pd.notna(shares_prev) and shares_cur <= shares_prev
+    tests["gross_margin_improving"] = pd.notna(gross_margin_cur) and pd.notna(gross_margin_prev) and gross_margin_cur > gross_margin_prev
+    tests["asset_turnover_improving"] = pd.notna(asset_turnover_cur) and pd.notna(asset_turnover_prev) and asset_turnover_cur > asset_turnover_prev
+
+    score = int(sum(1 for v in tests.values() if v))
+    return score, tests
+
+
+def screen_a_metrics(sym, info, statements, price_return_1y):
+    """Screen A — momentum + quality growth (Piotroski = 9 required)."""
+    stats = info.get("statistics", {}) if isinstance(info.get("statistics"), dict) else {}
+    prof = info.get("profile", {}) if isinstance(info.get("profile"), dict) else {}
+
+    def num(*keys):
+        for k in keys:
+            v = stats.get(k, prof.get(k))
+            try:
+                if v is not None:
+                    return float(v)
+            except Exception:
+                pass
+        return np.nan
+
+    mcap = num("market_capitalization", "market_cap")
+    roce = num("return_on_capital_employed", "roce")
+    roe = num("return_on_equity", "roe")
+    qsales_g = num("quarterly_revenue_growth_yoy", "yoy_quarterly_sales_growth")
+    qprofit_g = num("quarterly_earnings_growth_yoy", "yoy_quarterly_profit_growth")
+
+    # ROCE fallback: EBIT / (Total Assets - Current Liabilities), latest statement
+    if pd.isna(roce) and statements.get("income") and statements.get("balance"):
+        ebit = _stmt_num(statements["income"][0], "operating_income", "ebit")
+        ta = _stmt_num(statements["balance"][0], "total_assets", "totalAssets")
+        cl = _stmt_num(statements["balance"][0], "total_current_liabilities", "totalCurrentLiabilities")
+        if pd.notna(ebit) and pd.notna(ta) and pd.notna(cl) and (ta - cl) != 0:
+            roce = 100.0 * ebit / (ta - cl)
+
+    pscore, pdetail = piotroski_score(statements)
+
+    checks = {
+        "Market Cap (200-20000cr)": pd.notna(mcap) and 200 <= mcap <= 20000,
+        "1Yr Return > 0": pd.notna(price_return_1y) and price_return_1y > 0,
+        "YoY Qtr Sales Growth > 10%": pd.notna(qsales_g) and qsales_g > 10,
+        "YoY Qtr Profit Growth > 10%": pd.notna(qprofit_g) and qprofit_g > 10,
+        "ROCE > 15%": pd.notna(roce) and roce > 15,
+        "ROE > 15%": pd.notna(roe) and roe > 15,
+        "Piotroski = 9": pscore == 9,
+    }
+    passed = all(checks.values())
+    return {
+        "Ticker": sym, "Screen": "A", "Pass": passed,
+        "Market Cap": mcap, "1Yr Return %": price_return_1y,
+        "YoY Qtr Sales %": qsales_g, "YoY Qtr Profit %": qprofit_g,
+        "ROCE %": roce, "ROE %": roe, "Piotroski": pscore,
+        "Checks": checks,
+    }
+
+
+def screen_b_metrics(sym, info, statements):
+    """Screen B — quality value + dividend (Promoter Holding flagged N/A:
+    India shareholding-pattern disclosure, not carried by Twelve Data)."""
+    stats = info.get("statistics", {}) if isinstance(info.get("statistics"), dict) else {}
+    prof = info.get("profile", {}) if isinstance(info.get("profile"), dict) else {}
+
+    def num(*keys):
+        for k in keys:
+            v = stats.get(k, prof.get(k))
+            try:
+                if v is not None:
+                    return float(v)
+            except Exception:
+                pass
+        return np.nan
+
+    mcap = num("market_capitalization", "market_cap")
+    eps = num("eps", "trailing_eps")
+    roe = num("return_on_equity", "roe")
+    debt_eq = num("debt_to_equity", "debt_equity")
+    pe = num("pe_ratio", "trailing_pe")
+    current_ratio = num("current_ratio")
+    div_yield = num("dividend_yield")
+
+    roce = num("return_on_capital_employed", "roce")
+    if pd.isna(roce) and statements.get("income") and statements.get("balance"):
+        ebit = _stmt_num(statements["income"][0], "operating_income", "ebit")
+        ta = _stmt_num(statements["balance"][0], "total_assets", "totalAssets")
+        cl = _stmt_num(statements["balance"][0], "total_current_liabilities", "totalCurrentLiabilities")
+        if pd.notna(ebit) and pd.notna(ta) and pd.notna(cl) and (ta - cl) != 0:
+            roce = 100.0 * ebit / (ta - cl)
+
+    # Sales growth 5Y — needs 5+ annual periods. run_fundamental_screens()
+    # requests outputsize=5 whenever Screen B is selected (see
+    # _td_get_statements docstring) so this actually computes instead of
+    # always being left NaN.
+    sales_g5 = np.nan
+    inc = statements.get("income", [])
+    if len(inc) >= 5:
+        rev_now = _stmt_num(inc[0], "sales", "total_revenue", "revenue")
+        rev_5y = _stmt_num(inc[4], "sales", "total_revenue", "revenue")
+        if pd.notna(rev_now) and pd.notna(rev_5y) and rev_5y > 0:
+            sales_g5 = 100.0 * ((rev_now / rev_5y) ** (1/5) - 1)
+
+    net_profit_margin = num("profit_margin", "net_profit_margin")
+    op_profit_g = np.nan
+    if len(inc) >= 2:
+        op_cur = _stmt_num(inc[0], "operating_income", "ebit")
+        op_prev = _stmt_num(inc[1], "operating_income", "ebit")
+        if pd.notna(op_cur) and pd.notna(op_prev) and op_prev != 0:
+            op_profit_g = 100.0 * (op_cur - op_prev) / abs(op_prev)
+
+    pfcf = np.nan
+    cf = statements.get("cashflow", [])
+    if cf and pd.notna(mcap):
+        cfo = _stmt_num(cf[0], "operating_cash_flow", "cash_from_operating_activities")
+        capex = _stmt_num(cf[0], "capital_expenditure", "capex")
+        if pd.notna(cfo) and pd.notna(capex):
+            fcf = cfo - abs(capex)
+            if fcf > 0:
+                pfcf = mcap / fcf
+
+    checks = {
+        "Market Cap > 5000cr": pd.notna(mcap) and mcap > 5000,
+        "EPS > 15": pd.notna(eps) and eps > 15,
+        "Sales Growth 5Y > 10%": (pd.notna(sales_g5) and sales_g5 > 10) if pd.notna(sales_g5) else None,
+        "ROE > 15%": pd.notna(roe) and roe > 15,
+        "ROCE > 15%": pd.notna(roce) and roce > 15,
+        "Debt/Equity < 0.5": pd.notna(debt_eq) and debt_eq < 0.5,
+        "Price/FCF > 0": pd.notna(pfcf) and pfcf > 0,
+        "Net Profit Margin > 10%": pd.notna(net_profit_margin) and net_profit_margin > 10,
+        "PE < 25": pd.notna(pe) and pe < 25,
+        "Current Ratio > 1.5": pd.notna(current_ratio) and current_ratio > 1.5,
+        "Dividend Yield > 1%": pd.notna(div_yield) and div_yield > 1,
+        "Operating Profit Growth > 15%": pd.notna(op_profit_g) and op_profit_g > 15,
+        "Promoter Holding > 40%": None,  # data not available via Twelve Data — never silently true
+    }
+    evaluated = {k: v for k, v in checks.items() if v is not None}
+    unverifiable = [k for k, v in checks.items() if v is None]
+    passed = all(evaluated.values()) if evaluated else False
+
+    return {
+        "Ticker": sym, "Screen": "B", "Pass": passed,
+        "Unverifiable": ", ".join(unverifiable) if unverifiable else "",
+        "Market Cap": mcap, "EPS": eps, "ROE %": roe, "ROCE %": roce,
+        "Debt/Equity": debt_eq, "P/E": pe, "Current Ratio": current_ratio,
+        "Dividend Yield %": div_yield, "Sales Growth 5Y %": sales_g5,
+        "Op Profit Growth %": op_profit_g, "Net Profit Margin %": net_profit_margin,
+        "P/FCF": pfcf,
+        "Checks": checks,
+    }
+
+
+def run_fundamental_screens(universe_names, run_a=True, run_b=True, progress_cb=None):
+    """Scans the given universes against Screen A and/or B.
+    progress_cb(done:int, total:int, symbol:str) is called after each stock
+    if provided, so the UI can render a live progress bar.
+    Returns a single DataFrame with all results (both screens if both run).
+    """
+    symbols = set()
+    for u in universe_names:
+        try:
+            symbols.update(index_universe(u))
+        except Exception:
+            continue
+    symbols = sorted(symbols)
+
+    # Screen B's 5-year sales-growth check needs 5 annual periods; Screen A
+    # only ever looks at 2. Only pay the extra Twelve Data outputsize cost
+    # when Screen B is actually selected.
+    stmt_outputsize = 5 if run_b else 2
+
+    rows = []
+    total = len(symbols)
+    for i, full_sym in enumerate(symbols):
+        sym = full_sym.replace(".NS", "")
+        try:
+            info, flags = company_info(sym)
+            statements = _td_get_statements(sym, outputsize=stmt_outputsize)
+
+            price_return_1y = np.nan
+            try:
+                stats = info.get("statistics", {}) if isinstance(info, dict) else {}
+                price_return_1y = float(stats.get("52_week_change", stats.get("year_change", np.nan)))
+            except Exception:
+                pass
+
+            if run_a:
+                rows.append(screen_a_metrics(sym, info, statements, price_return_1y))
+            if run_b:
+                rows.append(screen_b_metrics(sym, info, statements))
+        except Exception as e:
+            rows.append({"Ticker": sym, "Screen": "ERROR", "Pass": False, "Checks": {"error": str(e)}})
+        finally:
+            if progress_cb:
+                progress_cb(i + 1, total, sym)
+            time.sleep(0.15)  # gentle pacing against Twelve Data rate limits
+
+    return pd.DataFrame(rows)
+
+
+def add_fundamental_forward_candidates(results_df):
+    """Persists PASSing fundamental candidates into the existing forward_tests
+    table (tagged FUNDA/FUNDB), same table/schema pattern as
+    add_forward_candidates()/add_smc_forward_candidates() so they show up in
+    the Forward Testing tab automatically — no new table.
+
+    Unlike the original draft of this function, entry/sl/target are never
+    left NULL: refresh_forward_positions() unconditionally does
+    float(row.entry)/float(row.sl)/float(row.target) on every ACTIVE
+    forward_tests row and would raise on a NULL price field, so a candidate
+    without a resolvable local Dhan close price is skipped rather than
+    inserted with placeholder nulls.
+
+    Fundamental screens are long-term theses, not tactical S1-S4 setups, so
+    entry/stop/target use a wider 15% stop (vs S1-S4's 7%) while keeping the
+    same 3R target convention used everywhere else in the app, so result_r
+    stays on a comparable scale across strategies in forward_summary_table().
+    """
+    if results_df is None or results_df.empty:
+        return 0
+    passed = results_df[results_df["Pass"] == True]
+    if passed.empty:
+        return 0
+    con = _db(); added = 0
+    try:
+        today = str(date.today())
+        for _, r in passed.iterrows():
+            symbol = str(r.get("Ticker", "")).upper()
+            strategy = "FUND" + str(r.get("Screen", "")).upper()
+            if not symbol or strategy not in {"FUNDA", "FUNDB"}:
+                continue
+            exists = con.execute(
+                "SELECT id FROM forward_tests WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1",
+                (symbol, strategy, today)
+            ).fetchone()
+            if exists:
+                continue
+
+            d = _read_cache(con, symbol, date.today()-timedelta(days=30), date.today())
+            if d is None or d.empty:
+                continue  # no local Dhan price to anchor entry — skip rather than insert a NULL price row
+            entry = float(d.close.iloc[-1])
+            if not np.isfinite(entry) or entry <= 0:
+                continue
+            stop = entry * 0.85
+            target = entry + 3 * (entry - stop)
+
+            score = float(r.get("Piotroski", r.get("ROE %", 0)) or 0)
+            now = datetime.now().isoformat(timespec="seconds")
+            snapshot = {k: r.get(k, None) for k in r.index}
+            cur = con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
+                exit_price,result_r,updated_at,signal_date,signal_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                now, symbol, strategy, score, "FUNDAMENTAL", entry, stop, target, "ACTIVE",
+                entry, 0.0, 0.0, None, None, now, today,
+                json.dumps(snapshot, default=str, allow_nan=True)
+            ))
+            fid = int(cur.lastrowid); added += 1
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                fid, now, today, entry, entry, entry, 0.0, 0.0, 0.0, "ACTIVE"
+            ))
+        con.commit()
+    finally:
+        con.close()
+    if added:
+        maybe_backup_db()
+    return added
+
 
 @st.cache_data(ttl=86400,show_spinner=False)
 def td_history(symbol, interval="1day", start_date=None, end_date=None, outputsize=5000):
@@ -3098,6 +3495,410 @@ def features_fast(symbol, df):
     except Exception:pass
     return x
 
+# ========================= RAW STRATEGY LEARNING ARCHITECTURE — Phase 9 =========================
+# Phase 1 (raw signal capture, no >=85 gate) + Phase 2 (feature fingerprint) of the
+# research architecture redesign. Phases 3-6 (pattern discovery, similarity engine, a
+# new marking model, Mentor agents) build ON TOP of the data this produces and are not
+# attempted here - this needs to run long enough to accumulate a meaningful sample
+# first (months, not days).
+#
+# ADDITIVE, NOT A REPLACEMENT: the existing run_local_backtest()/_professional_bt()
+# (with its >=85 threshold gate) is completely untouched - it still works exactly as
+# before. This adds a SEPARATE raw-capture path (run_raw_signal_backtest) writing to
+# a NEW table (raw_signal_fingerprints), so nothing about the existing >=85 backtest
+# or scanner changes until this data is deliberately acted on later.
+#
+# THE GATE THIS BYPASSES (deliberately, only in this parallel path): the existing
+# _professional_bt() does `if score<int(threshold):continue` before ever simulating a
+# signal - discarding it before it's ever recorded, so the learning data can never
+# discover that a lower-scored setup might actually outperform. run_raw_signal_backtest()
+# below has NO such gate.
+#
+# PERFORMANCE FIX APPLIED (found while integrating, not present in the original
+# design): the original draft of this loop called regime_from_index(hist) and
+# safety({}, hist) per signal, recomputing the ENTIRE technical feature set
+# (features()/features_slow(), including weekly/monthly resampling) from scratch on a
+# growing history slice for EVERY signal in EVERY strategy across the ENTIRE universe.
+# This is the exact O(n^2)-class hot path already found and fixed twice elsewhere in
+# this codebase (the original S1-S4 backtest loop, and the SMC backtest) - and would
+# have been WORSE here, since removing the score gate means simulating far more
+# signals per ticker with no early pruning. Fixed by reusing the same O(1) functions
+# the existing >=85 backtest already uses: _regime_from_row(f,i) for regime, and
+# _safety_fast_series(df) computed ONCE per ticker + _safety_from_row(avg_value,
+# abnormal,i) per signal for safety - see bench_raw_signal_perf.py (scratch dir) for a
+# measured before/after comparison. Note the original design draft's score/parts line,
+# `_row_score(f, i, s, regime, safe)`, referenced a function that does not exist in
+# some older versions of this codebase's history - it DOES exist in the current
+# app.py (added by this same earlier O(n^2) fix elsewhere) and is used unchanged here.
+#
+# WHAT'S COMPUTED NOW vs DEFERRED (unchanged from the original design, being honest
+# about scope): trend direction, MA distances, ATR/volatility, RelVol, volume
+# expansion, candle body/wick structure, breakout/retest, pullback depth, swing
+# distance, RSI, a simple MACD (not in features_fast(), added here), distance from
+# recent high/low, gap %, support/resistance distance (swing proxy), retracement %
+# + duration for S4, rejection/reclaim candle heuristics, trade geometry, safety
+# score/flags. DEFERRED (need data sources not wired in yet - stubbed NULL, not
+# faked): Nifty/Bank Nifty trend, market breadth, sector trend/regime, earnings
+# proximity, valuation/debt/growth history.
+
+def ensure_raw_fingerprint_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS raw_signal_fingerprints(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER, created_at TEXT,
+            ticker TEXT, strategy TEXT, signal_date TEXT, entry_date TEXT, exit_date TEXT,
+            score REAL, outcome TEXT, entry REAL, stop REAL, target REAL, exit_price REAL,
+            return_pct REAL, r_multiple REAL, holding_bars INTEGER, mfe_pct REAL, mae_pct REAL,
+
+            -- price / chart structure
+            trend_direction TEXT, dist_ema20_atr REAL, dist_ema50_atr REAL, dist_ema200_atr REAL,
+            atr_pct REAL, relvol REAL, relvol_trend REAL, candle_body_pct REAL,
+            candle_upper_wick_pct REAL, candle_lower_wick_pct REAL, breakout_20d INTEGER,
+            breakout_50d INTEGER, pullback_depth_pct REAL, dist_recent_high_atr REAL,
+            dist_recent_low_atr REAL, gap_pct REAL, dist_support_atr REAL, dist_resistance_atr REAL,
+            rsi14 REAL, macd_hist REAL,
+
+            -- retracement (S4-relevant, computed for all strategies where applicable)
+            retracement_pct REAL, retracement_duration_bars INTEGER, retracement_volume_ratio REAL,
+            rejection_candle INTEGER, reclaim_candle INTEGER,
+
+            -- market conditions (deferred fields NULL until Phase 2b)
+            market_regime TEXT, nifty_trend TEXT, market_breadth REAL, sector_trend TEXT,
+
+            -- trade geometry
+            stop_distance_pct REAL, target_distance_pct REAL, expected_rr REAL, atr_adjusted_stop REAL,
+
+            -- safety / fundamental context (what's already available)
+            safety_score REAL, safety_flags TEXT,
+
+            -- deterministic score components (kept for comparison against new model later)
+            score_htf REAL, score_footprint REAL, score_entry_quality REAL, score_relative_strength REAL,
+
+            source TEXT
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS raw_signal_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, market TEXT,
+            start_date TEXT, end_date TEXT, universe_size INTEGER, signals_captured INTEGER,
+            elapsed_seconds REAL, status TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_raw_fingerprint_table()
+
+
+def _simple_swings(df, left=3, right=3):
+    """Lightweight fractal swing detection for retracement/support-resistance
+    proxies. Only needs to look backward from index i (as-of correct)."""
+    highs = df["high"].values; lows = df["low"].values
+    n = len(df)
+    sh, sl = [], []
+    for i in range(left, n - right):
+        if highs[i] == highs[i-left:i+right+1].max():
+            sh.append(i)
+        if lows[i] == lows[i-left:i+right+1].min():
+            sl.append(i)
+    return sh, sl
+
+
+def _retracement_features(df, i):
+    """Computes retracement % from the most recent swing leg, using only
+    data up to and including index i (as-of correct, no look-ahead).
+    Returns dict — values are None if not enough swing history yet.
+    """
+    hist = df.iloc[:i+1]
+    if len(hist) < 20:
+        return {"retracement_pct": None, "retracement_duration_bars": None, "retracement_volume_ratio": None,
+                "rejection_candle": 0, "reclaim_candle": 0}
+
+    window = hist.iloc[-120:] if len(hist) > 120 else hist
+    sh, sl = _simple_swings(window)
+    if not sh or not sl:
+        return {"retracement_pct": None, "retracement_duration_bars": None, "retracement_volume_ratio": None,
+                "rejection_candle": 0, "reclaim_candle": 0}
+
+    offset = len(hist) - len(window)
+    last_high_idx = sh[-1] + offset
+    last_low_idx = sl[-1] + offset
+
+    # Determine which came more recently to establish leg direction
+    if last_high_idx > last_low_idx:
+        leg_low = float(hist["low"].iloc[last_low_idx]); leg_high = float(hist["high"].iloc[last_high_idx])
+        current = float(hist["close"].iloc[-1])
+        rng = leg_high - leg_low
+        retr_pct = ((leg_high - current) / rng * 100) if rng > 0 else None
+        duration = len(hist) - 1 - last_high_idx
+    else:
+        leg_low = float(hist["low"].iloc[last_low_idx]); leg_high = float(hist["high"].iloc[last_high_idx])
+        current = float(hist["close"].iloc[-1])
+        rng = leg_high - leg_low
+        retr_pct = ((current - leg_low) / rng * 100) if rng > 0 else None
+        duration = len(hist) - 1 - last_low_idx
+
+    vol_ratio = None
+    if duration and duration > 0 and len(hist) > duration * 2:
+        recent_vol = hist["volume"].iloc[-duration:].mean()
+        prior_vol = hist["volume"].iloc[-duration*2:-duration].mean()
+        vol_ratio = float(recent_vol / prior_vol) if prior_vol and prior_vol > 0 else None
+
+    last_bar = hist.iloc[-1]
+    bar_range = max(last_bar["high"] - last_bar["low"], 1e-9)
+    close_pos = (last_bar["close"] - last_bar["low"]) / bar_range
+    rejection = int(close_pos < 0.3)  # closed near the low of its range
+    reclaim = int(close_pos > 0.7)    # closed near the high of its range
+
+    return {
+        "retracement_pct": round(retr_pct, 2) if retr_pct is not None else None,
+        "retracement_duration_bars": int(duration) if duration is not None else None,
+        "retracement_volume_ratio": round(vol_ratio, 3) if vol_ratio is not None else None,
+        "rejection_candle": rejection, "reclaim_candle": reclaim,
+    }
+
+
+def _support_resistance_distance(df, i, atr_val):
+    """Distance (in ATR units) to the nearest swing high (resistance) and
+    swing low (support) above/below current price, as-of index i."""
+    hist = df.iloc[max(0, i-120):i+1]
+    if len(hist) < 20 or not atr_val or atr_val <= 0:
+        return None, None
+    sh, sl = _simple_swings(hist)
+    current = float(hist["close"].iloc[-1])
+    res_levels = [float(hist["high"].iloc[j]) for j in sh if float(hist["high"].iloc[j]) > current]
+    sup_levels = [float(hist["low"].iloc[j]) for j in sl if float(hist["low"].iloc[j]) < current]
+    dist_res = (min(res_levels) - current) / atr_val if res_levels else None
+    dist_sup = (current - max(sup_levels)) / atr_val if sup_levels else None
+    return dist_res, dist_sup
+
+
+def _simple_macd_hist(close_series):
+    """Standard 12/26/9 MACD histogram — not currently in features_fast(),
+    added here since the research architecture flags it as a needed feature."""
+    ema12 = close_series.ewm(span=12, adjust=False).mean()
+    ema26 = close_series.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    return float((macd_line - signal_line).iloc[-1])
+
+
+def compute_signal_fingerprint(df, f, i, entry, stop, target, regime, safe, safety_flags, parts):
+    """df: raw OHLCV. f: features_fast() output (has ema/rsi/atr/relvol etc).
+    i: signal bar index. Everything here uses ONLY data up to and including
+    index i — no look-ahead. Returns a flat dict ready for DB insertion.
+    """
+    row = f.iloc[i]
+    close = float(row["close"]); atr = float(row.get("atr14", np.nan))
+
+    ema20, ema50, ema200 = row.get("ema20", np.nan), row.get("ema50", np.nan), row.get("ema200", np.nan)
+    if pd.notna(ema20) and pd.notna(ema50) and pd.notna(ema200):
+        if close > ema20 > ema50 > ema200:
+            trend = "strong_up"
+        elif close > ema50 > ema200:
+            trend = "up"
+        elif close < ema20 < ema50 < ema200:
+            trend = "strong_down"
+        elif close < ema50 < ema200:
+            trend = "down"
+        else:
+            trend = "mixed"
+    else:
+        trend = "unknown"
+
+    atr_safe = atr if (pd.notna(atr) and atr > 0) else np.nan
+    dist_ema20 = (close - ema20) / atr_safe if pd.notna(atr_safe) and pd.notna(ema20) else None
+    dist_ema50 = (close - ema50) / atr_safe if pd.notna(atr_safe) and pd.notna(ema50) else None
+    dist_ema200 = (close - ema200) / atr_safe if pd.notna(atr_safe) and pd.notna(ema200) else None
+
+    relvol = float(row.get("relvol", np.nan)) if pd.notna(row.get("relvol", np.nan)) else None
+    relvol_series = f["relvol"].iloc[max(0, i-20):i+1]
+    relvol_trend = float(relvol_series.iloc[-1] - relvol_series.mean()) if len(relvol_series) > 5 and relvol_series.notna().any() else None
+
+    bar_range = max(float(row["high"]) - float(row["low"]), 1e-9)
+    body = abs(float(row["close"]) - float(row["open"]))
+    upper_wick = float(row["high"]) - max(float(row["close"]), float(row["open"]))
+    lower_wick = min(float(row["close"]), float(row["open"])) - float(row["low"])
+
+    high20 = df["high"].iloc[max(0, i-20):i].max() if i > 0 else np.nan
+    high50 = df["high"].iloc[max(0, i-50):i].max() if i > 0 else np.nan
+    low20 = df["low"].iloc[max(0, i-20):i].min() if i > 0 else np.nan
+    breakout_20 = int(pd.notna(high20) and close > high20)
+    breakout_50 = int(pd.notna(high50) and close > high50)
+    pullback_depth = ((high20 - close) / high20 * 100) if pd.notna(high20) and high20 > 0 else None
+
+    dist_recent_high = (high20 - close) / atr_safe if pd.notna(atr_safe) and pd.notna(high20) else None
+    dist_recent_low = (close - low20) / atr_safe if pd.notna(atr_safe) and pd.notna(low20) else None
+
+    prev_close = float(df["close"].iloc[i-1]) if i > 0 else None
+    gap_pct = ((float(row["open"]) - prev_close) / prev_close * 100) if prev_close else None
+
+    dist_res, dist_sup = _support_resistance_distance(df, i, atr_safe)
+    retr = _retracement_features(df, i)
+
+    macd_hist = None
+    try:
+        macd_hist = _simple_macd_hist(df["close"].iloc[:i+1])
+    except Exception:
+        pass
+
+    stop_dist_pct = abs(entry - stop) / entry * 100 if entry else None
+    target_dist_pct = abs(target - entry) / entry * 100 if entry else None
+    expected_rr = abs(target - entry) / abs(entry - stop) if entry and stop and entry != stop else None
+    atr_adj_stop = abs(entry - stop) / atr_safe if pd.notna(atr_safe) and atr_safe > 0 else None
+
+    return {
+        "trend_direction": trend,
+        "dist_ema20_atr": round(dist_ema20, 3) if dist_ema20 is not None else None,
+        "dist_ema50_atr": round(dist_ema50, 3) if dist_ema50 is not None else None,
+        "dist_ema200_atr": round(dist_ema200, 3) if dist_ema200 is not None else None,
+        "atr_pct": round(atr_safe / close * 100, 3) if pd.notna(atr_safe) and close else None,
+        "relvol": round(relvol, 3) if relvol is not None else None,
+        "relvol_trend": round(relvol_trend, 3) if relvol_trend is not None else None,
+        "candle_body_pct": round(body / bar_range * 100, 2),
+        "candle_upper_wick_pct": round(upper_wick / bar_range * 100, 2),
+        "candle_lower_wick_pct": round(lower_wick / bar_range * 100, 2),
+        "breakout_20d": breakout_20, "breakout_50d": breakout_50,
+        "pullback_depth_pct": round(pullback_depth, 2) if pullback_depth is not None else None,
+        "dist_recent_high_atr": round(dist_recent_high, 3) if dist_recent_high is not None else None,
+        "dist_recent_low_atr": round(dist_recent_low, 3) if dist_recent_low is not None else None,
+        "gap_pct": round(gap_pct, 3) if gap_pct is not None else None,
+        "dist_support_atr": round(dist_sup, 3) if dist_sup is not None else None,
+        "dist_resistance_atr": round(dist_res, 3) if dist_res is not None else None,
+        "rsi14": round(float(row.get("rsi14", np.nan)), 2) if pd.notna(row.get("rsi14", np.nan)) else None,
+        "macd_hist": round(macd_hist, 4) if macd_hist is not None else None,
+
+        "retracement_pct": retr["retracement_pct"],
+        "retracement_duration_bars": retr["retracement_duration_bars"],
+        "retracement_volume_ratio": retr["retracement_volume_ratio"],
+        "rejection_candle": retr["rejection_candle"], "reclaim_candle": retr["reclaim_candle"],
+
+        "market_regime": regime, "nifty_trend": None, "market_breadth": None, "sector_trend": None,  # Phase 2b
+
+        "stop_distance_pct": round(stop_dist_pct, 3) if stop_dist_pct is not None else None,
+        "target_distance_pct": round(target_dist_pct, 3) if target_dist_pct is not None else None,
+        "expected_rr": round(expected_rr, 3) if expected_rr is not None else None,
+        "atr_adjusted_stop": round(atr_adj_stop, 3) if atr_adj_stop is not None else None,
+
+        "safety_score": safe, "safety_flags": ", ".join(safety_flags) if safety_flags else "",
+
+        "score_htf": parts.get("HTF Demand", 0), "score_footprint": parts.get("Footprint", 0),
+        "score_entry_quality": parts.get("Entry Quality", 0), "score_relative_strength": parts.get("Relative Strength", 0),
+    }
+
+
+def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
+    """Near-identical to _professional_bt(), EXCEPT: no score threshold gate —
+    every legitimate S1-S4 signal is simulated and its full fingerprint
+    recorded, regardless of score. This is what lets later research discover
+    whether score actually predicts outcome, instead of only ever seeing
+    pre-filtered survivors.
+
+    data: dict of {ticker: df} exactly as the existing local backtest loop
+    expects (e.g. from load_local_backtest_data()/build_fast_data_cache()).
+    Returns a DataFrame of everything captured (also persisted to DB).
+    """
+    rows = []
+    tickers = list(data.keys())
+    for n, ticker in enumerate(tickers):
+        try:
+            df = data[ticker]
+            if df is None or df.empty or len(df) < 260:
+                continue
+            df = df.sort_index()
+            f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            if f.empty:
+                continue
+
+            # Same O(1) precompute the existing >=85 backtest uses (see
+            # _professional_bt) instead of recomputing regime_from_index()/
+            # safety({}, hist) from scratch per signal - the fix this phase
+            # needed most, since removing the score gate means many more
+            # signals get simulated per ticker with no early pruning.
+            avg_value, abnormal = _safety_fast_series(df)
+
+            for s in strategies:
+                sig = strategy_signal(f, s).fillna(False).to_numpy()
+                for i in np.flatnonzero(sig):
+                    dt = pd.Timestamp(f.index[i])
+                    if dt < start or dt > end or i >= len(df) - 1:
+                        continue
+                    regime, _ = _regime_from_row(f, i)
+                    safe, _, safety_flags = _safety_from_row(avg_value, abnormal, i)
+                    score, parts = _row_score(f, i, s, regime, safe)
+                    # NO GATE HERE — this is the entire point of Phase 1.
+
+                    entry_i = i + 1
+                    entry = float(df.close.iloc[entry_i])
+                    if not np.isfinite(entry) or entry <= 0:
+                        continue
+                    stop = entry * 0.93
+                    target = entry + 3 * (entry - stop)
+
+                    last = min(len(df) - 1, entry_i + 60)
+                    outcome = "TIMEOUT"; exit_price = float(df.close.iloc[last]); held = last - entry_i
+                    max_high = entry; min_low = entry
+                    for j in range(entry_i, last + 1):
+                        bar = df.iloc[j]
+                        max_high = max(max_high, float(bar.high)); min_low = min(min_low, float(bar.low))
+                        if bar.low <= stop:
+                            outcome, exit_price, held = "LOSS", stop, j - entry_i; break
+                        if bar.high >= target:
+                            outcome, exit_price, held = "WIN", target, j - entry_i; break
+
+                    gross_pct = (exit_price / entry - 1) * 100
+                    return_pct = gross_pct - BT_COST_PCT
+                    risk = entry - stop
+                    r_mult = return_pct / ((risk / entry) * 100) if risk > 0 else 0
+                    mfe = (max_high / entry - 1) * 100; mae = (min_low / entry - 1) * 100
+
+                    fingerprint = compute_signal_fingerprint(df, f, i, entry, stop, target, regime, safe, safety_flags, parts)
+
+                    rows.append({
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                        "ticker": str(ticker).replace(".NS", ""), "strategy": f"S{s}",
+                        "signal_date": str(dt.date()), "entry_date": str(df.index[entry_i].date()),
+                        "exit_date": str(df.index[entry_i + held].date()),
+                        "score": float(score), "outcome": outcome, "entry": round(entry, 2),
+                        "stop": round(stop, 2), "target": round(target, 2), "exit_price": round(exit_price, 2),
+                        "return_pct": round(return_pct, 2), "r_multiple": round(float(r_mult), 2),
+                        "holding_bars": int(held), "mfe_pct": round(mfe, 2), "mae_pct": round(mae, 2),
+                        "source": "raw_phase1",
+                        **fingerprint,
+                    })
+        except Exception:
+            continue
+        finally:
+            if progress_cb:
+                progress_cb(n + 1, len(tickers), str(ticker))
+
+    result = pd.DataFrame(rows)
+    _persist_raw_fingerprints(result, start, end, len(tickers))
+    return result
+
+
+def _persist_raw_fingerprints(result, start, end, universe_size):
+    if result.empty:
+        return
+    con = _db()
+    try:
+        cur = con.execute(
+            """INSERT INTO raw_signal_runs(created_at,market,start_date,end_date,universe_size,signals_captured,elapsed_seconds,status)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"), "INDIA", str(start), str(end),
+             universe_size, len(result), 0.0, "COMPLETED")
+        )
+        run_id = cur.lastrowid
+        cols = list(result.columns)
+        db_cols = [c for c in cols if c not in ("created_at",)]  # created_at handled per-row already present
+        placeholders = ",".join(["?"] * (len(db_cols) + 1))
+        col_list = ",".join(["run_id"] + db_cols)
+        rows = [tuple([run_id] + [r.get(c) for c in db_cols]) for _, r in result.iterrows()]
+        con.executemany(f"INSERT INTO raw_signal_fingerprints({col_list}) VALUES({placeholders})", rows)
+        con.commit()
+    finally:
+        con.close()
+
+
 def build_fast_data_cache(tickers, start, end, max_workers=5):
     """
     First run: populate Dhan history.
@@ -3672,6 +4473,486 @@ def fallback_win_probability(market, strategy, score):
     if row.empty or int(row.iloc[0]["Samples"]) < 20:
         return np.nan
     return float(row.iloc[0]["Win % (shrunk)"])
+
+
+# ========================= AI SYSTEM COACH (LLM) — Phase 6 =========================
+# On-demand LLM analysis of the marking system as a WHOLE (backtest performance,
+# forward-test resolution, component correlations, adaptive edge table) — not one
+# trade. Distinct from the existing rule-based "🎓 Strategy Coach" tab (decision-tree/
+# regime-breakdown, no LLM call); this one is titled "AI System Coach (LLM)" in the
+# UI specifically to avoid confusion between the two.
+#
+# COST CONTROL: one batched API call per run, sending only AGGREGATED stats (never
+# raw trade rows) — small payload regardless of how many trades exist. Runs only on
+# a button click, never automatically on every scan.
+#
+# Model note: the original design called for "claude-sonnet-4-6" (a real, valid,
+# one-generation-behind model). Using "claude-sonnet-5" instead — the current model
+# in the same mid-cost "Sonnet" tier the design intended (not the upmarket "Opus"
+# tier), and cheaper per-token than 4.6.
+
+ANTHROPIC_COACH_MODEL = "claude-sonnet-5"
+
+
+def _anthropic_configured():
+    # Mirrors twelvedata_configured()/_github_configured()'s established
+    # pattern in this file: st.secrets.__contains__ raises
+    # StreamlitSecretNotFoundError (not just a missing-key False) when no
+    # secrets.toml exists at all - a bare `"X" not in st.secrets`/`st.secrets[...]`
+    # crashes the whole app in that state, so every access here goes through
+    # a try/except, never a bare lookup.
+    try:
+        return bool(st.secrets.get("ANTHROPIC_API_KEY"))
+    except Exception:
+        return False
+
+
+def _anthropic_key():
+    try:
+        return st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:
+        return None
+
+
+def _table_exists(con, name):
+    r = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return r is not None
+
+
+def ensure_coach_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS coach_reports(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT,
+            total_backtest_trades INTEGER,
+            total_forward_closed INTEGER,
+            report_text TEXT,
+            verdict TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_coach_table()
+
+
+def build_coach_payload():
+    """Compiles a compact JSON-able summary of everything the Coach needs:
+    edge table, component weights, backtest performance, forward-test
+    resolution stats (including fundamental/SMC strategies if present).
+    Returns (payload:dict, has_enough_data:bool).
+    """
+    payload = {}
+
+    # --- Backtest performance per strategy ---
+    con = _db()
+    try:
+        bt_summary = pd.read_sql_query(
+            "SELECT * FROM backtest_trades", con
+        ) if _table_exists(con, "backtest_trades") else pd.DataFrame()
+    except Exception:
+        bt_summary = pd.DataFrame()
+    finally:
+        con.close()
+
+    # NOTE: backtest_trades is the RAW sqlite table (lowercase columns:
+    # strategy, r_multiple) - not the "Strategy"/"R" display-renamed columns
+    # used elsewhere in the UI. The original patch draft checked for
+    # "Strategy" here, which never matches this table and would have silently
+    # produced an empty backtest_performance every single run.
+    if not bt_summary.empty and "strategy" in bt_summary.columns:
+        perf_rows = []
+        for strat, g in bt_summary.groupby("strategy"):
+            has_r = "r_multiple" in g.columns
+            perf_rows.append({
+                "strategy": strat, "trades": len(g),
+                "win_pct": round(float((g.r_multiple > 0).mean() * 100), 1) if has_r else None,
+                "avg_r": round(float(g.r_multiple.mean()), 3) if has_r else None,
+            })
+        payload["backtest_performance"] = perf_rows
+    else:
+        payload["backtest_performance"] = []
+
+    # --- Adaptive edge table (score-band level win%/avg R) ---
+    edge = adaptive_edge_table("INDIA")
+    payload["edge_by_score_band"] = edge.to_dict(orient="records") if not edge.empty else []
+
+    # --- Component-level correlation with R ---
+    comp = adaptive_component_weights("INDIA")
+    payload["component_weights"] = comp.to_dict(orient="records") if not comp.empty else []
+
+    # --- Forward test resolution (the real-world check) ---
+    con = _db()
+    try:
+        ft = pd.read_sql_query("SELECT * FROM forward_tests", con)
+    finally:
+        con.close()
+
+    closed = ft[ft.status.isin(["CLOSED", "TARGET", "STOP", "EXIT", "EXPIRED"])] if not ft.empty else pd.DataFrame()
+    active = ft[ft.status == "ACTIVE"] if not ft.empty else pd.DataFrame()
+
+    fwd_rows = []
+    if not closed.empty:
+        for strat, g in closed.groupby("strategy"):
+            fwd_rows.append({
+                "strategy": strat, "closed_trades": len(g),
+                "win_pct": round(float((g.result_r > 0).mean() * 100), 1) if g.result_r.notna().any() else None,
+                "avg_r": round(float(g.result_r.dropna().mean()), 3) if g.result_r.notna().any() else None,
+            })
+    payload["forward_test_closed"] = fwd_rows
+    payload["forward_test_active_count"] = int(len(active))
+    payload["forward_test_closed_count"] = int(len(closed))
+
+    total_bt = len(bt_summary)
+    total_fwd_closed = len(closed)
+    has_enough = total_bt >= 20 or total_fwd_closed >= 10
+
+    payload["totals"] = {"backtest_trades": total_bt, "forward_closed": total_fwd_closed}
+    return payload, has_enough
+
+
+def run_strategy_coach():
+    """Sends the aggregated payload to Claude, gets back a written analysis.
+    Returns (report_text:str, error:str or None).
+    """
+    if not _anthropic_configured():
+        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    payload, has_enough = build_coach_payload()
+    if not has_enough:
+        return None, (
+            f"Not enough data yet for a reliable analysis "
+            f"({payload['totals']['backtest_trades']} backtest trades, "
+            f"{payload['totals']['forward_closed']} closed forward tests). "
+            f"Run more backtests or let more forward tests resolve first."
+        )
+
+    system_prompt = """You are a quantitative trading systems analyst reviewing a solo trader's
+algorithmic research framework. You will receive aggregated statistics (NOT raw trade data) about:
+- backtest_performance: win rate / avg R per strategy (S1-S4 = stock strategies, FUNDA/FUNDB =
+  fundamental screens, FX_SMC = forex/crypto price action strategy)
+- edge_by_score_band: empirical win rate and avg R-multiple by setup-score band, per strategy
+  (uses Bayesian shrinkage toward 50%/0R for small samples already)
+- component_weights: whether each scoring component (HTF, Footprint, Entry Quality, Relative
+  Strength, Safety) shows a real difference in outcome between its high vs low values
+- forward_test_closed / forward_test_active_count: REAL live-market outcomes, the most
+  trustworthy signal since it isn't backtest-fitted
+
+Your job: give an honest, statistically grounded verdict on whether the marking/scoring system
+is working, and concrete recommendations to improve accuracy. Rules:
+1. ALWAYS state sample sizes next to any claim. Never treat n<20 as reliable evidence.
+2. If backtest and forward-test results diverge meaningfully, flag this explicitly — it usually
+   means curve-fitting or regime drift, and is the single most important thing to surface.
+3. For components with weight near 1.0 and high sample size, say plainly that they show no
+   measurable edge and are candidates to deprioritize or drop from scoring.
+4. Do not recommend specific numeric parameter changes unless the sample size genuinely
+   supports it — say "not enough data yet" rather than guessing.
+5. Structure your response with these headers: OVERALL VERDICT, WHAT'S WORKING, WHAT'S NOT
+   WORKING, SPECIFIC RECOMMENDATIONS (numbered, priority order), CONFIDENCE CAVEATS.
+6. Keep it concise and actionable — this is read by the developer, not published.
+"""
+
+    user_content = "Here is the current aggregated system data:\n\n" + json.dumps(payload, indent=2, default=str)
+
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        report = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if not report:
+            return None, "Claude API returned an empty response."
+        return report, None
+    except anthropic.AuthenticationError as e:
+        return None, f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return None, f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return None, f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return None, f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return None, f"Unexpected error: {e}"
+
+
+def save_coach_report(report_text):
+    payload, _ = build_coach_payload()
+    verdict_line = ""
+    lines = report_text.splitlines()
+    for idx, line in enumerate(lines):
+        if "OVERALL VERDICT" in line.upper():
+            rest = lines[idx+1:idx+3]
+            verdict_line = " ".join(rest).strip()[:300]
+            break
+    con = _db()
+    try:
+        con.execute(
+            """INSERT INTO coach_reports(created_at, total_backtest_trades, total_forward_closed, report_text, verdict)
+               VALUES(?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"),
+             payload["totals"]["backtest_trades"], payload["totals"]["forward_closed"],
+             report_text, verdict_line)
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+# ========================= 5-AGENT AI TRADE DEBATE PANEL — Phase 8 =========================
+# Analyzes individual TRADE CANDIDATES from the scanner's forward-test queue (different
+# job from the AI System Coach above, which analyzes the whole system). Meant to run
+# after a scan, on the filtered shortlist that already qualifies for forward testing,
+# before capital is committed.
+#
+# COST CONTROL: NOT 5 agents x N candidates. Four agents each get ALL shortlisted
+# candidates in ONE message, returning a JSON array of verdicts; the Judge gets all
+# four verdict-arrays plus the original data in one final call. Total = 5 API calls
+# per panel run regardless of shortlist size (capped at 15 candidates below).
+#
+# JSON ROBUSTNESS: the installed anthropic SDK (checked in this environment, not
+# guessed) exposes `output_config={"format": {"type": "json_schema", "schema": ...}}`
+# on messages.create() (see anthropic.types.output_config_param /
+# json_output_format_param), so every agent call below constrains its response to a
+# JSON array matching an explicit schema. Fence-stripping + json.loads() is still kept
+# as a defensive second layer (harmless when the schema already produced clean JSON,
+# a real safety net if some future SDK/account combination doesn't honor the schema) -
+# no live-credentialed run of this exact call has been possible in this sandbox, so
+# both layers stay in rather than betting everything on the unverified end-to-end path.
+
+_AGENT_VERDICT_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "verdict": {"type": "string"},
+            "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+            "flag": {"type": "boolean"},
+        },
+        "required": ["ticker", "verdict", "confidence", "flag"],
+        "additionalProperties": False,
+    },
+}
+
+_JUDGE_VERDICT_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "rank": {"type": "integer"},
+            "reasoning": {"type": "string"},
+            "overall_confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+        },
+        "required": ["ticker", "rank", "reasoning", "overall_confidence"],
+        "additionalProperties": False,
+    },
+}
+
+
+def build_debate_shortlist(scan_result_df, max_candidates=15):
+    """Filters scan results down to a cost-bounded shortlist: drops
+    INSUFFICIENT SAMPLE learning confidence when better options exist,
+    sorts by Learned Rank, caps at max_candidates.
+    """
+    if scan_result_df is None or scan_result_df.empty:
+        return pd.DataFrame()
+
+    df = scan_result_df.copy()
+    good_conf = df[df.get("Learning Confidence", "") != "INSUFFICIENT SAMPLE"]
+    pool = good_conf if len(good_conf) >= 3 else df  # fallback if too few confident ones
+
+    sort_col = "Learned Rank" if "Learned Rank" in pool.columns else "Score"
+    return pool.sort_values(sort_col, ascending=False).head(max_candidates).reset_index(drop=True)
+
+
+def _candidates_to_payload(shortlist_df):
+    cols = ["Ticker", "Strategy", "Score", "Adaptive Score", "Learned Rank", "Historical Edge R",
+            "Learning Confidence", "Entry", "SL 7%", "Target 3R", "RSI", "RelVol",
+            "HTF Score", "Footprint Score", "Entry Quality", "Relative Strength",
+            "Safety Score", "Safety Flags", "Regime"]
+    available = [c for c in cols if c in shortlist_df.columns]
+    return shortlist_df[available].to_dict(orient="records")
+
+
+def _call_agent(system_prompt, candidates_payload, max_tokens=2500):
+    """Sends one candidates_payload (list of dicts) to Claude with the given
+    system_prompt, expecting back a JSON array of {ticker, verdict,
+    confidence, flag} objects — one per candidate. Returns (list, error).
+    """
+    if not _anthropic_configured():
+        return [], "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    user_content = (
+        "Analyze EVERY candidate below and return a JSON array, one object per "
+        "candidate, each with exactly these keys: \"ticker\", \"verdict\" (2-3 "
+        "sentences), \"confidence\" (LOW/MEDIUM/HIGH), \"flag\" (true if this is a "
+        "serious concern, false otherwise).\n\n"
+        + json.dumps(candidates_payload, indent=2, default=str)
+    )
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+            output_config={"format": {"type": "json_schema", "schema": _AGENT_VERDICT_SCHEMA}},
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            return [], "Agent did not return a JSON array."
+        return parsed, None
+    except json.JSONDecodeError as e:
+        return [], f"Could not parse agent response as JSON: {e}"
+    except anthropic.AuthenticationError as e:
+        return [], f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return [], f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return [], f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return [], f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return [], f"Unexpected error: {e}"
+
+
+def agent_technical_analyst(candidates_payload):
+    system = """You are a Technical Analyst reviewing deterministic strategy setups from an
+Indian equities trading system. Each candidate already PASSED all mandatory rules of its
+strategy (S1-S4) — your job is not to re-qualify them, but to assess RELATIVE setup quality
+using the component scores provided: HTF Score (higher-timeframe demand), Footprint Score,
+Entry Quality, Relative Strength, RSI, RelVol. Identify which candidates have genuinely clean,
+well-supported setups versus which merely cleared the minimum bar. Be specific about which
+component(s) drive your view for each candidate."""
+    return _call_agent(system, candidates_payload)
+
+
+def agent_statistical_skeptic(candidates_payload):
+    system = """You are a Statistical Skeptic reviewing trade candidates from a system that
+tracks empirical win rates with Bayesian shrinkage. Each candidate includes: Score, Learned
+Rank (blends score + historical edge), Historical Edge R (shrunk average R-multiple for this
+strategy/score-band), and Learning Confidence (HIGH = 100+ samples, MEDIUM = 20-99, INSUFFICIENT
+SAMPLE = under 20). Your ONLY job: flag any candidate whose apparent edge you don't trust yet
+due to small sample size, and separately note any candidate where the historical edge is both
+strong AND well-sampled (genuinely trustworthy). Be blunt about which numbers are noise."""
+    return _call_agent(system, candidates_payload)
+
+
+def agent_risk_capital(candidates_payload, capital=None, max_slots=None, risk_pct=None):
+    context = ""
+    if capital and max_slots:
+        context = (f"\n\nTrader's context: total capital ₹{capital:,.0f}, max {max_slots} "
+                    f"concurrent positions, risking {risk_pct or 1.0}% of capital per trade. "
+                    f"Each candidate's SL 7% and Target 3R fields define its risk unit.")
+    system = ("""You are a Risk & Capital Agent. Given a trader's available capital and maximum
+concurrent position count, assess whether taking ALL of these candidates together would create
+excessive concentration — same sector, correlated stocks, or too many positions for the stated
+capital to size properly. Flag any candidate that should be deprioritized purely for portfolio
+construction reasons, even if its setup looks technically fine on its own."""
+              + context)
+    return _call_agent(system, candidates_payload)
+
+
+def agent_devils_advocate(candidates_payload):
+    system = """You are the Devil's Advocate / Bear Case agent. Your job is to argue AGAINST
+each candidate, specifically — not generic caution, but the single most likely way this specific
+setup fails: regime risk, crowded trade, weak relative strength despite a passing score, thin
+liquidity (low RelVol), safety flags present, or anything else in the data that a purely bullish
+read would gloss over. If a candidate genuinely has no strong bear case, say so plainly rather
+than inventing one — false negatives here are as costly as missed risks."""
+    return _call_agent(system, candidates_payload)
+
+
+def agent_judge(candidates_payload, tech_verdicts, skeptic_verdicts, risk_verdicts, bear_verdicts, target_count=5):
+    if not _anthropic_configured():
+        return [], "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    system = f"""You are the Judge/Synthesizer. You will receive the original candidate data plus
+four independent agent verdicts per candidate: Technical Analyst, Statistical Skeptic, Risk/Capital
+Agent, and Devil's Advocate. Resolve disagreements using judgment, weighting the Statistical
+Skeptic's confidence flags heavily (don't rank a candidate highly if its edge is statistically
+unreliable, regardless of how clean the setup looks technically). Output a JSON array of the TOP
+{target_count} candidates (fewer if fewer than {target_count} are genuinely defensible — never pad
+the list with weak picks), each object with keys: "ticker", "rank" (1 = best), "reasoning" (2-3
+sentences synthesizing the four views), "overall_confidence" (LOW/MEDIUM/HIGH)."""
+
+    user_content = json.dumps({
+        "candidates": candidates_payload,
+        "technical_analyst_verdicts": tech_verdicts,
+        "statistical_skeptic_verdicts": skeptic_verdicts,
+        "risk_capital_verdicts": risk_verdicts,
+        "devils_advocate_verdicts": bear_verdicts,
+    }, indent=2, default=str)
+
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+            output_config={"format": {"type": "json_schema", "schema": _JUDGE_VERDICT_SCHEMA}},
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            return [], "Judge did not return a JSON array."
+        return parsed, None
+    except json.JSONDecodeError as e:
+        return [], f"Could not parse Judge response as JSON: {e}"
+    except anthropic.AuthenticationError as e:
+        return [], f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return [], f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return [], f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return [], f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return [], f"Unexpected error: {e}"
+
+
+def run_trade_debate_panel(scan_result_df, capital=None, max_slots=None, risk_pct=None, target_count=5, max_candidates=15):
+    """Full pipeline: shortlist -> 4 parallel-in-spirit agent calls -> Judge.
+    Returns dict with keys: shortlist_df, tech, skeptic, risk, bear (each a
+    list of verdict dicts), final (Judge's ranked list), errors (list of any
+    agent errors encountered — non-fatal, panel continues with what it has).
+    """
+    shortlist = build_debate_shortlist(scan_result_df, max_candidates=max_candidates)
+    if shortlist.empty:
+        return {"error": "No candidates available to analyze. Run a scan first."}
+
+    payload = _candidates_to_payload(shortlist)
+    errors = []
+
+    tech, e1 = agent_technical_analyst(payload)
+    if e1: errors.append(f"Technical Analyst: {e1}")
+
+    skeptic, e2 = agent_statistical_skeptic(payload)
+    if e2: errors.append(f"Statistical Skeptic: {e2}")
+
+    risk, e3 = agent_risk_capital(payload, capital, max_slots, risk_pct)
+    if e3: errors.append(f"Risk/Capital Agent: {e3}")
+
+    bear, e4 = agent_devils_advocate(payload)
+    if e4: errors.append(f"Devil's Advocate: {e4}")
+
+    final, e5 = agent_judge(payload, tech, skeptic, risk, bear, target_count=target_count)
+    if e5: errors.append(f"Judge: {e5}")
+
+    return {
+        "shortlist_df": shortlist,
+        "tech": tech, "skeptic": skeptic, "risk": risk, "bear": bear,
+        "final": final, "errors": errors,
+    }
 
 
 # ========================= ML WIN PROBABILITY =========================
@@ -4786,6 +6067,59 @@ with tabs[1]:
         except Exception as e:
             st.error(f"Scanner error: {e}")
 
+    st.divider()
+    st.subheader("🧑‍⚖️ AI Trade Debate Panel")
+    st.caption("5 agents (Technical, Statistical Skeptic, Risk/Capital, Devil's Advocate, Judge) analyze the scanner's forward-test queue. 5 API calls total per run, regardless of shortlist size.")
+
+    # "forward_queue" is the actual session_state key the scanner populates with
+    # its forward-test-qualifying shortlist (Score >= min_score, Safety != REJECT)
+    # right before calling add_forward_candidates() above - there is no session_state
+    # key holding the full unfiltered scan result (full_result is a local variable,
+    # not persisted across reruns), so this is the closest and most fitting analog:
+    # it's exactly the "before you commit capital" shortlist this panel is meant to
+    # analyze, not the raw universe of every strategy-qualified setup.
+    panel_result = st.session_state.get('forward_queue', pd.DataFrame())
+    if panel_result.empty:
+        st.info("Run a scan first — the panel analyzes the scanner's forward-test queue (Score above the gate).")
+    elif not _anthropic_configured():
+        st.info("ANTHROPIC_API_KEY not set in Streamlit secrets — add it to enable this section.")
+    else:
+        pc1, pc2, pc3 = st.columns(3)
+        panel_capital = pc1.number_input("Capital ₹", 10000, 100000000, 100000, 10000, key="panel_capital")
+        panel_slots = pc2.number_input("Max concurrent positions", 1, 20, 5, 1, key="panel_slots")
+        panel_target = pc3.slider("Final shortlist size", 2, 6, 5, 1, key="panel_target")
+
+        if st.button("🔬 RUN 5-AGENT DEBATE PANEL", type="primary", key="panel_run"):
+            with st.spinner("Running 5-agent analysis (5 API calls)..."):
+                panel = run_trade_debate_panel(
+                    panel_result, capital=panel_capital, max_slots=panel_slots,
+                    risk_pct=1.0, target_count=panel_target
+                )
+            st.session_state["latest_panel"] = panel
+
+        panel = st.session_state.get("latest_panel")
+        if panel:
+            if panel.get("error"):
+                st.warning(panel["error"])
+            else:
+                if panel["errors"]:
+                    st.warning("Some agents had issues: " + " | ".join(panel["errors"]))
+
+                if panel["final"]:
+                    st.subheader("🏆 Judge's Final Ranking")
+                    st.dataframe(pd.DataFrame(panel["final"]), width='stretch', hide_index=True)
+
+                with st.expander("🔍 View individual agent verdicts"):
+                    vt1, vt2, vt3, vt4 = st.tabs(["Technical", "Statistical Skeptic", "Risk/Capital", "Devil's Advocate"])
+                    with vt1:
+                        st.dataframe(pd.DataFrame(panel["tech"]), width='stretch', hide_index=True) if panel["tech"] else st.info("No data.")
+                    with vt2:
+                        st.dataframe(pd.DataFrame(panel["skeptic"]), width='stretch', hide_index=True) if panel["skeptic"] else st.info("No data.")
+                    with vt3:
+                        st.dataframe(pd.DataFrame(panel["risk"]), width='stretch', hide_index=True) if panel["risk"] else st.info("No data.")
+                    with vt4:
+                        st.dataframe(pd.DataFrame(panel["bear"]), width='stretch', hide_index=True) if panel["bear"] else st.info("No data.")
+
 # ========================= RESEARCH MODULES =========================
 
 def refresh_forward_positions():
@@ -5045,6 +6379,48 @@ with tabs[2]:
                 else:
                     st.info(f'S{ss}: no qualifying historical setups in this window.')
 
+    st.divider()
+    st.subheader("🔬 Raw Strategy Learning — Ungated Signal Capture")
+    st.caption("Records EVERY S1-S4 signal regardless of score, with a full feature fingerprint at signal time. This does not affect the existing ≥85 backtest or scanner above — it's a separate research dataset for discovering what actually separates winners from losers.")
+    st.caption("🔒 Same hard rule as the backtest above: this reads the same local SQLite dataset (period/universe selected above) and makes ZERO Dhan/API calls — it does not independently sync data.")
+
+    raw_strategies = st.multiselect("Strategies", [1,2,3,4], default=[1,2,3,4], key="raw_strategies")
+
+    if st.button("🔬 RUN RAW SIGNAL CAPTURE", type="primary", key="raw_capture_run"):
+        if not tickers:
+            st.warning("Select at least one universe above first.")
+        elif not raw_strategies:
+            st.warning("Select at least one strategy.")
+        else:
+            with st.spinner(f"Loading local data for {len(tickers):,} tickers..."):
+                raw_data = load_local_backtest_data(tickers, start_date, end_date)
+            if not raw_data:
+                st.error("No local data available for this universe/date range. Sync it in Data Manager first.")
+            else:
+                raw_prog = st.progress(0.0)
+                def _raw_cb(done, total, sym):
+                    raw_prog.progress(done/max(total,1), text=f"{sym} ({done}/{total})")
+                t0 = time.perf_counter()
+                with st.spinner(f"Running ungated backtest on {len(raw_data):,} locally-available tickers..."):
+                    raw_result = run_raw_signal_backtest(raw_data, raw_strategies, pd.Timestamp(start_date), pd.Timestamp(end_date), progress_cb=_raw_cb)
+                raw_prog.empty()
+                st.session_state["raw_signal_result"] = raw_result
+                st.success(f"Captured {len(raw_result):,} raw signals (no score gate applied) in {time.perf_counter()-t0:.1f}s.")
+
+    raw_result = st.session_state.get("raw_signal_result", pd.DataFrame())
+    if not raw_result.empty:
+        st.markdown("#### Quick sanity check: does score correlate with outcome AT ALL?")
+        band_check = raw_result.copy()
+        band_check["score_band"] = pd.cut(band_check["score"], bins=[0,50,60,70,80,85,90,100])
+        raw_summary = band_check.groupby("score_band", observed=True).agg(
+            trades=("outcome","count"), win_pct=("r_multiple", lambda x: round((x>0).mean()*100,1)),
+            avg_r=("r_multiple","mean")
+        ).reset_index()
+        st.dataframe(raw_summary, width='stretch', hide_index=True)
+        st.caption("If low-score bands show similar or better win%/avg R than 85+, that's direct evidence the current gate may be miscalibrated. Treat any band with a handful of trades as noise, not a conclusion.")
+        with st.expander("View raw captured signals"):
+            st.dataframe(raw_result, width='stretch', hide_index=True)
+
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
     changed,newly_closed_count=refresh_forward_positions()
@@ -5130,27 +6506,155 @@ with tabs[4]:
             st.dataframe(learn_db.head(500),width='stretch',hide_index=True)
         st.caption('Learning ranks candidates using evidence; it never changes the deterministic S1–S4 qualification rules.')
 
+    st.divider()
+    st.subheader("🧑‍🏫 AI System Coach (LLM)")
+    st.caption(
+        "Different from the 🎓 Strategy Coach tab, which uses deterministic decision-tree rules — "
+        "this one is an on-demand LLM analysis of the same underlying data."
+    )
+    st.caption("On-demand AI analysis of the marking system's accuracy across backtest + forward-test history. One API call per run — you control when it runs.")
+
+    if not _anthropic_configured():
+        st.info("ANTHROPIC_API_KEY not set in Streamlit secrets — add it to enable this section.")
+    elif st.button("🔬 RUN AI SYSTEM COACH ANALYSIS", type="primary", key="coach_run"):
+        with st.spinner("Analyzing backtest performance, forward-test outcomes, and component correlations..."):
+            coach_report, coach_err = run_strategy_coach()
+        if coach_err:
+            st.warning(coach_err)
+        else:
+            save_coach_report(coach_report)
+            st.session_state["latest_coach_report"] = coach_report
+            st.success("Analysis complete and saved.")
+
+    latest_coach = st.session_state.get("latest_coach_report")
+    if latest_coach:
+        st.markdown(latest_coach)
+
+    with st.expander("📜 Report History"):
+        con = _db()
+        try:
+            coach_hist = pd.read_sql_query("SELECT id, created_at, total_backtest_trades, total_forward_closed, verdict FROM coach_reports ORDER BY id DESC", con)
+        finally:
+            con.close()
+        if coach_hist.empty:
+            st.info("No reports yet — run your first analysis above.")
+        else:
+            st.dataframe(coach_hist, width='stretch', hide_index=True)
+            coach_pick = st.selectbox("View full report", coach_hist["id"].tolist(), key="coach_history_pick")
+            if coach_pick:
+                con = _db()
+                try:
+                    coach_full = con.execute("SELECT report_text FROM coach_reports WHERE id=?", (coach_pick,)).fetchone()
+                finally:
+                    con.close()
+                if coach_full:
+                    st.markdown(coach_full[0])
+
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals + News")
-    st.caption("Dhan remains the primary Indian market-price source. Fundamental/news enrichment is deliberately fetched only for candidates, cached locally, and never used to weaken S1–S4 rules.")
-    st.info("Twelve Data provides India fundamentals/press releases; Dhan's current API documentation exposes market data, instruments, quotes, positions and related trading/data APIs rather than a fundamental-financial-statement endpoint.")
-    sym_text=st.text_input("Candidate symbols (comma separated)","RELIANCE,TCS,HDFCBANK",key="fund_symbols_final")
-    if st.button("🔎 Enrich Fundamentals + News",key="fund_enrich_final"):
-        symbols=[x.strip().upper() for x in sym_text.split(',') if x.strip()]
-        rows=[]
-        with st.spinner(f"Enriching {len(symbols)} candidate(s)..."):
-            for sym in symbols:
-                try:
-                    info,ff=company_info(sym)
-                    items,sent,risk=news_snapshot(sym)
-                    score,status,flags=_fundamental_score(info)
-                    rows.append({"Ticker":sym,"Fundamental Score":score,"Status":status,"News Sentiment":round(sent,1),"News Risk":round(risk,1),"Flags":"; ".join(ff+flags),"News Items":len(items)})
-                except Exception as e:
-                    rows.append({"Ticker":sym,"Fundamental Score":np.nan,"Status":f"ERROR: {e}","News Sentiment":np.nan,"News Risk":np.nan,"Flags":"","News Items":0})
-        st.session_state["fundamental_results_final"]=pd.DataFrame(rows)
-    fr=st.session_state.get("fundamental_results_final",pd.DataFrame())
-    if fr.empty: st.info("Enter candidates or feed the tab from the scanner's ≥85 queue.")
-    else: st.dataframe(fr.sort_values(["Fundamental Score","News Sentiment"],ascending=[False,False]),width='stretch',hide_index=True)
+    st.caption("Dhan remains the primary Indian market-price source. Twelve Data provides fundamentals; Screen A / Screen B run against the full index universe, not just typed symbols.")
+
+    fscreen_tab1, fscreen_tab2 = st.tabs(["📋 Screen A / B — Universe Scan", "🔎 Manual Symbol Lookup"])
+
+    with fscreen_tab1:
+        st.info(
+            "⚠️ Twelve Data field-name mappings for income_statement/balance_sheet/cash_flow "
+            "(and therefore the Piotroski score, ROCE fallback, and every Screen A/B pass/fail below) "
+            "are UNVERIFIED assumptions — this deployment has not been checked against a live Twelve "
+            "Data key or a real company filing. Spot-check any PASS result against the company's actual "
+            "financial statements before acting on it."
+        )
+        fc1, fc2, fc3 = st.columns([2, 1, 1])
+        fund_universes = fc1.multiselect(
+            "Universe", ["Nifty 500", "Nifty Smallcap 100", "Nifty Smallcap 250", "Nifty Midcap 150"],
+            default=["Nifty 500"], key="fund_screen_universe"
+        )
+        fund_run_a = fc2.checkbox("Screen A", value=True, key="fund_run_a")
+        fund_run_b = fc3.checkbox("Screen B", value=True, key="fund_run_b")
+
+        fund_auto_track = st.checkbox(
+            "Auto-track PASS results into Forward Testing", value=True, key="fund_auto_track",
+            help="Passing stocks are inserted into the same forward_tests table used by the technical "
+                 "scanner (tagged FUNDA/FUNDB) so they can be watched forward, using a local Dhan close "
+                 "as entry with a wide 15%/3R stop-target (see add_fundamental_forward_candidates)."
+        )
+
+        if st.button("🔬 RUN FUNDAMENTAL SCREENS", type="primary", key="fund_screen_run"):
+            if not fund_universes:
+                st.warning("Select at least one universe.")
+            elif not (fund_run_a or fund_run_b):
+                st.warning("Select at least one screen (A and/or B).")
+            elif not twelvedata_configured():
+                st.error("TWELVEDATA_API_KEY not configured in Streamlit secrets — Screen A/B need Twelve Data fundamentals.")
+            else:
+                fund_prog = st.progress(0.0, text="Starting scan...")
+
+                def _fund_cb(done, total, sym):
+                    fund_prog.progress(done / max(total, 1), text=f"Scanning {sym} ({done}/{total})")
+
+                with st.spinner("Fetching fundamentals — this can take a while for large universes..."):
+                    fund_result = run_fundamental_screens(fund_universes, run_a=fund_run_a, run_b=fund_run_b, progress_cb=_fund_cb)
+
+                fund_prog.empty()
+                st.session_state["fund_screen_results"] = fund_result
+
+                if fund_auto_track and not fund_result.empty:
+                    n_added = add_fundamental_forward_candidates(fund_result)
+                    st.success(f"Scan complete. {n_added} new candidate(s) added to Forward Testing.")
+                else:
+                    st.success("Scan complete.")
+
+        fund_result = st.session_state.get("fund_screen_results", pd.DataFrame())
+        if fund_result.empty:
+            st.info("Run a screen to see universe-wide fundamental results here.")
+        else:
+            fund_passed = fund_result[fund_result["Pass"] == True]
+            fund_failed = fund_result[fund_result["Pass"] == False]
+            fm1, fm2, fm3 = st.columns(3)
+            fm1.metric("Scanned", len(fund_result))
+            fm2.metric("Passed", len(fund_passed))
+            fm3.metric("Failed", len(fund_failed))
+
+            fund_display_cols = [c for c in fund_result.columns if c not in ("Checks",)]
+            st.dataframe(
+                fund_result[fund_display_cols].sort_values(["Pass", "Screen"], ascending=[False, True]),
+                width='stretch', hide_index=True
+            )
+
+            if "Unverifiable" in fund_result.columns and fund_result["Unverifiable"].astype(str).str.len().gt(0).any():
+                st.warning("Some checks could not be verified (e.g. Promoter Holding — not available via Twelve Data) and were excluded from the Pass/Fail decision rather than assumed true.")
+
+            with st.expander("🔍 View individual stock check breakdown"):
+                fund_pick = st.selectbox("Stock", fund_result["Ticker"].unique(), key="fund_screen_detail_pick")
+                fund_sub = fund_result[fund_result["Ticker"] == fund_pick]
+                for _, frow in fund_sub.iterrows():
+                    st.markdown(f"**Screen {frow.get('Screen')}** — {'✅ PASS' if frow.get('Pass') else '❌ FAIL'}")
+                    fchecks = frow.get("Checks", {})
+                    if isinstance(fchecks, dict):
+                        for k, v in fchecks.items():
+                            ficon = "✅" if v is True else "❌" if v is False else "⚪ N/A"
+                            st.write(f"{ficon} {k}")
+
+    with fscreen_tab2:
+        st.caption("Dhan remains the primary Indian market-price source. Fundamental/news enrichment is deliberately fetched only for candidates, cached locally, and never used to weaken S1–S4 rules.")
+        st.info("Twelve Data provides India fundamentals/press releases; Dhan's current API documentation exposes market data, instruments, quotes, positions and related trading/data APIs rather than a fundamental-financial-statement endpoint.")
+        sym_text=st.text_input("Candidate symbols (comma separated)","RELIANCE,TCS,HDFCBANK",key="fund_symbols_final")
+        if st.button("🔎 Enrich Fundamentals + News",key="fund_enrich_final"):
+            symbols=[x.strip().upper() for x in sym_text.split(',') if x.strip()]
+            rows=[]
+            with st.spinner(f"Enriching {len(symbols)} candidate(s)..."):
+                for sym in symbols:
+                    try:
+                        info,ff=company_info(sym)
+                        items,sent,risk=news_snapshot(sym)
+                        score,status,flags=_fundamental_score(info)
+                        rows.append({"Ticker":sym,"Fundamental Score":score,"Status":status,"News Sentiment":round(sent,1),"News Risk":round(risk,1),"Flags":"; ".join(ff+flags),"News Items":len(items)})
+                    except Exception as e:
+                        rows.append({"Ticker":sym,"Fundamental Score":np.nan,"Status":f"ERROR: {e}","News Sentiment":np.nan,"News Risk":np.nan,"Flags":"","News Items":0})
+            st.session_state["fundamental_results_final"]=pd.DataFrame(rows)
+        fr=st.session_state.get("fundamental_results_final",pd.DataFrame())
+        if fr.empty: st.info("Enter candidates or feed the tab from the scanner's ≥85 queue.")
+        else: st.dataframe(fr.sort_values(["Fundamental Score","News Sentiment"],ascending=[False,False]),width='stretch',hide_index=True)
 
 with tabs[6]:
     st.subheader("🏢 Small/Micro Safety Engine")
