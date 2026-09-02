@@ -3899,6 +3899,258 @@ def _persist_raw_fingerprints(result, start, end, universe_size):
         con.close()
 
 
+# ========================= STOP-LOSS CALIBRATION STUDY =========================
+# ADDITIVE, EVIDENCE-ONLY — NEVER changes what the live system does. The scanner's LIVE
+# stop-loss, the existing >=85 gated backtest (_professional_bt), forward-test tracking,
+# and run_raw_signal_backtest() above all keep using the fixed entry*0.93 (7%) stop
+# completely untouched. This is a SEPARATE study that backtests several CANDIDATE stop-loss
+# schemes against the SAME real historical S1-S4 signals and reports real win%/avg-R
+# evidence broken out by strategy AND market regime (never one blended number — the whole
+# point is "how much SL is good depends on the stock chart and market conditions").
+#
+# LONG-ONLY CONFIRMED: every S1-S4 condition in strategy_signal() is a bullish/long setup
+# (no short branch exists anywhere in that function) — every scheme below places its stop
+# BELOW entry accordingly.
+#
+# SAME O(1) PATTERN AS run_raw_signal_backtest() ABOVE, deliberately copied rather than
+# reinvented: features_fast()/_safety_fast_series() run ONCE per ticker; _regime_from_row()/
+# _safety_from_row() are O(1) per-signal lookups. This loop never calls regime_from_index()/
+# safety() — those recompute the full feature set from scratch per call and have already
+# caused an O(n^2) hang bug three times in this codebase's history (original S1-S4 backtest,
+# SMC backtest, and once already in run_raw_signal_backtest() itself before its fix).
+#
+# SAME 3R TARGET FOR EVERY SCHEME (explicit design choice): each scheme changes the stop
+# distance, so to keep R-multiples comparable ACROSS schemes and isolate the effect of stop
+# PLACEMENT (rather than conflating it with a different reward:risk ratio), every scheme
+# still uses target = entry + 3*(entry-stop) computed from ITS OWN stop distance — the same
+# 3R convention run_raw_signal_backtest() and s4_ema20_extension_calibration() already use.
+#
+# COST OF REPEATING THE FORWARD WALK PER SCHEME: the expensive part (per-ticker feature
+# computation) happens once; only the cheap forward-bar walk (O(bars-until-exit), max 60
+# bars here) repeats once per scheme (5) per signal — acceptable and NOT the O(n^2) pattern
+# above, which was about re-deriving the entire feature matrix, not walking forward bars.
+
+SL_CALIBRATION_MIN_BUCKET_SAMPLES = 15  # same threshold/spirit as S4_CALIBRATION_MIN_BUCKET_SAMPLES
+
+
+def sl_scheme_fixed_pct_7(entry, atr_abs, structure_stop_price):
+    """CURRENT LIVE BASELINE (entry*0.93, i.e. fixed 7% SL) — included deliberately so
+    this study can show whether any candidate scheme actually beats the status quo,
+    rather than assuming the status quo needs replacing."""
+    return entry * 0.93
+
+
+def sl_scheme_atr_mult_1_5(entry, atr_abs, structure_stop_price):
+    if atr_abs is None or not np.isfinite(atr_abs) or atr_abs <= 0:
+        return None
+    return entry - 1.5 * atr_abs
+
+
+def sl_scheme_atr_mult_2_0(entry, atr_abs, structure_stop_price):
+    if atr_abs is None or not np.isfinite(atr_abs) or atr_abs <= 0:
+        return None
+    return entry - 2.0 * atr_abs
+
+
+def sl_scheme_atr_mult_2_5(entry, atr_abs, structure_stop_price):
+    if atr_abs is None or not np.isfinite(atr_abs) or atr_abs <= 0:
+        return None
+    return entry - 2.5 * atr_abs
+
+
+def sl_scheme_structure_swing_low(entry, atr_abs, structure_stop_price):
+    """Stop placed just below the nearest support/swing-low level at signal time
+    (structure_stop_price, derived from the same swing-detection logic that produces
+    the dist_support_atr fingerprint field — see _support_resistance_distance()).
+    Returns None (scheme UNAVAILABLE for this signal) when no nearby support level was
+    found, rather than fabricating one."""
+    if structure_stop_price is None or not np.isfinite(structure_stop_price) or structure_stop_price <= 0:
+        return None
+    if structure_stop_price >= entry:
+        return None  # support at/above entry isn't a usable stop for a long
+    return structure_stop_price
+
+
+SL_CALIBRATION_SCHEMES = {
+    "fixed_pct_7": sl_scheme_fixed_pct_7,
+    "atr_mult_1_5": sl_scheme_atr_mult_1_5,
+    "atr_mult_2_0": sl_scheme_atr_mult_2_0,
+    "atr_mult_2_5": sl_scheme_atr_mult_2_5,
+    "structure_swing_low": sl_scheme_structure_swing_low,
+}
+
+
+def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
+    """Backtests every candidate SL scheme in SL_CALIBRATION_SCHEMES against the SAME
+    real historical S1-S4 signals and SAME forward bars, isolating the effect of stop
+    PLACEMENT alone. Structured like run_raw_signal_backtest(): per-ticker feature
+    computation happens ONCE, regime/safety are O(1) row lookups per signal, and each
+    scheme independently walks forward from the same entry bar.
+
+    data: dict of {ticker: df} exactly as run_raw_signal_backtest()/the existing
+    backtest loop expect. Returns a DataFrame of one row per (ticker, strategy, signal,
+    scheme) trade — also persisted (aggregated) to sl_calibration_results/_runs.
+    """
+    rows = []
+    tickers = list(data.keys())
+    ticker = None
+    for n, ticker in enumerate(tickers):
+        try:
+            df = data[ticker]
+            if df is None or df.empty or len(df) < 260:
+                continue
+            df = df.sort_index()
+            f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            if f.empty:
+                continue
+
+            # Once per ticker — NOT per scheme, NOT per signal. See header comment.
+            avg_value, abnormal = _safety_fast_series(df)
+
+            for s in strategies:
+                sig = strategy_signal(f, s).fillna(False).to_numpy()
+                for i in np.flatnonzero(sig):
+                    dt = pd.Timestamp(f.index[i])
+                    if dt < start or dt > end or i >= len(df) - 1:
+                        continue
+                    regime, _ = _regime_from_row(f, i)          # O(1) — never regime_from_index()
+                    safe, _, _ = _safety_from_row(avg_value, abnormal, i)  # O(1) — never safety()
+
+                    entry_i = i + 1
+                    entry = float(df.close.iloc[entry_i])
+                    if not np.isfinite(entry) or entry <= 0:
+                        continue
+
+                    atr = float(f.iloc[i].get("atr14", np.nan))
+                    atr_abs = atr if (np.isfinite(atr) and atr > 0) else None
+
+                    _, dist_sup = _support_resistance_distance(df, i, atr_abs)
+                    structure_stop_price = (
+                        entry - dist_sup * atr_abs
+                        if (dist_sup is not None and atr_abs is not None) else None
+                    )
+
+                    last = min(len(df) - 1, entry_i + 60)
+
+                    for scheme_name, scheme_fn in SL_CALIBRATION_SCHEMES.items():
+                        stop = scheme_fn(entry, atr_abs, structure_stop_price)
+                        if stop is None or not np.isfinite(stop) or stop <= 0 or stop >= entry:
+                            continue  # scheme unavailable for this signal — skip, never fabricate
+
+                        # SAME 3R convention for every scheme — see header comment.
+                        target = entry + 3 * (entry - stop)
+
+                        outcome = "TIMEOUT"; exit_price = float(df.close.iloc[last]); held = last - entry_i
+                        for j in range(entry_i, last + 1):
+                            bar = df.iloc[j]
+                            if bar.low <= stop:
+                                outcome, exit_price, held = "LOSS", stop, j - entry_i; break
+                            if bar.high >= target:
+                                outcome, exit_price, held = "WIN", target, j - entry_i; break
+
+                        risk = entry - stop
+                        r_mult = (exit_price - entry) / risk if risk > 0 else 0.0
+
+                        rows.append({
+                            "ticker": str(ticker).replace(".NS", ""), "strategy": f"S{s}",
+                            "signal_date": str(dt.date()), "market_regime": regime,
+                            "safety_score": safe, "scheme": scheme_name,
+                            "entry": round(entry, 2), "stop": round(stop, 2), "target": round(target, 2),
+                            "outcome": outcome, "r_multiple": round(float(r_mult), 3),
+                            "holding_bars": int(held),
+                        })
+        except Exception:
+            continue
+        finally:
+            if progress_cb:
+                progress_cb(n + 1, len(tickers), str(ticker))
+
+    result = pd.DataFrame(rows)
+    _persist_sl_calibration(result, start, end, len(tickers))
+    return result
+
+
+def _sl_calibration_aggregate(result):
+    """One row per (strategy, market_regime, scheme) — the shape persisted to
+    sl_calibration_results and used by both the DB writer and the UI report."""
+    cols = ["strategy", "market_regime", "scheme", "trades", "win_pct", "avg_r", "avg_holding_bars"]
+    if result.empty:
+        return pd.DataFrame(columns=cols)
+    g = result.groupby(["strategy", "market_regime", "scheme"]).agg(
+        trades=("r_multiple", "count"),
+        win_pct=("outcome", lambda x: float((x == "WIN").mean() * 100)),
+        avg_r=("r_multiple", "mean"),
+        avg_holding_bars=("holding_bars", "mean"),
+    ).reset_index()
+    g["win_pct"] = g.win_pct.round(1)
+    g["avg_r"] = g.avg_r.round(3)
+    g["avg_holding_bars"] = g.avg_holding_bars.round(1)
+    return g
+
+
+def sl_calibration_report(result):
+    """UI-facing version of _sl_calibration_aggregate(): renames for display and flags
+    under-sampled buckets rather than omitting them (same philosophy as
+    s4_extension_bucket_report() — small-N buckets are noise, not evidence, but they are
+    still shown so nobody mistakes silence for a clean result)."""
+    g = _sl_calibration_aggregate(result)
+    if g.empty:
+        return g
+    g = g.rename(columns={
+        "strategy": "Strategy", "market_regime": "Regime", "scheme": "Scheme",
+        "trades": "Trades", "win_pct": "Win %", "avg_r": "Avg R", "avg_holding_bars": "Avg Holding Bars",
+    })
+    g[f"Reliable (>={SL_CALIBRATION_MIN_BUCKET_SAMPLES} samples)"] = g.Trades >= SL_CALIBRATION_MIN_BUCKET_SAMPLES
+    return g.sort_values(["Strategy", "Regime", "Avg R"], ascending=[True, True, False]).reset_index(drop=True)
+
+
+def ensure_sl_calibration_tables():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS sl_calibration_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, market TEXT,
+            start_date TEXT, end_date TEXT, universe_size INTEGER, trades_captured INTEGER,
+            status TEXT
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS sl_calibration_results(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER,
+            strategy TEXT, market_regime TEXT, scheme TEXT,
+            trades INTEGER, win_pct REAL, avg_r REAL, avg_holding_bars REAL
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_sl_calibration_tables()
+
+
+def _persist_sl_calibration(result, start, end, universe_size):
+    if result.empty:
+        return
+    agg = _sl_calibration_aggregate(result)
+    con = _db()
+    try:
+        cur = con.execute(
+            """INSERT INTO sl_calibration_runs(created_at,market,start_date,end_date,universe_size,trades_captured,status)
+               VALUES(?,?,?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"), "INDIA", str(start), str(end),
+             universe_size, len(result), "COMPLETED")
+        )
+        run_id = cur.lastrowid
+        db_rows = [
+            (run_id, r.strategy, r.market_regime, r.scheme, int(r.trades), float(r.win_pct),
+             float(r.avg_r), float(r.avg_holding_bars))
+            for r in agg.itertuples()
+        ]
+        con.executemany(
+            """INSERT INTO sl_calibration_results(run_id,strategy,market_regime,scheme,trades,win_pct,avg_r,avg_holding_bars)
+               VALUES(?,?,?,?,?,?,?,?)""", db_rows
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 RAW_SIGNAL_NUMERIC_FEATURES = [
     "score", "score_htf", "score_footprint", "score_entry_quality", "score_relative_strength",
     "dist_ema20_atr", "dist_ema50_atr", "dist_ema200_atr", "atr_pct",
@@ -6532,6 +6784,72 @@ with tabs[2]:
 
         with st.expander("View raw captured signals"):
             st.dataframe(raw_result, width='stretch', hide_index=True)
+
+    st.divider()
+    st.subheader("🎯 Stop-Loss Calibration Study")
+    st.caption(
+        "Backtests candidate stop-loss schemes (the current fixed 7% baseline, three ATR-multiple "
+        "widths, and a structure/swing-low based stop) against the SAME real historical S1-S4 "
+        "signals, broken out by strategy AND market regime. **Purely additive research — this does "
+        "NOT change the live scanner's stop-loss, the existing ≥85 gated backtest, or forward-test "
+        "tracking**, all of which keep using the fixed entry×0.93 (7%) stop untouched. Every scheme "
+        "is compared using the same 3R target convention so the comparison isolates stop PLACEMENT, "
+        "not a different reward:risk ratio."
+    )
+    st.caption("🔒 Same hard rule as above: reads the same local SQLite dataset (period/universe selected above), makes ZERO Dhan/API calls.")
+
+    sl_cal_strategies = st.multiselect("Strategies", [1, 2, 3, 4], default=[1, 2, 3, 4], key="sl_cal_strategies")
+
+    if st.button("🎯 RUN STOP-LOSS CALIBRATION STUDY", type="primary", key="sl_cal_run"):
+        if not tickers:
+            st.warning("Select at least one universe above first.")
+        elif not sl_cal_strategies:
+            st.warning("Select at least one strategy.")
+        else:
+            with st.spinner(f"Loading local data for {len(tickers):,} tickers..."):
+                sl_cal_data = load_local_backtest_data(tickers, start_date, end_date)
+            if not sl_cal_data:
+                st.error("No local data available for this universe/date range. Sync it in Data Manager first.")
+            else:
+                sl_cal_prog = st.progress(0.0)
+                def _sl_cal_cb(done, total, sym):
+                    sl_cal_prog.progress(done / max(total, 1), text=f"{sym} ({done}/{total})")
+                t0 = time.perf_counter()
+                with st.spinner(f"Running SL calibration study on {len(sl_cal_data):,} locally-available tickers × {len(SL_CALIBRATION_SCHEMES)} schemes..."):
+                    sl_cal_result = run_sl_calibration_study(
+                        sl_cal_data, sl_cal_strategies, pd.Timestamp(start_date), pd.Timestamp(end_date), progress_cb=_sl_cal_cb
+                    )
+                sl_cal_prog.empty()
+                st.session_state["sl_calibration_result"] = sl_cal_result
+                st.success(f"Captured {len(sl_cal_result):,} scheme-trade rows in {time.perf_counter() - t0:.1f}s.")
+
+    sl_cal_result = st.session_state.get("sl_calibration_result", pd.DataFrame())
+    if not sl_cal_result.empty:
+        sl_cal_report = sl_calibration_report(sl_cal_result)
+        st.markdown("#### Strategy × Regime × Scheme — Win% / Avg R")
+
+        rep_cols = st.columns(3)
+        strat_filter = rep_cols[0].multiselect("Filter: Strategy", sorted(sl_cal_report["Strategy"].unique()), key="sl_cal_filter_strat")
+        regime_filter = rep_cols[1].multiselect("Filter: Regime", sorted(sl_cal_report["Regime"].unique()), key="sl_cal_filter_regime")
+        reliable_only = rep_cols[2].checkbox("Reliable buckets only", value=False, key="sl_cal_reliable_only")
+
+        view = sl_cal_report.copy()
+        if strat_filter:
+            view = view[view["Strategy"].isin(strat_filter)]
+        if regime_filter:
+            view = view[view["Regime"].isin(regime_filter)]
+        reliable_col = f"Reliable (>={SL_CALIBRATION_MIN_BUCKET_SAMPLES} samples)"
+        if reliable_only:
+            view = view[view[reliable_col]]
+        st.dataframe(view, width='stretch', hide_index=True)
+        st.caption(
+            f"Buckets below {SL_CALIBRATION_MIN_BUCKET_SAMPLES} samples are marked unreliable — treat "
+            "them as noise, not evidence. A scheme missing for a given strategy/regime means it was "
+            "unavailable for every signal there (e.g. no nearby support for structure_swing_low), not zero trades."
+        )
+
+        with st.expander("View raw scheme-trade rows"):
+            st.dataframe(sl_cal_result, width='stretch', hide_index=True)
 
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
