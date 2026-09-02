@@ -1032,6 +1032,402 @@ def twelvedata_configured():
 def _td_headers():
     return {"Authorization":f"apikey {str(st.secrets['TWELVEDATA_API_KEY'])}"}
 
+
+# ============================================================================
+# FUNDAMENTAL SCREENS A & B (Phase 2) — universe-wide quality screens built
+# from raw Twelve Data financial statements, since Twelve Data has no direct
+# "Piotroski score" field.
+#
+# UNVERIFIED ASSUMPTION — FLAGGED, NOT SILENTLY FIXED: this sandbox has no
+# TWELVEDATA_API_KEY / live network access, so the exact field names inside
+# Twelve Data's income_statement/balance_sheet/cash_flow responses have never
+# been confirmed against a real response. _stmt_num() below tries several
+# plausible key spellings per field, but they are GUESSES, exactly like the
+# original patch this was built from. Do not trust a Piotroski score, ROCE
+# fallback, or Screen A/B pass/fail without spot-checking it against a real
+# filing first — see the st.info() caveat rendered in the Screen A/B tab.
+# ============================================================================
+
+def _td_get_statements(sym, outputsize=2):
+    """Fetch income statement, balance sheet, cash flow (annual periods).
+    outputsize defaults to 2 (enough for Screen A's YoY Piotroski checks);
+    Screen B's 5-year sales-growth check needs 5 years of history, so its
+    caller (run_fundamental_screens) passes outputsize=5 explicitly rather
+    than this function always requesting 5 years regardless of which screen
+    is running (that would cost extra Twelve Data API weight for history
+    Screen A never uses).
+    Returns dict with keys: income, balance, cashflow — each a list of
+    period dicts (most recent first) or [] on failure. Never raises.
+    """
+    if not twelvedata_configured():
+        return {"income": [], "balance": [], "cashflow": []}
+    out = {}
+    for key, ep in [("income", "income_statement"),
+                     ("balance", "balance_sheet"),
+                     ("cashflow", "cash_flow")]:
+        try:
+            j = _td_get(ep, {"symbol": sym, "exchange": "XNSE",
+                              "period": "annual", "outputsize": outputsize})
+            if isinstance(j, dict) and "_error" not in j:
+                rows = j.get(key + "_statement", j.get("statement", []))
+                if not rows:
+                    for v in j.values():
+                        if isinstance(v, list):
+                            rows = v
+                            break
+                out[key] = rows if isinstance(rows, list) else []
+            else:
+                out[key] = []
+        except Exception:
+            out[key] = []
+    return out
+
+
+def _stmt_num(period_dict, *keys):
+    """Pull a numeric field from one statement period, trying several
+    possible key spellings (Twelve Data naming varies by statement type)."""
+    if not isinstance(period_dict, dict):
+        return np.nan
+    flat = {}
+    for section in period_dict.values():
+        if isinstance(section, dict):
+            flat.update(section)
+    flat.update(period_dict)
+    for k in keys:
+        v = flat.get(k)
+        try:
+            if v is not None:
+                return float(v)
+        except Exception:
+            pass
+    return np.nan
+
+
+def piotroski_score(statements):
+    """Standard 9-point Piotroski F-Score using 2 years of statements.
+    Returns (score:int 0-9, detail:dict) — missing data scores that test 0
+    rather than raising, so a partial statement still returns a usable score.
+    """
+    inc = statements.get("income", [])
+    bal = statements.get("balance", [])
+    cf = statements.get("cashflow", [])
+    if len(inc) < 2 or len(bal) < 2 or len(cf) < 1:
+        return 0, {"error": "Insufficient statement history (need 2 years)"}
+
+    cur_inc, prev_inc = inc[0], inc[1]
+    cur_bal, prev_bal = bal[0], bal[1]
+    cur_cf = cf[0]
+
+    net_income = _stmt_num(cur_inc, "net_income", "netIncome")
+    total_assets_cur = _stmt_num(cur_bal, "total_assets", "totalAssets")
+    total_assets_prev = _stmt_num(prev_bal, "total_assets", "totalAssets")
+    cfo = _stmt_num(cur_cf, "operating_cash_flow", "cash_from_operating_activities")
+    lt_debt_cur = _stmt_num(cur_bal, "long_term_debt", "longTermDebt")
+    lt_debt_prev = _stmt_num(prev_bal, "long_term_debt", "longTermDebt")
+    cur_assets_cur = _stmt_num(cur_bal, "total_current_assets", "totalCurrentAssets")
+    cur_liab_cur = _stmt_num(cur_bal, "total_current_liabilities", "totalCurrentLiabilities")
+    cur_assets_prev = _stmt_num(prev_bal, "total_current_assets", "totalCurrentAssets")
+    cur_liab_prev = _stmt_num(prev_bal, "total_current_liabilities", "totalCurrentLiabilities")
+    shares_cur = _stmt_num(cur_bal, "common_shares_outstanding", "shares_outstanding")
+    shares_prev = _stmt_num(prev_bal, "common_shares_outstanding", "shares_outstanding")
+    gross_profit_cur = _stmt_num(cur_inc, "gross_profit", "grossProfit")
+    revenue_cur = _stmt_num(cur_inc, "sales", "total_revenue", "revenue")
+    gross_profit_prev = _stmt_num(prev_inc, "gross_profit", "grossProfit")
+    revenue_prev = _stmt_num(prev_inc, "sales", "total_revenue", "revenue")
+    net_income_prev = _stmt_num(prev_inc, "net_income", "netIncome")
+
+    def safe_div(a, b):
+        return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
+
+    roa_cur = safe_div(net_income, total_assets_cur)
+    roa_prev = safe_div(net_income_prev, total_assets_prev)
+    leverage_cur = safe_div(lt_debt_cur, total_assets_cur)
+    leverage_prev = safe_div(lt_debt_prev, total_assets_prev)
+    current_ratio_cur = safe_div(cur_assets_cur, cur_liab_cur)
+    current_ratio_prev = safe_div(cur_assets_prev, cur_liab_prev)
+    gross_margin_cur = safe_div(gross_profit_cur, revenue_cur)
+    gross_margin_prev = safe_div(gross_profit_prev, revenue_prev)
+    asset_turnover_cur = safe_div(revenue_cur, total_assets_cur)
+    asset_turnover_prev = safe_div(revenue_prev, total_assets_prev)
+
+    tests = {}
+    tests["positive_roa"] = pd.notna(roa_cur) and roa_cur > 0
+    tests["positive_cfo"] = pd.notna(cfo) and cfo > 0
+    tests["roa_improving"] = pd.notna(roa_cur) and pd.notna(roa_prev) and roa_cur > roa_prev
+    tests["cfo_gt_netincome"] = pd.notna(cfo) and pd.notna(net_income) and cfo > net_income
+    tests["leverage_decreasing"] = pd.notna(leverage_cur) and pd.notna(leverage_prev) and leverage_cur < leverage_prev
+    tests["current_ratio_improving"] = pd.notna(current_ratio_cur) and pd.notna(current_ratio_prev) and current_ratio_cur > current_ratio_prev
+    tests["no_new_shares"] = pd.notna(shares_cur) and pd.notna(shares_prev) and shares_cur <= shares_prev
+    tests["gross_margin_improving"] = pd.notna(gross_margin_cur) and pd.notna(gross_margin_prev) and gross_margin_cur > gross_margin_prev
+    tests["asset_turnover_improving"] = pd.notna(asset_turnover_cur) and pd.notna(asset_turnover_prev) and asset_turnover_cur > asset_turnover_prev
+
+    score = int(sum(1 for v in tests.values() if v))
+    return score, tests
+
+
+def screen_a_metrics(sym, info, statements, price_return_1y):
+    """Screen A — momentum + quality growth (Piotroski = 9 required)."""
+    stats = info.get("statistics", {}) if isinstance(info.get("statistics"), dict) else {}
+    prof = info.get("profile", {}) if isinstance(info.get("profile"), dict) else {}
+
+    def num(*keys):
+        for k in keys:
+            v = stats.get(k, prof.get(k))
+            try:
+                if v is not None:
+                    return float(v)
+            except Exception:
+                pass
+        return np.nan
+
+    mcap = num("market_capitalization", "market_cap")
+    roce = num("return_on_capital_employed", "roce")
+    roe = num("return_on_equity", "roe")
+    qsales_g = num("quarterly_revenue_growth_yoy", "yoy_quarterly_sales_growth")
+    qprofit_g = num("quarterly_earnings_growth_yoy", "yoy_quarterly_profit_growth")
+
+    # ROCE fallback: EBIT / (Total Assets - Current Liabilities), latest statement
+    if pd.isna(roce) and statements.get("income") and statements.get("balance"):
+        ebit = _stmt_num(statements["income"][0], "operating_income", "ebit")
+        ta = _stmt_num(statements["balance"][0], "total_assets", "totalAssets")
+        cl = _stmt_num(statements["balance"][0], "total_current_liabilities", "totalCurrentLiabilities")
+        if pd.notna(ebit) and pd.notna(ta) and pd.notna(cl) and (ta - cl) != 0:
+            roce = 100.0 * ebit / (ta - cl)
+
+    pscore, pdetail = piotroski_score(statements)
+
+    checks = {
+        "Market Cap (200-20000cr)": pd.notna(mcap) and 200 <= mcap <= 20000,
+        "1Yr Return > 0": pd.notna(price_return_1y) and price_return_1y > 0,
+        "YoY Qtr Sales Growth > 10%": pd.notna(qsales_g) and qsales_g > 10,
+        "YoY Qtr Profit Growth > 10%": pd.notna(qprofit_g) and qprofit_g > 10,
+        "ROCE > 15%": pd.notna(roce) and roce > 15,
+        "ROE > 15%": pd.notna(roe) and roe > 15,
+        "Piotroski = 9": pscore == 9,
+    }
+    passed = all(checks.values())
+    return {
+        "Ticker": sym, "Screen": "A", "Pass": passed,
+        "Market Cap": mcap, "1Yr Return %": price_return_1y,
+        "YoY Qtr Sales %": qsales_g, "YoY Qtr Profit %": qprofit_g,
+        "ROCE %": roce, "ROE %": roe, "Piotroski": pscore,
+        "Checks": checks,
+    }
+
+
+def screen_b_metrics(sym, info, statements):
+    """Screen B — quality value + dividend (Promoter Holding flagged N/A:
+    India shareholding-pattern disclosure, not carried by Twelve Data)."""
+    stats = info.get("statistics", {}) if isinstance(info.get("statistics"), dict) else {}
+    prof = info.get("profile", {}) if isinstance(info.get("profile"), dict) else {}
+
+    def num(*keys):
+        for k in keys:
+            v = stats.get(k, prof.get(k))
+            try:
+                if v is not None:
+                    return float(v)
+            except Exception:
+                pass
+        return np.nan
+
+    mcap = num("market_capitalization", "market_cap")
+    eps = num("eps", "trailing_eps")
+    roe = num("return_on_equity", "roe")
+    debt_eq = num("debt_to_equity", "debt_equity")
+    pe = num("pe_ratio", "trailing_pe")
+    current_ratio = num("current_ratio")
+    div_yield = num("dividend_yield")
+
+    roce = num("return_on_capital_employed", "roce")
+    if pd.isna(roce) and statements.get("income") and statements.get("balance"):
+        ebit = _stmt_num(statements["income"][0], "operating_income", "ebit")
+        ta = _stmt_num(statements["balance"][0], "total_assets", "totalAssets")
+        cl = _stmt_num(statements["balance"][0], "total_current_liabilities", "totalCurrentLiabilities")
+        if pd.notna(ebit) and pd.notna(ta) and pd.notna(cl) and (ta - cl) != 0:
+            roce = 100.0 * ebit / (ta - cl)
+
+    # Sales growth 5Y — needs 5+ annual periods. run_fundamental_screens()
+    # requests outputsize=5 whenever Screen B is selected (see
+    # _td_get_statements docstring) so this actually computes instead of
+    # always being left NaN.
+    sales_g5 = np.nan
+    inc = statements.get("income", [])
+    if len(inc) >= 5:
+        rev_now = _stmt_num(inc[0], "sales", "total_revenue", "revenue")
+        rev_5y = _stmt_num(inc[4], "sales", "total_revenue", "revenue")
+        if pd.notna(rev_now) and pd.notna(rev_5y) and rev_5y > 0:
+            sales_g5 = 100.0 * ((rev_now / rev_5y) ** (1/5) - 1)
+
+    net_profit_margin = num("profit_margin", "net_profit_margin")
+    op_profit_g = np.nan
+    if len(inc) >= 2:
+        op_cur = _stmt_num(inc[0], "operating_income", "ebit")
+        op_prev = _stmt_num(inc[1], "operating_income", "ebit")
+        if pd.notna(op_cur) and pd.notna(op_prev) and op_prev != 0:
+            op_profit_g = 100.0 * (op_cur - op_prev) / abs(op_prev)
+
+    pfcf = np.nan
+    cf = statements.get("cashflow", [])
+    if cf and pd.notna(mcap):
+        cfo = _stmt_num(cf[0], "operating_cash_flow", "cash_from_operating_activities")
+        capex = _stmt_num(cf[0], "capital_expenditure", "capex")
+        if pd.notna(cfo) and pd.notna(capex):
+            fcf = cfo - abs(capex)
+            if fcf > 0:
+                pfcf = mcap / fcf
+
+    checks = {
+        "Market Cap > 5000cr": pd.notna(mcap) and mcap > 5000,
+        "EPS > 15": pd.notna(eps) and eps > 15,
+        "Sales Growth 5Y > 10%": (pd.notna(sales_g5) and sales_g5 > 10) if pd.notna(sales_g5) else None,
+        "ROE > 15%": pd.notna(roe) and roe > 15,
+        "ROCE > 15%": pd.notna(roce) and roce > 15,
+        "Debt/Equity < 0.5": pd.notna(debt_eq) and debt_eq < 0.5,
+        "Price/FCF > 0": pd.notna(pfcf) and pfcf > 0,
+        "Net Profit Margin > 10%": pd.notna(net_profit_margin) and net_profit_margin > 10,
+        "PE < 25": pd.notna(pe) and pe < 25,
+        "Current Ratio > 1.5": pd.notna(current_ratio) and current_ratio > 1.5,
+        "Dividend Yield > 1%": pd.notna(div_yield) and div_yield > 1,
+        "Operating Profit Growth > 15%": pd.notna(op_profit_g) and op_profit_g > 15,
+        "Promoter Holding > 40%": None,  # data not available via Twelve Data — never silently true
+    }
+    evaluated = {k: v for k, v in checks.items() if v is not None}
+    unverifiable = [k for k, v in checks.items() if v is None]
+    passed = all(evaluated.values()) if evaluated else False
+
+    return {
+        "Ticker": sym, "Screen": "B", "Pass": passed,
+        "Unverifiable": ", ".join(unverifiable) if unverifiable else "",
+        "Market Cap": mcap, "EPS": eps, "ROE %": roe, "ROCE %": roce,
+        "Debt/Equity": debt_eq, "P/E": pe, "Current Ratio": current_ratio,
+        "Dividend Yield %": div_yield, "Sales Growth 5Y %": sales_g5,
+        "Op Profit Growth %": op_profit_g, "Net Profit Margin %": net_profit_margin,
+        "P/FCF": pfcf,
+        "Checks": checks,
+    }
+
+
+def run_fundamental_screens(universe_names, run_a=True, run_b=True, progress_cb=None):
+    """Scans the given universes against Screen A and/or B.
+    progress_cb(done:int, total:int, symbol:str) is called after each stock
+    if provided, so the UI can render a live progress bar.
+    Returns a single DataFrame with all results (both screens if both run).
+    """
+    symbols = set()
+    for u in universe_names:
+        try:
+            symbols.update(index_universe(u))
+        except Exception:
+            continue
+    symbols = sorted(symbols)
+
+    # Screen B's 5-year sales-growth check needs 5 annual periods; Screen A
+    # only ever looks at 2. Only pay the extra Twelve Data outputsize cost
+    # when Screen B is actually selected.
+    stmt_outputsize = 5 if run_b else 2
+
+    rows = []
+    total = len(symbols)
+    for i, full_sym in enumerate(symbols):
+        sym = full_sym.replace(".NS", "")
+        try:
+            info, flags = company_info(sym)
+            statements = _td_get_statements(sym, outputsize=stmt_outputsize)
+
+            price_return_1y = np.nan
+            try:
+                stats = info.get("statistics", {}) if isinstance(info, dict) else {}
+                price_return_1y = float(stats.get("52_week_change", stats.get("year_change", np.nan)))
+            except Exception:
+                pass
+
+            if run_a:
+                rows.append(screen_a_metrics(sym, info, statements, price_return_1y))
+            if run_b:
+                rows.append(screen_b_metrics(sym, info, statements))
+        except Exception as e:
+            rows.append({"Ticker": sym, "Screen": "ERROR", "Pass": False, "Checks": {"error": str(e)}})
+        finally:
+            if progress_cb:
+                progress_cb(i + 1, total, sym)
+            time.sleep(0.15)  # gentle pacing against Twelve Data rate limits
+
+    return pd.DataFrame(rows)
+
+
+def add_fundamental_forward_candidates(results_df):
+    """Persists PASSing fundamental candidates into the existing forward_tests
+    table (tagged FUNDA/FUNDB), same table/schema pattern as
+    add_forward_candidates()/add_smc_forward_candidates() so they show up in
+    the Forward Testing tab automatically — no new table.
+
+    Unlike the original draft of this function, entry/sl/target are never
+    left NULL: refresh_forward_positions() unconditionally does
+    float(row.entry)/float(row.sl)/float(row.target) on every ACTIVE
+    forward_tests row and would raise on a NULL price field, so a candidate
+    without a resolvable local Dhan close price is skipped rather than
+    inserted with placeholder nulls.
+
+    Fundamental screens are long-term theses, not tactical S1-S4 setups, so
+    entry/stop/target use a wider 15% stop (vs S1-S4's 7%) while keeping the
+    same 3R target convention used everywhere else in the app, so result_r
+    stays on a comparable scale across strategies in forward_summary_table().
+    """
+    if results_df is None or results_df.empty:
+        return 0
+    passed = results_df[results_df["Pass"] == True]
+    if passed.empty:
+        return 0
+    con = _db(); added = 0
+    try:
+        today = str(date.today())
+        for _, r in passed.iterrows():
+            symbol = str(r.get("Ticker", "")).upper()
+            strategy = "FUND" + str(r.get("Screen", "")).upper()
+            if not symbol or strategy not in {"FUNDA", "FUNDB"}:
+                continue
+            exists = con.execute(
+                "SELECT id FROM forward_tests WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1",
+                (symbol, strategy, today)
+            ).fetchone()
+            if exists:
+                continue
+
+            d = _read_cache(con, symbol, date.today()-timedelta(days=30), date.today())
+            if d is None or d.empty:
+                continue  # no local Dhan price to anchor entry — skip rather than insert a NULL price row
+            entry = float(d.close.iloc[-1])
+            if not np.isfinite(entry) or entry <= 0:
+                continue
+            stop = entry * 0.85
+            target = entry + 3 * (entry - stop)
+
+            score = float(r.get("Piotroski", r.get("ROE %", 0)) or 0)
+            now = datetime.now().isoformat(timespec="seconds")
+            snapshot = {k: r.get(k, None) for k in r.index}
+            cur = con.execute("""INSERT INTO forward_tests(
+                created_at,symbol,strategy,score,regime,entry,sl,target,status,ltp,mfe,mae,
+                exit_price,result_r,updated_at,signal_date,signal_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                now, symbol, strategy, score, "FUNDAMENTAL", entry, stop, target, "ACTIVE",
+                entry, 0.0, 0.0, None, None, now, today,
+                json.dumps(snapshot, default=str, allow_nan=True)
+            ))
+            fid = int(cur.lastrowid); added += 1
+            con.execute("""INSERT OR IGNORE INTO forward_observations(
+                forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                fid, now, today, entry, entry, entry, 0.0, 0.0, 0.0, "ACTIVE"
+            ))
+        con.commit()
+    finally:
+        con.close()
+    if added:
+        maybe_backup_db()
+    return added
+
+
 @st.cache_data(ttl=86400,show_spinner=False)
 def td_history(symbol, interval="1day", start_date=None, end_date=None, outputsize=5000):
     """Historical OHLCV for Forex and Crypto through Twelve Data."""
@@ -5132,25 +5528,109 @@ with tabs[4]:
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals + News")
-    st.caption("Dhan remains the primary Indian market-price source. Fundamental/news enrichment is deliberately fetched only for candidates, cached locally, and never used to weaken S1–S4 rules.")
-    st.info("Twelve Data provides India fundamentals/press releases; Dhan's current API documentation exposes market data, instruments, quotes, positions and related trading/data APIs rather than a fundamental-financial-statement endpoint.")
-    sym_text=st.text_input("Candidate symbols (comma separated)","RELIANCE,TCS,HDFCBANK",key="fund_symbols_final")
-    if st.button("🔎 Enrich Fundamentals + News",key="fund_enrich_final"):
-        symbols=[x.strip().upper() for x in sym_text.split(',') if x.strip()]
-        rows=[]
-        with st.spinner(f"Enriching {len(symbols)} candidate(s)..."):
-            for sym in symbols:
-                try:
-                    info,ff=company_info(sym)
-                    items,sent,risk=news_snapshot(sym)
-                    score,status,flags=_fundamental_score(info)
-                    rows.append({"Ticker":sym,"Fundamental Score":score,"Status":status,"News Sentiment":round(sent,1),"News Risk":round(risk,1),"Flags":"; ".join(ff+flags),"News Items":len(items)})
-                except Exception as e:
-                    rows.append({"Ticker":sym,"Fundamental Score":np.nan,"Status":f"ERROR: {e}","News Sentiment":np.nan,"News Risk":np.nan,"Flags":"","News Items":0})
-        st.session_state["fundamental_results_final"]=pd.DataFrame(rows)
-    fr=st.session_state.get("fundamental_results_final",pd.DataFrame())
-    if fr.empty: st.info("Enter candidates or feed the tab from the scanner's ≥85 queue.")
-    else: st.dataframe(fr.sort_values(["Fundamental Score","News Sentiment"],ascending=[False,False]),width='stretch',hide_index=True)
+    st.caption("Dhan remains the primary Indian market-price source. Twelve Data provides fundamentals; Screen A / Screen B run against the full index universe, not just typed symbols.")
+
+    fscreen_tab1, fscreen_tab2 = st.tabs(["📋 Screen A / B — Universe Scan", "🔎 Manual Symbol Lookup"])
+
+    with fscreen_tab1:
+        st.info(
+            "⚠️ Twelve Data field-name mappings for income_statement/balance_sheet/cash_flow "
+            "(and therefore the Piotroski score, ROCE fallback, and every Screen A/B pass/fail below) "
+            "are UNVERIFIED assumptions — this deployment has not been checked against a live Twelve "
+            "Data key or a real company filing. Spot-check any PASS result against the company's actual "
+            "financial statements before acting on it."
+        )
+        fc1, fc2, fc3 = st.columns([2, 1, 1])
+        fund_universes = fc1.multiselect(
+            "Universe", ["Nifty 500", "Nifty Smallcap 100", "Nifty Smallcap 250", "Nifty Midcap 150"],
+            default=["Nifty 500"], key="fund_screen_universe"
+        )
+        fund_run_a = fc2.checkbox("Screen A", value=True, key="fund_run_a")
+        fund_run_b = fc3.checkbox("Screen B", value=True, key="fund_run_b")
+
+        fund_auto_track = st.checkbox(
+            "Auto-track PASS results into Forward Testing", value=True, key="fund_auto_track",
+            help="Passing stocks are inserted into the same forward_tests table used by the technical "
+                 "scanner (tagged FUNDA/FUNDB) so they can be watched forward, using a local Dhan close "
+                 "as entry with a wide 15%/3R stop-target (see add_fundamental_forward_candidates)."
+        )
+
+        if st.button("🔬 RUN FUNDAMENTAL SCREENS", type="primary", key="fund_screen_run"):
+            if not fund_universes:
+                st.warning("Select at least one universe.")
+            elif not (fund_run_a or fund_run_b):
+                st.warning("Select at least one screen (A and/or B).")
+            elif not twelvedata_configured():
+                st.error("TWELVEDATA_API_KEY not configured in Streamlit secrets — Screen A/B need Twelve Data fundamentals.")
+            else:
+                fund_prog = st.progress(0.0, text="Starting scan...")
+
+                def _fund_cb(done, total, sym):
+                    fund_prog.progress(done / max(total, 1), text=f"Scanning {sym} ({done}/{total})")
+
+                with st.spinner("Fetching fundamentals — this can take a while for large universes..."):
+                    fund_result = run_fundamental_screens(fund_universes, run_a=fund_run_a, run_b=fund_run_b, progress_cb=_fund_cb)
+
+                fund_prog.empty()
+                st.session_state["fund_screen_results"] = fund_result
+
+                if fund_auto_track and not fund_result.empty:
+                    n_added = add_fundamental_forward_candidates(fund_result)
+                    st.success(f"Scan complete. {n_added} new candidate(s) added to Forward Testing.")
+                else:
+                    st.success("Scan complete.")
+
+        fund_result = st.session_state.get("fund_screen_results", pd.DataFrame())
+        if fund_result.empty:
+            st.info("Run a screen to see universe-wide fundamental results here.")
+        else:
+            fund_passed = fund_result[fund_result["Pass"] == True]
+            fund_failed = fund_result[fund_result["Pass"] == False]
+            fm1, fm2, fm3 = st.columns(3)
+            fm1.metric("Scanned", len(fund_result))
+            fm2.metric("Passed", len(fund_passed))
+            fm3.metric("Failed", len(fund_failed))
+
+            fund_display_cols = [c for c in fund_result.columns if c not in ("Checks",)]
+            st.dataframe(
+                fund_result[fund_display_cols].sort_values(["Pass", "Screen"], ascending=[False, True]),
+                width='stretch', hide_index=True
+            )
+
+            if "Unverifiable" in fund_result.columns and fund_result["Unverifiable"].astype(str).str.len().gt(0).any():
+                st.warning("Some checks could not be verified (e.g. Promoter Holding — not available via Twelve Data) and were excluded from the Pass/Fail decision rather than assumed true.")
+
+            with st.expander("🔍 View individual stock check breakdown"):
+                fund_pick = st.selectbox("Stock", fund_result["Ticker"].unique(), key="fund_screen_detail_pick")
+                fund_sub = fund_result[fund_result["Ticker"] == fund_pick]
+                for _, frow in fund_sub.iterrows():
+                    st.markdown(f"**Screen {frow.get('Screen')}** — {'✅ PASS' if frow.get('Pass') else '❌ FAIL'}")
+                    fchecks = frow.get("Checks", {})
+                    if isinstance(fchecks, dict):
+                        for k, v in fchecks.items():
+                            ficon = "✅" if v is True else "❌" if v is False else "⚪ N/A"
+                            st.write(f"{ficon} {k}")
+
+    with fscreen_tab2:
+        st.caption("Dhan remains the primary Indian market-price source. Fundamental/news enrichment is deliberately fetched only for candidates, cached locally, and never used to weaken S1–S4 rules.")
+        st.info("Twelve Data provides India fundamentals/press releases; Dhan's current API documentation exposes market data, instruments, quotes, positions and related trading/data APIs rather than a fundamental-financial-statement endpoint.")
+        sym_text=st.text_input("Candidate symbols (comma separated)","RELIANCE,TCS,HDFCBANK",key="fund_symbols_final")
+        if st.button("🔎 Enrich Fundamentals + News",key="fund_enrich_final"):
+            symbols=[x.strip().upper() for x in sym_text.split(',') if x.strip()]
+            rows=[]
+            with st.spinner(f"Enriching {len(symbols)} candidate(s)..."):
+                for sym in symbols:
+                    try:
+                        info,ff=company_info(sym)
+                        items,sent,risk=news_snapshot(sym)
+                        score,status,flags=_fundamental_score(info)
+                        rows.append({"Ticker":sym,"Fundamental Score":score,"Status":status,"News Sentiment":round(sent,1),"News Risk":round(risk,1),"Flags":"; ".join(ff+flags),"News Items":len(items)})
+                    except Exception as e:
+                        rows.append({"Ticker":sym,"Fundamental Score":np.nan,"Status":f"ERROR: {e}","News Sentiment":np.nan,"News Risk":np.nan,"Flags":"","News Items":0})
+            st.session_state["fundamental_results_final"]=pd.DataFrame(rows)
+        fr=st.session_state.get("fundamental_results_final",pd.DataFrame())
+        if fr.empty: st.info("Enter candidates or feed the tab from the scanner's ≥85 queue.")
+        else: st.dataframe(fr.sort_values(["Fundamental Score","News Sentiment"],ascending=[False,False]),width='stretch',hide_index=True)
 
 with tabs[6]:
     st.subheader("🏢 Small/Micro Safety Engine")
