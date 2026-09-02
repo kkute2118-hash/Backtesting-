@@ -3495,6 +3495,410 @@ def features_fast(symbol, df):
     except Exception:pass
     return x
 
+# ========================= RAW STRATEGY LEARNING ARCHITECTURE — Phase 9 =========================
+# Phase 1 (raw signal capture, no >=85 gate) + Phase 2 (feature fingerprint) of the
+# research architecture redesign. Phases 3-6 (pattern discovery, similarity engine, a
+# new marking model, Mentor agents) build ON TOP of the data this produces and are not
+# attempted here - this needs to run long enough to accumulate a meaningful sample
+# first (months, not days).
+#
+# ADDITIVE, NOT A REPLACEMENT: the existing run_local_backtest()/_professional_bt()
+# (with its >=85 threshold gate) is completely untouched - it still works exactly as
+# before. This adds a SEPARATE raw-capture path (run_raw_signal_backtest) writing to
+# a NEW table (raw_signal_fingerprints), so nothing about the existing >=85 backtest
+# or scanner changes until this data is deliberately acted on later.
+#
+# THE GATE THIS BYPASSES (deliberately, only in this parallel path): the existing
+# _professional_bt() does `if score<int(threshold):continue` before ever simulating a
+# signal - discarding it before it's ever recorded, so the learning data can never
+# discover that a lower-scored setup might actually outperform. run_raw_signal_backtest()
+# below has NO such gate.
+#
+# PERFORMANCE FIX APPLIED (found while integrating, not present in the original
+# design): the original draft of this loop called regime_from_index(hist) and
+# safety({}, hist) per signal, recomputing the ENTIRE technical feature set
+# (features()/features_slow(), including weekly/monthly resampling) from scratch on a
+# growing history slice for EVERY signal in EVERY strategy across the ENTIRE universe.
+# This is the exact O(n^2)-class hot path already found and fixed twice elsewhere in
+# this codebase (the original S1-S4 backtest loop, and the SMC backtest) - and would
+# have been WORSE here, since removing the score gate means simulating far more
+# signals per ticker with no early pruning. Fixed by reusing the same O(1) functions
+# the existing >=85 backtest already uses: _regime_from_row(f,i) for regime, and
+# _safety_fast_series(df) computed ONCE per ticker + _safety_from_row(avg_value,
+# abnormal,i) per signal for safety - see bench_raw_signal_perf.py (scratch dir) for a
+# measured before/after comparison. Note the original design draft's score/parts line,
+# `_row_score(f, i, s, regime, safe)`, referenced a function that does not exist in
+# some older versions of this codebase's history - it DOES exist in the current
+# app.py (added by this same earlier O(n^2) fix elsewhere) and is used unchanged here.
+#
+# WHAT'S COMPUTED NOW vs DEFERRED (unchanged from the original design, being honest
+# about scope): trend direction, MA distances, ATR/volatility, RelVol, volume
+# expansion, candle body/wick structure, breakout/retest, pullback depth, swing
+# distance, RSI, a simple MACD (not in features_fast(), added here), distance from
+# recent high/low, gap %, support/resistance distance (swing proxy), retracement %
+# + duration for S4, rejection/reclaim candle heuristics, trade geometry, safety
+# score/flags. DEFERRED (need data sources not wired in yet - stubbed NULL, not
+# faked): Nifty/Bank Nifty trend, market breadth, sector trend/regime, earnings
+# proximity, valuation/debt/growth history.
+
+def ensure_raw_fingerprint_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS raw_signal_fingerprints(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER, created_at TEXT,
+            ticker TEXT, strategy TEXT, signal_date TEXT, entry_date TEXT, exit_date TEXT,
+            score REAL, outcome TEXT, entry REAL, stop REAL, target REAL, exit_price REAL,
+            return_pct REAL, r_multiple REAL, holding_bars INTEGER, mfe_pct REAL, mae_pct REAL,
+
+            -- price / chart structure
+            trend_direction TEXT, dist_ema20_atr REAL, dist_ema50_atr REAL, dist_ema200_atr REAL,
+            atr_pct REAL, relvol REAL, relvol_trend REAL, candle_body_pct REAL,
+            candle_upper_wick_pct REAL, candle_lower_wick_pct REAL, breakout_20d INTEGER,
+            breakout_50d INTEGER, pullback_depth_pct REAL, dist_recent_high_atr REAL,
+            dist_recent_low_atr REAL, gap_pct REAL, dist_support_atr REAL, dist_resistance_atr REAL,
+            rsi14 REAL, macd_hist REAL,
+
+            -- retracement (S4-relevant, computed for all strategies where applicable)
+            retracement_pct REAL, retracement_duration_bars INTEGER, retracement_volume_ratio REAL,
+            rejection_candle INTEGER, reclaim_candle INTEGER,
+
+            -- market conditions (deferred fields NULL until Phase 2b)
+            market_regime TEXT, nifty_trend TEXT, market_breadth REAL, sector_trend TEXT,
+
+            -- trade geometry
+            stop_distance_pct REAL, target_distance_pct REAL, expected_rr REAL, atr_adjusted_stop REAL,
+
+            -- safety / fundamental context (what's already available)
+            safety_score REAL, safety_flags TEXT,
+
+            -- deterministic score components (kept for comparison against new model later)
+            score_htf REAL, score_footprint REAL, score_entry_quality REAL, score_relative_strength REAL,
+
+            source TEXT
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS raw_signal_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, market TEXT,
+            start_date TEXT, end_date TEXT, universe_size INTEGER, signals_captured INTEGER,
+            elapsed_seconds REAL, status TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_raw_fingerprint_table()
+
+
+def _simple_swings(df, left=3, right=3):
+    """Lightweight fractal swing detection for retracement/support-resistance
+    proxies. Only needs to look backward from index i (as-of correct)."""
+    highs = df["high"].values; lows = df["low"].values
+    n = len(df)
+    sh, sl = [], []
+    for i in range(left, n - right):
+        if highs[i] == highs[i-left:i+right+1].max():
+            sh.append(i)
+        if lows[i] == lows[i-left:i+right+1].min():
+            sl.append(i)
+    return sh, sl
+
+
+def _retracement_features(df, i):
+    """Computes retracement % from the most recent swing leg, using only
+    data up to and including index i (as-of correct, no look-ahead).
+    Returns dict — values are None if not enough swing history yet.
+    """
+    hist = df.iloc[:i+1]
+    if len(hist) < 20:
+        return {"retracement_pct": None, "retracement_duration_bars": None, "retracement_volume_ratio": None,
+                "rejection_candle": 0, "reclaim_candle": 0}
+
+    window = hist.iloc[-120:] if len(hist) > 120 else hist
+    sh, sl = _simple_swings(window)
+    if not sh or not sl:
+        return {"retracement_pct": None, "retracement_duration_bars": None, "retracement_volume_ratio": None,
+                "rejection_candle": 0, "reclaim_candle": 0}
+
+    offset = len(hist) - len(window)
+    last_high_idx = sh[-1] + offset
+    last_low_idx = sl[-1] + offset
+
+    # Determine which came more recently to establish leg direction
+    if last_high_idx > last_low_idx:
+        leg_low = float(hist["low"].iloc[last_low_idx]); leg_high = float(hist["high"].iloc[last_high_idx])
+        current = float(hist["close"].iloc[-1])
+        rng = leg_high - leg_low
+        retr_pct = ((leg_high - current) / rng * 100) if rng > 0 else None
+        duration = len(hist) - 1 - last_high_idx
+    else:
+        leg_low = float(hist["low"].iloc[last_low_idx]); leg_high = float(hist["high"].iloc[last_high_idx])
+        current = float(hist["close"].iloc[-1])
+        rng = leg_high - leg_low
+        retr_pct = ((current - leg_low) / rng * 100) if rng > 0 else None
+        duration = len(hist) - 1 - last_low_idx
+
+    vol_ratio = None
+    if duration and duration > 0 and len(hist) > duration * 2:
+        recent_vol = hist["volume"].iloc[-duration:].mean()
+        prior_vol = hist["volume"].iloc[-duration*2:-duration].mean()
+        vol_ratio = float(recent_vol / prior_vol) if prior_vol and prior_vol > 0 else None
+
+    last_bar = hist.iloc[-1]
+    bar_range = max(last_bar["high"] - last_bar["low"], 1e-9)
+    close_pos = (last_bar["close"] - last_bar["low"]) / bar_range
+    rejection = int(close_pos < 0.3)  # closed near the low of its range
+    reclaim = int(close_pos > 0.7)    # closed near the high of its range
+
+    return {
+        "retracement_pct": round(retr_pct, 2) if retr_pct is not None else None,
+        "retracement_duration_bars": int(duration) if duration is not None else None,
+        "retracement_volume_ratio": round(vol_ratio, 3) if vol_ratio is not None else None,
+        "rejection_candle": rejection, "reclaim_candle": reclaim,
+    }
+
+
+def _support_resistance_distance(df, i, atr_val):
+    """Distance (in ATR units) to the nearest swing high (resistance) and
+    swing low (support) above/below current price, as-of index i."""
+    hist = df.iloc[max(0, i-120):i+1]
+    if len(hist) < 20 or not atr_val or atr_val <= 0:
+        return None, None
+    sh, sl = _simple_swings(hist)
+    current = float(hist["close"].iloc[-1])
+    res_levels = [float(hist["high"].iloc[j]) for j in sh if float(hist["high"].iloc[j]) > current]
+    sup_levels = [float(hist["low"].iloc[j]) for j in sl if float(hist["low"].iloc[j]) < current]
+    dist_res = (min(res_levels) - current) / atr_val if res_levels else None
+    dist_sup = (current - max(sup_levels)) / atr_val if sup_levels else None
+    return dist_res, dist_sup
+
+
+def _simple_macd_hist(close_series):
+    """Standard 12/26/9 MACD histogram — not currently in features_fast(),
+    added here since the research architecture flags it as a needed feature."""
+    ema12 = close_series.ewm(span=12, adjust=False).mean()
+    ema26 = close_series.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    return float((macd_line - signal_line).iloc[-1])
+
+
+def compute_signal_fingerprint(df, f, i, entry, stop, target, regime, safe, safety_flags, parts):
+    """df: raw OHLCV. f: features_fast() output (has ema/rsi/atr/relvol etc).
+    i: signal bar index. Everything here uses ONLY data up to and including
+    index i — no look-ahead. Returns a flat dict ready for DB insertion.
+    """
+    row = f.iloc[i]
+    close = float(row["close"]); atr = float(row.get("atr14", np.nan))
+
+    ema20, ema50, ema200 = row.get("ema20", np.nan), row.get("ema50", np.nan), row.get("ema200", np.nan)
+    if pd.notna(ema20) and pd.notna(ema50) and pd.notna(ema200):
+        if close > ema20 > ema50 > ema200:
+            trend = "strong_up"
+        elif close > ema50 > ema200:
+            trend = "up"
+        elif close < ema20 < ema50 < ema200:
+            trend = "strong_down"
+        elif close < ema50 < ema200:
+            trend = "down"
+        else:
+            trend = "mixed"
+    else:
+        trend = "unknown"
+
+    atr_safe = atr if (pd.notna(atr) and atr > 0) else np.nan
+    dist_ema20 = (close - ema20) / atr_safe if pd.notna(atr_safe) and pd.notna(ema20) else None
+    dist_ema50 = (close - ema50) / atr_safe if pd.notna(atr_safe) and pd.notna(ema50) else None
+    dist_ema200 = (close - ema200) / atr_safe if pd.notna(atr_safe) and pd.notna(ema200) else None
+
+    relvol = float(row.get("relvol", np.nan)) if pd.notna(row.get("relvol", np.nan)) else None
+    relvol_series = f["relvol"].iloc[max(0, i-20):i+1]
+    relvol_trend = float(relvol_series.iloc[-1] - relvol_series.mean()) if len(relvol_series) > 5 and relvol_series.notna().any() else None
+
+    bar_range = max(float(row["high"]) - float(row["low"]), 1e-9)
+    body = abs(float(row["close"]) - float(row["open"]))
+    upper_wick = float(row["high"]) - max(float(row["close"]), float(row["open"]))
+    lower_wick = min(float(row["close"]), float(row["open"])) - float(row["low"])
+
+    high20 = df["high"].iloc[max(0, i-20):i].max() if i > 0 else np.nan
+    high50 = df["high"].iloc[max(0, i-50):i].max() if i > 0 else np.nan
+    low20 = df["low"].iloc[max(0, i-20):i].min() if i > 0 else np.nan
+    breakout_20 = int(pd.notna(high20) and close > high20)
+    breakout_50 = int(pd.notna(high50) and close > high50)
+    pullback_depth = ((high20 - close) / high20 * 100) if pd.notna(high20) and high20 > 0 else None
+
+    dist_recent_high = (high20 - close) / atr_safe if pd.notna(atr_safe) and pd.notna(high20) else None
+    dist_recent_low = (close - low20) / atr_safe if pd.notna(atr_safe) and pd.notna(low20) else None
+
+    prev_close = float(df["close"].iloc[i-1]) if i > 0 else None
+    gap_pct = ((float(row["open"]) - prev_close) / prev_close * 100) if prev_close else None
+
+    dist_res, dist_sup = _support_resistance_distance(df, i, atr_safe)
+    retr = _retracement_features(df, i)
+
+    macd_hist = None
+    try:
+        macd_hist = _simple_macd_hist(df["close"].iloc[:i+1])
+    except Exception:
+        pass
+
+    stop_dist_pct = abs(entry - stop) / entry * 100 if entry else None
+    target_dist_pct = abs(target - entry) / entry * 100 if entry else None
+    expected_rr = abs(target - entry) / abs(entry - stop) if entry and stop and entry != stop else None
+    atr_adj_stop = abs(entry - stop) / atr_safe if pd.notna(atr_safe) and atr_safe > 0 else None
+
+    return {
+        "trend_direction": trend,
+        "dist_ema20_atr": round(dist_ema20, 3) if dist_ema20 is not None else None,
+        "dist_ema50_atr": round(dist_ema50, 3) if dist_ema50 is not None else None,
+        "dist_ema200_atr": round(dist_ema200, 3) if dist_ema200 is not None else None,
+        "atr_pct": round(atr_safe / close * 100, 3) if pd.notna(atr_safe) and close else None,
+        "relvol": round(relvol, 3) if relvol is not None else None,
+        "relvol_trend": round(relvol_trend, 3) if relvol_trend is not None else None,
+        "candle_body_pct": round(body / bar_range * 100, 2),
+        "candle_upper_wick_pct": round(upper_wick / bar_range * 100, 2),
+        "candle_lower_wick_pct": round(lower_wick / bar_range * 100, 2),
+        "breakout_20d": breakout_20, "breakout_50d": breakout_50,
+        "pullback_depth_pct": round(pullback_depth, 2) if pullback_depth is not None else None,
+        "dist_recent_high_atr": round(dist_recent_high, 3) if dist_recent_high is not None else None,
+        "dist_recent_low_atr": round(dist_recent_low, 3) if dist_recent_low is not None else None,
+        "gap_pct": round(gap_pct, 3) if gap_pct is not None else None,
+        "dist_support_atr": round(dist_sup, 3) if dist_sup is not None else None,
+        "dist_resistance_atr": round(dist_res, 3) if dist_res is not None else None,
+        "rsi14": round(float(row.get("rsi14", np.nan)), 2) if pd.notna(row.get("rsi14", np.nan)) else None,
+        "macd_hist": round(macd_hist, 4) if macd_hist is not None else None,
+
+        "retracement_pct": retr["retracement_pct"],
+        "retracement_duration_bars": retr["retracement_duration_bars"],
+        "retracement_volume_ratio": retr["retracement_volume_ratio"],
+        "rejection_candle": retr["rejection_candle"], "reclaim_candle": retr["reclaim_candle"],
+
+        "market_regime": regime, "nifty_trend": None, "market_breadth": None, "sector_trend": None,  # Phase 2b
+
+        "stop_distance_pct": round(stop_dist_pct, 3) if stop_dist_pct is not None else None,
+        "target_distance_pct": round(target_dist_pct, 3) if target_dist_pct is not None else None,
+        "expected_rr": round(expected_rr, 3) if expected_rr is not None else None,
+        "atr_adjusted_stop": round(atr_adj_stop, 3) if atr_adj_stop is not None else None,
+
+        "safety_score": safe, "safety_flags": ", ".join(safety_flags) if safety_flags else "",
+
+        "score_htf": parts.get("HTF Demand", 0), "score_footprint": parts.get("Footprint", 0),
+        "score_entry_quality": parts.get("Entry Quality", 0), "score_relative_strength": parts.get("Relative Strength", 0),
+    }
+
+
+def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
+    """Near-identical to _professional_bt(), EXCEPT: no score threshold gate —
+    every legitimate S1-S4 signal is simulated and its full fingerprint
+    recorded, regardless of score. This is what lets later research discover
+    whether score actually predicts outcome, instead of only ever seeing
+    pre-filtered survivors.
+
+    data: dict of {ticker: df} exactly as the existing local backtest loop
+    expects (e.g. from load_local_backtest_data()/build_fast_data_cache()).
+    Returns a DataFrame of everything captured (also persisted to DB).
+    """
+    rows = []
+    tickers = list(data.keys())
+    for n, ticker in enumerate(tickers):
+        try:
+            df = data[ticker]
+            if df is None or df.empty or len(df) < 260:
+                continue
+            df = df.sort_index()
+            f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            if f.empty:
+                continue
+
+            # Same O(1) precompute the existing >=85 backtest uses (see
+            # _professional_bt) instead of recomputing regime_from_index()/
+            # safety({}, hist) from scratch per signal - the fix this phase
+            # needed most, since removing the score gate means many more
+            # signals get simulated per ticker with no early pruning.
+            avg_value, abnormal = _safety_fast_series(df)
+
+            for s in strategies:
+                sig = strategy_signal(f, s).fillna(False).to_numpy()
+                for i in np.flatnonzero(sig):
+                    dt = pd.Timestamp(f.index[i])
+                    if dt < start or dt > end or i >= len(df) - 1:
+                        continue
+                    regime, _ = _regime_from_row(f, i)
+                    safe, _, safety_flags = _safety_from_row(avg_value, abnormal, i)
+                    score, parts = _row_score(f, i, s, regime, safe)
+                    # NO GATE HERE — this is the entire point of Phase 1.
+
+                    entry_i = i + 1
+                    entry = float(df.close.iloc[entry_i])
+                    if not np.isfinite(entry) or entry <= 0:
+                        continue
+                    stop = entry * 0.93
+                    target = entry + 3 * (entry - stop)
+
+                    last = min(len(df) - 1, entry_i + 60)
+                    outcome = "TIMEOUT"; exit_price = float(df.close.iloc[last]); held = last - entry_i
+                    max_high = entry; min_low = entry
+                    for j in range(entry_i, last + 1):
+                        bar = df.iloc[j]
+                        max_high = max(max_high, float(bar.high)); min_low = min(min_low, float(bar.low))
+                        if bar.low <= stop:
+                            outcome, exit_price, held = "LOSS", stop, j - entry_i; break
+                        if bar.high >= target:
+                            outcome, exit_price, held = "WIN", target, j - entry_i; break
+
+                    gross_pct = (exit_price / entry - 1) * 100
+                    return_pct = gross_pct - BT_COST_PCT
+                    risk = entry - stop
+                    r_mult = return_pct / ((risk / entry) * 100) if risk > 0 else 0
+                    mfe = (max_high / entry - 1) * 100; mae = (min_low / entry - 1) * 100
+
+                    fingerprint = compute_signal_fingerprint(df, f, i, entry, stop, target, regime, safe, safety_flags, parts)
+
+                    rows.append({
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                        "ticker": str(ticker).replace(".NS", ""), "strategy": f"S{s}",
+                        "signal_date": str(dt.date()), "entry_date": str(df.index[entry_i].date()),
+                        "exit_date": str(df.index[entry_i + held].date()),
+                        "score": float(score), "outcome": outcome, "entry": round(entry, 2),
+                        "stop": round(stop, 2), "target": round(target, 2), "exit_price": round(exit_price, 2),
+                        "return_pct": round(return_pct, 2), "r_multiple": round(float(r_mult), 2),
+                        "holding_bars": int(held), "mfe_pct": round(mfe, 2), "mae_pct": round(mae, 2),
+                        "source": "raw_phase1",
+                        **fingerprint,
+                    })
+        except Exception:
+            continue
+        finally:
+            if progress_cb:
+                progress_cb(n + 1, len(tickers), str(ticker))
+
+    result = pd.DataFrame(rows)
+    _persist_raw_fingerprints(result, start, end, len(tickers))
+    return result
+
+
+def _persist_raw_fingerprints(result, start, end, universe_size):
+    if result.empty:
+        return
+    con = _db()
+    try:
+        cur = con.execute(
+            """INSERT INTO raw_signal_runs(created_at,market,start_date,end_date,universe_size,signals_captured,elapsed_seconds,status)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"), "INDIA", str(start), str(end),
+             universe_size, len(result), 0.0, "COMPLETED")
+        )
+        run_id = cur.lastrowid
+        cols = list(result.columns)
+        db_cols = [c for c in cols if c not in ("created_at",)]  # created_at handled per-row already present
+        placeholders = ",".join(["?"] * (len(db_cols) + 1))
+        col_list = ",".join(["run_id"] + db_cols)
+        rows = [tuple([run_id] + [r.get(c) for c in db_cols]) for _, r in result.iterrows()]
+        con.executemany(f"INSERT INTO raw_signal_fingerprints({col_list}) VALUES({placeholders})", rows)
+        con.commit()
+    finally:
+        con.close()
+
+
 def build_fast_data_cache(tickers, start, end, max_workers=5):
     """
     First run: populate Dhan history.
@@ -5974,6 +6378,48 @@ with tabs[2]:
                     st.dataframe(sr,width='stretch',hide_index=True)
                 else:
                     st.info(f'S{ss}: no qualifying historical setups in this window.')
+
+    st.divider()
+    st.subheader("🔬 Raw Strategy Learning — Ungated Signal Capture")
+    st.caption("Records EVERY S1-S4 signal regardless of score, with a full feature fingerprint at signal time. This does not affect the existing ≥85 backtest or scanner above — it's a separate research dataset for discovering what actually separates winners from losers.")
+    st.caption("🔒 Same hard rule as the backtest above: this reads the same local SQLite dataset (period/universe selected above) and makes ZERO Dhan/API calls — it does not independently sync data.")
+
+    raw_strategies = st.multiselect("Strategies", [1,2,3,4], default=[1,2,3,4], key="raw_strategies")
+
+    if st.button("🔬 RUN RAW SIGNAL CAPTURE", type="primary", key="raw_capture_run"):
+        if not tickers:
+            st.warning("Select at least one universe above first.")
+        elif not raw_strategies:
+            st.warning("Select at least one strategy.")
+        else:
+            with st.spinner(f"Loading local data for {len(tickers):,} tickers..."):
+                raw_data = load_local_backtest_data(tickers, start_date, end_date)
+            if not raw_data:
+                st.error("No local data available for this universe/date range. Sync it in Data Manager first.")
+            else:
+                raw_prog = st.progress(0.0)
+                def _raw_cb(done, total, sym):
+                    raw_prog.progress(done/max(total,1), text=f"{sym} ({done}/{total})")
+                t0 = time.perf_counter()
+                with st.spinner(f"Running ungated backtest on {len(raw_data):,} locally-available tickers..."):
+                    raw_result = run_raw_signal_backtest(raw_data, raw_strategies, pd.Timestamp(start_date), pd.Timestamp(end_date), progress_cb=_raw_cb)
+                raw_prog.empty()
+                st.session_state["raw_signal_result"] = raw_result
+                st.success(f"Captured {len(raw_result):,} raw signals (no score gate applied) in {time.perf_counter()-t0:.1f}s.")
+
+    raw_result = st.session_state.get("raw_signal_result", pd.DataFrame())
+    if not raw_result.empty:
+        st.markdown("#### Quick sanity check: does score correlate with outcome AT ALL?")
+        band_check = raw_result.copy()
+        band_check["score_band"] = pd.cut(band_check["score"], bins=[0,50,60,70,80,85,90,100])
+        raw_summary = band_check.groupby("score_band", observed=True).agg(
+            trades=("outcome","count"), win_pct=("r_multiple", lambda x: round((x>0).mean()*100,1)),
+            avg_r=("r_multiple","mean")
+        ).reset_index()
+        st.dataframe(raw_summary, width='stretch', hide_index=True)
+        st.caption("If low-score bands show similar or better win%/avg R than 85+, that's direct evidence the current gate may be miscalibrated. Treat any band with a handful of trades as noise, not a conclusion.")
+        with st.expander("View raw captured signals"):
+            st.dataframe(raw_result, width='stretch', hide_index=True)
 
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
