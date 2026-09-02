@@ -16,6 +16,7 @@ import math
 import bisect
 import os
 import base64
+import anthropic
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final", page_icon="🧠", layout="wide")
 
@@ -4070,6 +4071,233 @@ def fallback_win_probability(market, strategy, score):
     return float(row.iloc[0]["Win % (shrunk)"])
 
 
+# ========================= AI SYSTEM COACH (LLM) — Phase 6 =========================
+# On-demand LLM analysis of the marking system as a WHOLE (backtest performance,
+# forward-test resolution, component correlations, adaptive edge table) — not one
+# trade. Distinct from the existing rule-based "🎓 Strategy Coach" tab (decision-tree/
+# regime-breakdown, no LLM call); this one is titled "AI System Coach (LLM)" in the
+# UI specifically to avoid confusion between the two.
+#
+# COST CONTROL: one batched API call per run, sending only AGGREGATED stats (never
+# raw trade rows) — small payload regardless of how many trades exist. Runs only on
+# a button click, never automatically on every scan.
+#
+# Model note: the original design called for "claude-sonnet-4-6" (a real, valid,
+# one-generation-behind model). Using "claude-sonnet-5" instead — the current model
+# in the same mid-cost "Sonnet" tier the design intended (not the upmarket "Opus"
+# tier), and cheaper per-token than 4.6.
+
+ANTHROPIC_COACH_MODEL = "claude-sonnet-5"
+
+
+def _anthropic_configured():
+    # Mirrors twelvedata_configured()/_github_configured()'s established
+    # pattern in this file: st.secrets.__contains__ raises
+    # StreamlitSecretNotFoundError (not just a missing-key False) when no
+    # secrets.toml exists at all - a bare `"X" not in st.secrets`/`st.secrets[...]`
+    # crashes the whole app in that state, so every access here goes through
+    # a try/except, never a bare lookup.
+    try:
+        return bool(st.secrets.get("ANTHROPIC_API_KEY"))
+    except Exception:
+        return False
+
+
+def _anthropic_key():
+    try:
+        return st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:
+        return None
+
+
+def _table_exists(con, name):
+    r = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+    return r is not None
+
+
+def ensure_coach_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS coach_reports(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT,
+            total_backtest_trades INTEGER,
+            total_forward_closed INTEGER,
+            report_text TEXT,
+            verdict TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_coach_table()
+
+
+def build_coach_payload():
+    """Compiles a compact JSON-able summary of everything the Coach needs:
+    edge table, component weights, backtest performance, forward-test
+    resolution stats (including fundamental/SMC strategies if present).
+    Returns (payload:dict, has_enough_data:bool).
+    """
+    payload = {}
+
+    # --- Backtest performance per strategy ---
+    con = _db()
+    try:
+        bt_summary = pd.read_sql_query(
+            "SELECT * FROM backtest_trades", con
+        ) if _table_exists(con, "backtest_trades") else pd.DataFrame()
+    except Exception:
+        bt_summary = pd.DataFrame()
+    finally:
+        con.close()
+
+    # NOTE: backtest_trades is the RAW sqlite table (lowercase columns:
+    # strategy, r_multiple) - not the "Strategy"/"R" display-renamed columns
+    # used elsewhere in the UI. The original patch draft checked for
+    # "Strategy" here, which never matches this table and would have silently
+    # produced an empty backtest_performance every single run.
+    if not bt_summary.empty and "strategy" in bt_summary.columns:
+        perf_rows = []
+        for strat, g in bt_summary.groupby("strategy"):
+            has_r = "r_multiple" in g.columns
+            perf_rows.append({
+                "strategy": strat, "trades": len(g),
+                "win_pct": round(float((g.r_multiple > 0).mean() * 100), 1) if has_r else None,
+                "avg_r": round(float(g.r_multiple.mean()), 3) if has_r else None,
+            })
+        payload["backtest_performance"] = perf_rows
+    else:
+        payload["backtest_performance"] = []
+
+    # --- Adaptive edge table (score-band level win%/avg R) ---
+    edge = adaptive_edge_table("INDIA")
+    payload["edge_by_score_band"] = edge.to_dict(orient="records") if not edge.empty else []
+
+    # --- Component-level correlation with R ---
+    comp = adaptive_component_weights("INDIA")
+    payload["component_weights"] = comp.to_dict(orient="records") if not comp.empty else []
+
+    # --- Forward test resolution (the real-world check) ---
+    con = _db()
+    try:
+        ft = pd.read_sql_query("SELECT * FROM forward_tests", con)
+    finally:
+        con.close()
+
+    closed = ft[ft.status.isin(["CLOSED", "TARGET", "STOP", "EXIT", "EXPIRED"])] if not ft.empty else pd.DataFrame()
+    active = ft[ft.status == "ACTIVE"] if not ft.empty else pd.DataFrame()
+
+    fwd_rows = []
+    if not closed.empty:
+        for strat, g in closed.groupby("strategy"):
+            fwd_rows.append({
+                "strategy": strat, "closed_trades": len(g),
+                "win_pct": round(float((g.result_r > 0).mean() * 100), 1) if g.result_r.notna().any() else None,
+                "avg_r": round(float(g.result_r.dropna().mean()), 3) if g.result_r.notna().any() else None,
+            })
+    payload["forward_test_closed"] = fwd_rows
+    payload["forward_test_active_count"] = int(len(active))
+    payload["forward_test_closed_count"] = int(len(closed))
+
+    total_bt = len(bt_summary)
+    total_fwd_closed = len(closed)
+    has_enough = total_bt >= 20 or total_fwd_closed >= 10
+
+    payload["totals"] = {"backtest_trades": total_bt, "forward_closed": total_fwd_closed}
+    return payload, has_enough
+
+
+def run_strategy_coach():
+    """Sends the aggregated payload to Claude, gets back a written analysis.
+    Returns (report_text:str, error:str or None).
+    """
+    if not _anthropic_configured():
+        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    payload, has_enough = build_coach_payload()
+    if not has_enough:
+        return None, (
+            f"Not enough data yet for a reliable analysis "
+            f"({payload['totals']['backtest_trades']} backtest trades, "
+            f"{payload['totals']['forward_closed']} closed forward tests). "
+            f"Run more backtests or let more forward tests resolve first."
+        )
+
+    system_prompt = """You are a quantitative trading systems analyst reviewing a solo trader's
+algorithmic research framework. You will receive aggregated statistics (NOT raw trade data) about:
+- backtest_performance: win rate / avg R per strategy (S1-S4 = stock strategies, FUNDA/FUNDB =
+  fundamental screens, FX_SMC = forex/crypto price action strategy)
+- edge_by_score_band: empirical win rate and avg R-multiple by setup-score band, per strategy
+  (uses Bayesian shrinkage toward 50%/0R for small samples already)
+- component_weights: whether each scoring component (HTF, Footprint, Entry Quality, Relative
+  Strength, Safety) shows a real difference in outcome between its high vs low values
+- forward_test_closed / forward_test_active_count: REAL live-market outcomes, the most
+  trustworthy signal since it isn't backtest-fitted
+
+Your job: give an honest, statistically grounded verdict on whether the marking/scoring system
+is working, and concrete recommendations to improve accuracy. Rules:
+1. ALWAYS state sample sizes next to any claim. Never treat n<20 as reliable evidence.
+2. If backtest and forward-test results diverge meaningfully, flag this explicitly — it usually
+   means curve-fitting or regime drift, and is the single most important thing to surface.
+3. For components with weight near 1.0 and high sample size, say plainly that they show no
+   measurable edge and are candidates to deprioritize or drop from scoring.
+4. Do not recommend specific numeric parameter changes unless the sample size genuinely
+   supports it — say "not enough data yet" rather than guessing.
+5. Structure your response with these headers: OVERALL VERDICT, WHAT'S WORKING, WHAT'S NOT
+   WORKING, SPECIFIC RECOMMENDATIONS (numbered, priority order), CONFIDENCE CAVEATS.
+6. Keep it concise and actionable — this is read by the developer, not published.
+"""
+
+    user_content = "Here is the current aggregated system data:\n\n" + json.dumps(payload, indent=2, default=str)
+
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        report = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if not report:
+            return None, "Claude API returned an empty response."
+        return report, None
+    except anthropic.AuthenticationError as e:
+        return None, f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return None, f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return None, f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return None, f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return None, f"Unexpected error: {e}"
+
+
+def save_coach_report(report_text):
+    payload, _ = build_coach_payload()
+    verdict_line = ""
+    lines = report_text.splitlines()
+    for idx, line in enumerate(lines):
+        if "OVERALL VERDICT" in line.upper():
+            rest = lines[idx+1:idx+3]
+            verdict_line = " ".join(rest).strip()[:300]
+            break
+    con = _db()
+    try:
+        con.execute(
+            """INSERT INTO coach_reports(created_at, total_backtest_trades, total_forward_closed, report_text, verdict)
+               VALUES(?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"),
+             payload["totals"]["backtest_trades"], payload["totals"]["forward_closed"],
+             report_text, verdict_line)
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 # ========================= ML WIN PROBABILITY =========================
 # Trained on learning_observations (completed backtest/forward-test trades).
 # Falls back to the existing score-band edge table (adaptive_edge_table) when
@@ -5525,6 +5753,50 @@ with tabs[4]:
             st.dataframe(adaptive_component_weights('INDIA'),width='stretch',hide_index=True)
             st.dataframe(learn_db.head(500),width='stretch',hide_index=True)
         st.caption('Learning ranks candidates using evidence; it never changes the deterministic S1–S4 qualification rules.')
+
+    st.divider()
+    st.subheader("🧑‍🏫 AI System Coach (LLM)")
+    st.caption(
+        "Different from the 🎓 Strategy Coach tab, which uses deterministic decision-tree rules — "
+        "this one is an on-demand LLM analysis of the same underlying data."
+    )
+    st.caption("On-demand AI analysis of the marking system's accuracy across backtest + forward-test history. One API call per run — you control when it runs.")
+
+    if not _anthropic_configured():
+        st.info("ANTHROPIC_API_KEY not set in Streamlit secrets — add it to enable this section.")
+    elif st.button("🔬 RUN AI SYSTEM COACH ANALYSIS", type="primary", key="coach_run"):
+        with st.spinner("Analyzing backtest performance, forward-test outcomes, and component correlations..."):
+            coach_report, coach_err = run_strategy_coach()
+        if coach_err:
+            st.warning(coach_err)
+        else:
+            save_coach_report(coach_report)
+            st.session_state["latest_coach_report"] = coach_report
+            st.success("Analysis complete and saved.")
+
+    latest_coach = st.session_state.get("latest_coach_report")
+    if latest_coach:
+        st.markdown(latest_coach)
+
+    with st.expander("📜 Report History"):
+        con = _db()
+        try:
+            coach_hist = pd.read_sql_query("SELECT id, created_at, total_backtest_trades, total_forward_closed, verdict FROM coach_reports ORDER BY id DESC", con)
+        finally:
+            con.close()
+        if coach_hist.empty:
+            st.info("No reports yet — run your first analysis above.")
+        else:
+            st.dataframe(coach_hist, width='stretch', hide_index=True)
+            coach_pick = st.selectbox("View full report", coach_hist["id"].tolist(), key="coach_history_pick")
+            if coach_pick:
+                con = _db()
+                try:
+                    coach_full = con.execute("SELECT report_text FROM coach_reports WHERE id=?", (coach_pick,)).fetchone()
+                finally:
+                    con.close()
+                if coach_full:
+                    st.markdown(coach_full[0])
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals + News")
