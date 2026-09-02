@@ -6418,6 +6418,71 @@ with tabs[2]:
         ).reset_index()
         st.dataframe(raw_summary, width='stretch', hide_index=True)
         st.caption("If low-score bands show similar or better win%/avg R than 85+, that's direct evidence the current gate may be miscalibrated. Treat any band with a handful of trades as noise, not a conclusion.")
+
+        st.divider()
+        st.markdown("#### 🏆 Winners vs Losers — What actually separates them?")
+        st.caption("Compares the feature fingerprint (captured AT SIGNAL TIME, before the outcome was known) between WIN and LOSS trades only — TIMEOUT excluded since it's not a clean win/loss. Sorted by how far apart the two groups are, biggest gap first.")
+
+        outc = raw_result["outcome"].value_counts()
+        oc1, oc2, oc3, oc4 = st.columns(4)
+        oc1.metric("Wins", int(outc.get("WIN", 0)))
+        oc2.metric("Losses", int(outc.get("LOSS", 0)))
+        oc3.metric("Timeouts", int(outc.get("TIMEOUT", 0)))
+        overall_win_pct = (raw_result["r_multiple"] > 0).mean() * 100
+        oc4.metric("Win % (all trades)", f"{overall_win_pct:.1f}%")
+
+        wl = raw_result[raw_result["outcome"].isin(["WIN", "LOSS"])]
+        wins_df = wl[wl["outcome"] == "WIN"]
+        losses_df = wl[wl["outcome"] == "LOSS"]
+
+        if len(wins_df) < 10 or len(losses_df) < 10:
+            st.info(f"Only {len(wins_df)} win(s) / {len(losses_df)} loss(es) captured so far — need at least ~10 of each before a winners-vs-losers comparison means anything. Run a wider universe/date range to accumulate more.")
+        else:
+            numeric_features = [
+                "score", "score_htf", "score_footprint", "score_entry_quality", "score_relative_strength",
+                "dist_ema20_atr", "dist_ema50_atr", "dist_ema200_atr", "atr_pct",
+                "relvol", "relvol_trend", "candle_body_pct", "candle_upper_wick_pct", "candle_lower_wick_pct",
+                "breakout_20d", "breakout_50d", "pullback_depth_pct",
+                "dist_recent_high_atr", "dist_recent_low_atr", "gap_pct",
+                "dist_support_atr", "dist_resistance_atr", "rsi14", "macd_hist",
+                "retracement_pct", "retracement_duration_bars", "retracement_volume_ratio",
+                "rejection_candle", "reclaim_candle",
+                "stop_distance_pct", "target_distance_pct", "expected_rr", "atr_adjusted_stop",
+                "safety_score",
+            ]
+            rows = []
+            for col in numeric_features:
+                if col not in wl.columns:
+                    continue
+                w = pd.to_numeric(wins_df[col], errors="coerce").dropna()
+                l = pd.to_numeric(losses_df[col], errors="coerce").dropna()
+                if len(w) < 5 or len(l) < 5:
+                    continue
+                win_mean, loss_mean = float(w.mean()), float(l.mean())
+                spread = float(pd.concat([w, l]).std())
+                gap_in_spreads = abs(win_mean - loss_mean) / spread if spread > 0 else 0.0
+                rows.append({
+                    "Feature": col, "Win Avg": round(win_mean, 3), "Loss Avg": round(loss_mean, 3),
+                    "Gap": round(win_mean - loss_mean, 3), "Gap (in std devs)": round(gap_in_spreads, 2),
+                    "N (win/loss)": f"{len(w)}/{len(l)}",
+                })
+            feature_gap_df = pd.DataFrame(rows).sort_values("Gap (in std devs)", ascending=False).reset_index(drop=True)
+            st.dataframe(feature_gap_df, width='stretch', hide_index=True)
+            st.caption("\"Gap (in std devs)\" is just |win avg − loss avg| divided by the pooled standard deviation — a plain descriptive size-of-difference, not a significance test. A large gap on a small N is still noise; check the N column. This is deliberately a simple sanity check, not the pattern-discovery/similarity engine the research doc defers to a later phase once more data has accumulated.")
+
+            cat_features = [c for c in ("trend_direction", "market_regime") if c in wl.columns]
+            if cat_features:
+                st.markdown("##### Win % by category")
+                cat_cols = st.columns(len(cat_features))
+                for col, cat_col in zip(cat_cols, cat_features):
+                    with col:
+                        cat_summary = wl.groupby(cat_col, observed=True).agg(
+                            trades=("outcome", "count"),
+                            win_pct=("r_multiple", lambda x: round((x > 0).mean() * 100, 1)),
+                        ).reset_index().sort_values("trades", ascending=False)
+                        st.markdown(f"**{col}**")
+                        st.dataframe(cat_summary, width='stretch', hide_index=True)
+
         with st.expander("View raw captured signals"):
             st.dataframe(raw_result, width='stretch', hide_index=True)
 
