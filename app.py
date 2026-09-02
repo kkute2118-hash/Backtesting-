@@ -4298,6 +4298,259 @@ def save_coach_report(report_text):
         con.close()
 
 
+# ========================= 5-AGENT AI TRADE DEBATE PANEL — Phase 8 =========================
+# Analyzes individual TRADE CANDIDATES from the scanner's forward-test queue (different
+# job from the AI System Coach above, which analyzes the whole system). Meant to run
+# after a scan, on the filtered shortlist that already qualifies for forward testing,
+# before capital is committed.
+#
+# COST CONTROL: NOT 5 agents x N candidates. Four agents each get ALL shortlisted
+# candidates in ONE message, returning a JSON array of verdicts; the Judge gets all
+# four verdict-arrays plus the original data in one final call. Total = 5 API calls
+# per panel run regardless of shortlist size (capped at 15 candidates below).
+#
+# JSON ROBUSTNESS: the installed anthropic SDK (checked in this environment, not
+# guessed) exposes `output_config={"format": {"type": "json_schema", "schema": ...}}`
+# on messages.create() (see anthropic.types.output_config_param /
+# json_output_format_param), so every agent call below constrains its response to a
+# JSON array matching an explicit schema. Fence-stripping + json.loads() is still kept
+# as a defensive second layer (harmless when the schema already produced clean JSON,
+# a real safety net if some future SDK/account combination doesn't honor the schema) -
+# no live-credentialed run of this exact call has been possible in this sandbox, so
+# both layers stay in rather than betting everything on the unverified end-to-end path.
+
+_AGENT_VERDICT_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "verdict": {"type": "string"},
+            "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+            "flag": {"type": "boolean"},
+        },
+        "required": ["ticker", "verdict", "confidence", "flag"],
+        "additionalProperties": False,
+    },
+}
+
+_JUDGE_VERDICT_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "rank": {"type": "integer"},
+            "reasoning": {"type": "string"},
+            "overall_confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+        },
+        "required": ["ticker", "rank", "reasoning", "overall_confidence"],
+        "additionalProperties": False,
+    },
+}
+
+
+def build_debate_shortlist(scan_result_df, max_candidates=15):
+    """Filters scan results down to a cost-bounded shortlist: drops
+    INSUFFICIENT SAMPLE learning confidence when better options exist,
+    sorts by Learned Rank, caps at max_candidates.
+    """
+    if scan_result_df is None or scan_result_df.empty:
+        return pd.DataFrame()
+
+    df = scan_result_df.copy()
+    good_conf = df[df.get("Learning Confidence", "") != "INSUFFICIENT SAMPLE"]
+    pool = good_conf if len(good_conf) >= 3 else df  # fallback if too few confident ones
+
+    sort_col = "Learned Rank" if "Learned Rank" in pool.columns else "Score"
+    return pool.sort_values(sort_col, ascending=False).head(max_candidates).reset_index(drop=True)
+
+
+def _candidates_to_payload(shortlist_df):
+    cols = ["Ticker", "Strategy", "Score", "Adaptive Score", "Learned Rank", "Historical Edge R",
+            "Learning Confidence", "Entry", "SL 7%", "Target 3R", "RSI", "RelVol",
+            "HTF Score", "Footprint Score", "Entry Quality", "Relative Strength",
+            "Safety Score", "Safety Flags", "Regime"]
+    available = [c for c in cols if c in shortlist_df.columns]
+    return shortlist_df[available].to_dict(orient="records")
+
+
+def _call_agent(system_prompt, candidates_payload, max_tokens=2500):
+    """Sends one candidates_payload (list of dicts) to Claude with the given
+    system_prompt, expecting back a JSON array of {ticker, verdict,
+    confidence, flag} objects — one per candidate. Returns (list, error).
+    """
+    if not _anthropic_configured():
+        return [], "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    user_content = (
+        "Analyze EVERY candidate below and return a JSON array, one object per "
+        "candidate, each with exactly these keys: \"ticker\", \"verdict\" (2-3 "
+        "sentences), \"confidence\" (LOW/MEDIUM/HIGH), \"flag\" (true if this is a "
+        "serious concern, false otherwise).\n\n"
+        + json.dumps(candidates_payload, indent=2, default=str)
+    )
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+            output_config={"format": {"type": "json_schema", "schema": _AGENT_VERDICT_SCHEMA}},
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            return [], "Agent did not return a JSON array."
+        return parsed, None
+    except json.JSONDecodeError as e:
+        return [], f"Could not parse agent response as JSON: {e}"
+    except anthropic.AuthenticationError as e:
+        return [], f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return [], f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return [], f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return [], f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return [], f"Unexpected error: {e}"
+
+
+def agent_technical_analyst(candidates_payload):
+    system = """You are a Technical Analyst reviewing deterministic strategy setups from an
+Indian equities trading system. Each candidate already PASSED all mandatory rules of its
+strategy (S1-S4) — your job is not to re-qualify them, but to assess RELATIVE setup quality
+using the component scores provided: HTF Score (higher-timeframe demand), Footprint Score,
+Entry Quality, Relative Strength, RSI, RelVol. Identify which candidates have genuinely clean,
+well-supported setups versus which merely cleared the minimum bar. Be specific about which
+component(s) drive your view for each candidate."""
+    return _call_agent(system, candidates_payload)
+
+
+def agent_statistical_skeptic(candidates_payload):
+    system = """You are a Statistical Skeptic reviewing trade candidates from a system that
+tracks empirical win rates with Bayesian shrinkage. Each candidate includes: Score, Learned
+Rank (blends score + historical edge), Historical Edge R (shrunk average R-multiple for this
+strategy/score-band), and Learning Confidence (HIGH = 100+ samples, MEDIUM = 20-99, INSUFFICIENT
+SAMPLE = under 20). Your ONLY job: flag any candidate whose apparent edge you don't trust yet
+due to small sample size, and separately note any candidate where the historical edge is both
+strong AND well-sampled (genuinely trustworthy). Be blunt about which numbers are noise."""
+    return _call_agent(system, candidates_payload)
+
+
+def agent_risk_capital(candidates_payload, capital=None, max_slots=None, risk_pct=None):
+    context = ""
+    if capital and max_slots:
+        context = (f"\n\nTrader's context: total capital ₹{capital:,.0f}, max {max_slots} "
+                    f"concurrent positions, risking {risk_pct or 1.0}% of capital per trade. "
+                    f"Each candidate's SL 7% and Target 3R fields define its risk unit.")
+    system = ("""You are a Risk & Capital Agent. Given a trader's available capital and maximum
+concurrent position count, assess whether taking ALL of these candidates together would create
+excessive concentration — same sector, correlated stocks, or too many positions for the stated
+capital to size properly. Flag any candidate that should be deprioritized purely for portfolio
+construction reasons, even if its setup looks technically fine on its own."""
+              + context)
+    return _call_agent(system, candidates_payload)
+
+
+def agent_devils_advocate(candidates_payload):
+    system = """You are the Devil's Advocate / Bear Case agent. Your job is to argue AGAINST
+each candidate, specifically — not generic caution, but the single most likely way this specific
+setup fails: regime risk, crowded trade, weak relative strength despite a passing score, thin
+liquidity (low RelVol), safety flags present, or anything else in the data that a purely bullish
+read would gloss over. If a candidate genuinely has no strong bear case, say so plainly rather
+than inventing one — false negatives here are as costly as missed risks."""
+    return _call_agent(system, candidates_payload)
+
+
+def agent_judge(candidates_payload, tech_verdicts, skeptic_verdicts, risk_verdicts, bear_verdicts, target_count=5):
+    if not _anthropic_configured():
+        return [], "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    system = f"""You are the Judge/Synthesizer. You will receive the original candidate data plus
+four independent agent verdicts per candidate: Technical Analyst, Statistical Skeptic, Risk/Capital
+Agent, and Devil's Advocate. Resolve disagreements using judgment, weighting the Statistical
+Skeptic's confidence flags heavily (don't rank a candidate highly if its edge is statistically
+unreliable, regardless of how clean the setup looks technically). Output a JSON array of the TOP
+{target_count} candidates (fewer if fewer than {target_count} are genuinely defensible — never pad
+the list with weak picks), each object with keys: "ticker", "rank" (1 = best), "reasoning" (2-3
+sentences synthesizing the four views), "overall_confidence" (LOW/MEDIUM/HIGH)."""
+
+    user_content = json.dumps({
+        "candidates": candidates_payload,
+        "technical_analyst_verdicts": tech_verdicts,
+        "statistical_skeptic_verdicts": skeptic_verdicts,
+        "risk_capital_verdicts": risk_verdicts,
+        "devils_advocate_verdicts": bear_verdicts,
+    }, indent=2, default=str)
+
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+            output_config={"format": {"type": "json_schema", "schema": _JUDGE_VERDICT_SCHEMA}},
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, list):
+            return [], "Judge did not return a JSON array."
+        return parsed, None
+    except json.JSONDecodeError as e:
+        return [], f"Could not parse Judge response as JSON: {e}"
+    except anthropic.AuthenticationError as e:
+        return [], f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return [], f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return [], f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return [], f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return [], f"Unexpected error: {e}"
+
+
+def run_trade_debate_panel(scan_result_df, capital=None, max_slots=None, risk_pct=None, target_count=5, max_candidates=15):
+    """Full pipeline: shortlist -> 4 parallel-in-spirit agent calls -> Judge.
+    Returns dict with keys: shortlist_df, tech, skeptic, risk, bear (each a
+    list of verdict dicts), final (Judge's ranked list), errors (list of any
+    agent errors encountered — non-fatal, panel continues with what it has).
+    """
+    shortlist = build_debate_shortlist(scan_result_df, max_candidates=max_candidates)
+    if shortlist.empty:
+        return {"error": "No candidates available to analyze. Run a scan first."}
+
+    payload = _candidates_to_payload(shortlist)
+    errors = []
+
+    tech, e1 = agent_technical_analyst(payload)
+    if e1: errors.append(f"Technical Analyst: {e1}")
+
+    skeptic, e2 = agent_statistical_skeptic(payload)
+    if e2: errors.append(f"Statistical Skeptic: {e2}")
+
+    risk, e3 = agent_risk_capital(payload, capital, max_slots, risk_pct)
+    if e3: errors.append(f"Risk/Capital Agent: {e3}")
+
+    bear, e4 = agent_devils_advocate(payload)
+    if e4: errors.append(f"Devil's Advocate: {e4}")
+
+    final, e5 = agent_judge(payload, tech, skeptic, risk, bear, target_count=target_count)
+    if e5: errors.append(f"Judge: {e5}")
+
+    return {
+        "shortlist_df": shortlist,
+        "tech": tech, "skeptic": skeptic, "risk": risk, "bear": bear,
+        "final": final, "errors": errors,
+    }
+
+
 # ========================= ML WIN PROBABILITY =========================
 # Trained on learning_observations (completed backtest/forward-test trades).
 # Falls back to the existing score-band edge table (adaptive_edge_table) when
@@ -5409,6 +5662,59 @@ with tabs[1]:
 
         except Exception as e:
             st.error(f"Scanner error: {e}")
+
+    st.divider()
+    st.subheader("🧑‍⚖️ AI Trade Debate Panel")
+    st.caption("5 agents (Technical, Statistical Skeptic, Risk/Capital, Devil's Advocate, Judge) analyze the scanner's forward-test queue. 5 API calls total per run, regardless of shortlist size.")
+
+    # "forward_queue" is the actual session_state key the scanner populates with
+    # its forward-test-qualifying shortlist (Score >= min_score, Safety != REJECT)
+    # right before calling add_forward_candidates() above - there is no session_state
+    # key holding the full unfiltered scan result (full_result is a local variable,
+    # not persisted across reruns), so this is the closest and most fitting analog:
+    # it's exactly the "before you commit capital" shortlist this panel is meant to
+    # analyze, not the raw universe of every strategy-qualified setup.
+    panel_result = st.session_state.get('forward_queue', pd.DataFrame())
+    if panel_result.empty:
+        st.info("Run a scan first — the panel analyzes the scanner's forward-test queue (Score above the gate).")
+    elif not _anthropic_configured():
+        st.info("ANTHROPIC_API_KEY not set in Streamlit secrets — add it to enable this section.")
+    else:
+        pc1, pc2, pc3 = st.columns(3)
+        panel_capital = pc1.number_input("Capital ₹", 10000, 100000000, 100000, 10000, key="panel_capital")
+        panel_slots = pc2.number_input("Max concurrent positions", 1, 20, 5, 1, key="panel_slots")
+        panel_target = pc3.slider("Final shortlist size", 2, 6, 5, 1, key="panel_target")
+
+        if st.button("🔬 RUN 5-AGENT DEBATE PANEL", type="primary", key="panel_run"):
+            with st.spinner("Running 5-agent analysis (5 API calls)..."):
+                panel = run_trade_debate_panel(
+                    panel_result, capital=panel_capital, max_slots=panel_slots,
+                    risk_pct=1.0, target_count=panel_target
+                )
+            st.session_state["latest_panel"] = panel
+
+        panel = st.session_state.get("latest_panel")
+        if panel:
+            if panel.get("error"):
+                st.warning(panel["error"])
+            else:
+                if panel["errors"]:
+                    st.warning("Some agents had issues: " + " | ".join(panel["errors"]))
+
+                if panel["final"]:
+                    st.subheader("🏆 Judge's Final Ranking")
+                    st.dataframe(pd.DataFrame(panel["final"]), width='stretch', hide_index=True)
+
+                with st.expander("🔍 View individual agent verdicts"):
+                    vt1, vt2, vt3, vt4 = st.tabs(["Technical", "Statistical Skeptic", "Risk/Capital", "Devil's Advocate"])
+                    with vt1:
+                        st.dataframe(pd.DataFrame(panel["tech"]), width='stretch', hide_index=True) if panel["tech"] else st.info("No data.")
+                    with vt2:
+                        st.dataframe(pd.DataFrame(panel["skeptic"]), width='stretch', hide_index=True) if panel["skeptic"] else st.info("No data.")
+                    with vt3:
+                        st.dataframe(pd.DataFrame(panel["risk"]), width='stretch', hide_index=True) if panel["risk"] else st.info("No data.")
+                    with vt4:
+                        st.dataframe(pd.DataFrame(panel["bear"]), width='stretch', hide_index=True) if panel["bear"] else st.info("No data.")
 
 # ========================= RESEARCH MODULES =========================
 
