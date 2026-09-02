@@ -3899,6 +3899,64 @@ def _persist_raw_fingerprints(result, start, end, universe_size):
         con.close()
 
 
+RAW_SIGNAL_NUMERIC_FEATURES = [
+    "score", "score_htf", "score_footprint", "score_entry_quality", "score_relative_strength",
+    "dist_ema20_atr", "dist_ema50_atr", "dist_ema200_atr", "atr_pct",
+    "relvol", "relvol_trend", "candle_body_pct", "candle_upper_wick_pct", "candle_lower_wick_pct",
+    "breakout_20d", "breakout_50d", "pullback_depth_pct",
+    "dist_recent_high_atr", "dist_recent_low_atr", "gap_pct",
+    "dist_support_atr", "dist_resistance_atr", "rsi14", "macd_hist",
+    "retracement_pct", "retracement_duration_bars", "retracement_volume_ratio",
+    "rejection_candle", "reclaim_candle",
+    "stop_distance_pct", "target_distance_pct", "expected_rr", "atr_adjusted_stop",
+    "safety_score",
+]
+
+RAW_SIGNAL_SCORE_COMPONENTS = [
+    "score_htf", "score_footprint", "score_entry_quality", "score_relative_strength", "safety_score",
+]
+
+
+def _feature_gap_table(wins_df, losses_df, feature_cols, min_n=5):
+    """Plain descriptive win-vs-loss comparison for each feature column:
+    |win avg - loss avg| in pooled-std-dev units, biggest gap first. Not a
+    significance test - just a size-of-difference ranking so the columns
+    worth a second look surface at the top instead of an alphabetical dump.
+    """
+    rows = []
+    for col in feature_cols:
+        if col not in wins_df.columns or col not in losses_df.columns:
+            continue
+        w = pd.to_numeric(wins_df[col], errors="coerce").dropna()
+        l = pd.to_numeric(losses_df[col], errors="coerce").dropna()
+        if len(w) < min_n or len(l) < min_n:
+            continue
+        win_mean, loss_mean = float(w.mean()), float(l.mean())
+        spread = float(pd.concat([w, l]).std())
+        gap_std = abs(win_mean - loss_mean) / spread if spread > 0 else 0.0
+        rows.append({
+            "Feature": col, "Win Avg": round(win_mean, 3), "Loss Avg": round(loss_mean, 3),
+            "Gap": round(win_mean - loss_mean, 3), "Gap (in std devs)": round(gap_std, 2),
+            "N (win/loss)": f"{len(w)}/{len(l)}",
+        })
+    if not rows:
+        return pd.DataFrame(columns=["Feature", "Win Avg", "Loss Avg", "Gap", "Gap (in std devs)", "N (win/loss)"])
+    return pd.DataFrame(rows).sort_values("Gap (in std devs)", ascending=False).reset_index(drop=True)
+
+
+def _component_read_label(gap_std):
+    """Turns a plain descriptive gap size into a suggestion, in the same
+    spirit/wording as the AI System Coach's component-weight commentary
+    ("weight near 1.0 -> candidate to deprioritize"). Informational only -
+    never changes S1-S4 scoring; the developer decides what to do with it."""
+    g = abs(gap_std)
+    if g >= 0.5:
+        return "Strong read — clearly separates winners from losers here"
+    if g >= 0.2:
+        return "Weak read — some difference, treat as secondary"
+    return "No measurable difference — candidate to de-weight or drop for this strategy"
+
+
 def build_fast_data_cache(tickers, start, end, max_workers=5):
     """
     First run: populate Dhan history.
@@ -6418,6 +6476,60 @@ with tabs[2]:
         ).reset_index()
         st.dataframe(raw_summary, width='stretch', hide_index=True)
         st.caption("If low-score bands show similar or better win%/avg R than 85+, that's direct evidence the current gate may be miscalibrated. Treat any band with a handful of trades as noise, not a conclusion.")
+
+        st.divider()
+        st.markdown("#### 🏆 Winners vs Losers — What actually separates them?")
+        st.caption("Compares the feature fingerprint (captured AT SIGNAL TIME, before the outcome was known) between WIN and LOSS trades only — TIMEOUT excluded since it's not a clean win/loss. Sorted by how far apart the two groups are, biggest gap first.")
+
+        outc = raw_result["outcome"].value_counts()
+        oc1, oc2, oc3, oc4 = st.columns(4)
+        oc1.metric("Wins", int(outc.get("WIN", 0)))
+        oc2.metric("Losses", int(outc.get("LOSS", 0)))
+        oc3.metric("Timeouts", int(outc.get("TIMEOUT", 0)))
+        overall_win_pct = (raw_result["r_multiple"] > 0).mean() * 100
+        oc4.metric("Win % (all trades)", f"{overall_win_pct:.1f}%")
+
+        wl = raw_result[raw_result["outcome"].isin(["WIN", "LOSS"])]
+        wins_df = wl[wl["outcome"] == "WIN"]
+        losses_df = wl[wl["outcome"] == "LOSS"]
+
+        if len(wins_df) < 10 or len(losses_df) < 10:
+            st.info(f"Only {len(wins_df)} win(s) / {len(losses_df)} loss(es) captured so far — need at least ~10 of each before a winners-vs-losers comparison means anything. Run a wider universe/date range to accumulate more.")
+        else:
+            feature_gap_df = _feature_gap_table(wins_df, losses_df, RAW_SIGNAL_NUMERIC_FEATURES)
+            st.dataframe(feature_gap_df, width='stretch', hide_index=True)
+            st.caption("\"Gap (in std devs)\" is just |win avg − loss avg| divided by the pooled standard deviation — a plain descriptive size-of-difference, not a significance test. A large gap on a small N is still noise; check the N column. This is deliberately a simple sanity check, not the pattern-discovery/similarity engine the research doc defers to a later phase once more data has accumulated.")
+
+            cat_features = [c for c in ("trend_direction", "market_regime") if c in wl.columns]
+            if cat_features:
+                st.markdown("##### Win % by category")
+                cat_cols = st.columns(len(cat_features))
+                for col, cat_col in zip(cat_cols, cat_features):
+                    with col:
+                        cat_summary = wl.groupby(cat_col, observed=True).agg(
+                            trades=("outcome", "count"),
+                            win_pct=("r_multiple", lambda x: round((x > 0).mean() * 100, 1)),
+                        ).reset_index().sort_values("trades", ascending=False)
+                        st.markdown(f"**{col}**")
+                        st.dataframe(cat_summary, width='stretch', hide_index=True)
+
+            st.divider()
+            st.markdown("#### 🎯 Suggested marking read — strategy by strategy")
+            st.caption("Same win-vs-loss comparison as above, but scoped to each strategy separately and limited to the deterministic score's own components (HTF, Footprint, Entry Quality, Relative Strength, Safety) — since a component can matter for one strategy and not another. **Informational only — this does not change S1-S4 scoring**; it's evidence for you to decide whether a component's weight deserves a second look.")
+            for strat in sorted(wl["strategy"].dropna().unique()):
+                s_wins = wins_df[wins_df["strategy"] == strat]
+                s_losses = losses_df[losses_df["strategy"] == strat]
+                with st.expander(f"{strat} — {len(s_wins)} win(s) / {len(s_losses)} loss(es)", expanded=False):
+                    if len(s_wins) < 10 or len(s_losses) < 10:
+                        st.info(f"Need at least ~10 wins and ~10 losses for {strat} specifically before this is meaningful — currently {len(s_wins)}/{len(s_losses)}.")
+                        continue
+                    comp_df = _feature_gap_table(s_wins, s_losses, RAW_SIGNAL_SCORE_COMPONENTS, min_n=5)
+                    if comp_df.empty:
+                        st.info("Not enough per-component data for this strategy yet.")
+                        continue
+                    comp_df["Suggested Read"] = comp_df["Gap (in std devs)"].apply(_component_read_label)
+                    st.dataframe(comp_df, width='stretch', hide_index=True)
+
         with st.expander("View raw captured signals"):
             st.dataframe(raw_result, width='stretch', hide_index=True)
 
