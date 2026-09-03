@@ -31,6 +31,63 @@ Forward Testing
 Learning Engine
 ```
 ---
+🤖 Running Daily Without Opening the App
+Streamlit Cloud only executes the app while somebody has the page open, so
+nothing inside `app.py` can keep the forward test running on its own. The engine
+therefore lives in `core.py`, which imports with no UI, and `daily_job.py` drives
+it from GitHub Actions on a schedule.
+
+| File | Role |
+| --- | --- |
+| `core.py` | the engine — data, strategies, scoring, forward tests, learning. No UI. |
+| `app.py` | the Streamlit interface, importing `core` |
+| `daily_job.py` | headless runner for the scheduled jobs |
+| `.github/workflows/dhan-token-renewal.yml` | 02:30 UTC daily (08:00 IST) |
+| `.github/workflows/daily-forward-test.yml` | 11:20 and 13:30 UTC on weekdays (16:50 / 19:00 IST) |
+
+The daily run, in order: restore the database from GitHub → renew the Dhan token
+→ top up the newest candles → resolve open positions that hit stop or target →
+scan the just-closed session → record signals at/above the gate → back up the
+database.
+
+Two guards make it safe to leave running unattended:
+
+- **Stale candles skip the scan.** If Dhan has not published the latest session
+  yet, the job resolves positions and stops. It never records a candidate from
+  out-of-date prices, which is the late-entry problem the whole change set
+  exists to fix.
+- **No backup config, no run.** If `GITHUB_TOKEN`/`GITHUB_REPO` are missing the
+  job aborts immediately, so it can never push an empty database over your saved
+  forward tests.
+
+The scan runs **after the close**, on the finished daily candle, on purpose. An
+intraday scan can show a setup at 11:00 that has vanished by 15:30; recording
+that as a forward test would pollute the learning data with signals that never
+really existed.
+
+Setup — repository **Settings → Secrets and variables → Actions**:
+
+```text
+Secrets   DHAN_CLIENT_ID, DHAN_PIN, DHAN_TOTP_SECRET
+          (or DHAN_ACCESS_TOKEN if you are not using PIN+TOTP)
+          GH_BACKUP_TOKEN   optional; defaults to the built-in Actions token
+
+Variables GITHUB_BACKUP_BRANCH   strongly recommended, e.g. db-backup
+          SCAN_UNIVERSE          default "Nifty 500"; join with | for several
+          SCAN_STRATEGIES        default "1,2,3,4"
+          SCAN_MIN_SCORE         default "85"
+```
+
+Set `GITHUB_BACKUP_BRANCH` to a dedicated branch before enabling the schedule.
+Each backup commits the entire SQLite file, so a daily job pointed at your code
+branch would add one binary blob per day to its history forever.
+
+Two further operational notes: GitHub disables scheduled workflows in a
+repository with no activity for 60 days, and cron runs can be delayed under load
+— which is why the forward-test job has a second attempt each evening. Both
+workflows also have a **Run workflow** button in the Actions tab.
+
+---
 🕒 Data Freshness & Live Intraday Prices
 Stored daily candles can never be newer than the last completed NSE session, so
 a scan run during market hours was always evaluating yesterday's close. Two
