@@ -4906,6 +4906,258 @@ def _persist_raw_fingerprints(result, start, end, universe_size):
         con.close()
 
 
+# ========================= STOP-LOSS CALIBRATION STUDY =========================
+# ADDITIVE, EVIDENCE-ONLY — NEVER changes what the live system does. The scanner's LIVE
+# stop-loss, the existing >=85 gated backtest (_professional_bt), forward-test tracking,
+# and run_raw_signal_backtest() above all keep using the fixed entry*0.93 (7%) stop
+# completely untouched. This is a SEPARATE study that backtests several CANDIDATE stop-loss
+# schemes against the SAME real historical S1-S4 signals and reports real win%/avg-R
+# evidence broken out by strategy AND market regime (never one blended number — the whole
+# point is "how much SL is good depends on the stock chart and market conditions").
+#
+# LONG-ONLY CONFIRMED: every S1-S4 condition in strategy_signal() is a bullish/long setup
+# (no short branch exists anywhere in that function) — every scheme below places its stop
+# BELOW entry accordingly.
+#
+# SAME O(1) PATTERN AS run_raw_signal_backtest() ABOVE, deliberately copied rather than
+# reinvented: features_fast()/_safety_fast_series() run ONCE per ticker; _regime_from_row()/
+# _safety_from_row() are O(1) per-signal lookups. This loop never calls regime_from_index()/
+# safety() — those recompute the full feature set from scratch per call and have already
+# caused an O(n^2) hang bug three times in this codebase's history (original S1-S4 backtest,
+# SMC backtest, and once already in run_raw_signal_backtest() itself before its fix).
+#
+# SAME 3R TARGET FOR EVERY SCHEME (explicit design choice): each scheme changes the stop
+# distance, so to keep R-multiples comparable ACROSS schemes and isolate the effect of stop
+# PLACEMENT (rather than conflating it with a different reward:risk ratio), every scheme
+# still uses target = entry + 3*(entry-stop) computed from ITS OWN stop distance — the same
+# 3R convention run_raw_signal_backtest() and s4_ema20_extension_calibration() already use.
+#
+# COST OF REPEATING THE FORWARD WALK PER SCHEME: the expensive part (per-ticker feature
+# computation) happens once; only the cheap forward-bar walk (O(bars-until-exit), max 60
+# bars here) repeats once per scheme (5) per signal — acceptable and NOT the O(n^2) pattern
+# above, which was about re-deriving the entire feature matrix, not walking forward bars.
+
+SL_CALIBRATION_MIN_BUCKET_SAMPLES = 15  # same threshold/spirit as S4_CALIBRATION_MIN_BUCKET_SAMPLES
+
+
+def sl_scheme_fixed_pct_7(entry, atr_abs, structure_stop_price):
+    """CURRENT LIVE BASELINE (entry*0.93, i.e. fixed 7% SL) — included deliberately so
+    this study can show whether any candidate scheme actually beats the status quo,
+    rather than assuming the status quo needs replacing."""
+    return entry * 0.93
+
+
+def sl_scheme_atr_mult_1_5(entry, atr_abs, structure_stop_price):
+    if atr_abs is None or not np.isfinite(atr_abs) or atr_abs <= 0:
+        return None
+    return entry - 1.5 * atr_abs
+
+
+def sl_scheme_atr_mult_2_0(entry, atr_abs, structure_stop_price):
+    if atr_abs is None or not np.isfinite(atr_abs) or atr_abs <= 0:
+        return None
+    return entry - 2.0 * atr_abs
+
+
+def sl_scheme_atr_mult_2_5(entry, atr_abs, structure_stop_price):
+    if atr_abs is None or not np.isfinite(atr_abs) or atr_abs <= 0:
+        return None
+    return entry - 2.5 * atr_abs
+
+
+def sl_scheme_structure_swing_low(entry, atr_abs, structure_stop_price):
+    """Stop placed just below the nearest support/swing-low level at signal time
+    (structure_stop_price, derived from the same swing-detection logic that produces
+    the dist_support_atr fingerprint field — see _support_resistance_distance()).
+    Returns None (scheme UNAVAILABLE for this signal) when no nearby support level was
+    found, rather than fabricating one."""
+    if structure_stop_price is None or not np.isfinite(structure_stop_price) or structure_stop_price <= 0:
+        return None
+    if structure_stop_price >= entry:
+        return None  # support at/above entry isn't a usable stop for a long
+    return structure_stop_price
+
+
+SL_CALIBRATION_SCHEMES = {
+    "fixed_pct_7": sl_scheme_fixed_pct_7,
+    "atr_mult_1_5": sl_scheme_atr_mult_1_5,
+    "atr_mult_2_0": sl_scheme_atr_mult_2_0,
+    "atr_mult_2_5": sl_scheme_atr_mult_2_5,
+    "structure_swing_low": sl_scheme_structure_swing_low,
+}
+
+
+def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
+    """Backtests every candidate SL scheme in SL_CALIBRATION_SCHEMES against the SAME
+    real historical S1-S4 signals and SAME forward bars, isolating the effect of stop
+    PLACEMENT alone. Structured like run_raw_signal_backtest(): per-ticker feature
+    computation happens ONCE, regime/safety are O(1) row lookups per signal, and each
+    scheme independently walks forward from the same entry bar.
+
+    data: dict of {ticker: df} exactly as run_raw_signal_backtest()/the existing
+    backtest loop expect. Returns a DataFrame of one row per (ticker, strategy, signal,
+    scheme) trade — also persisted (aggregated) to sl_calibration_results/_runs.
+    """
+    rows = []
+    tickers = list(data.keys())
+    ticker = None
+    for n, ticker in enumerate(tickers):
+        try:
+            df = data[ticker]
+            if df is None or df.empty or len(df) < 260:
+                continue
+            df = df.sort_index()
+            f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            if f.empty:
+                continue
+
+            # Once per ticker — NOT per scheme, NOT per signal. See header comment.
+            avg_value, abnormal = _safety_fast_series(df)
+
+            for s in strategies:
+                sig = strategy_signal(f, s).fillna(False).to_numpy()
+                for i in np.flatnonzero(sig):
+                    dt = pd.Timestamp(f.index[i])
+                    if dt < start or dt > end or i >= len(df) - 1:
+                        continue
+                    regime, _ = _regime_from_row(f, i)          # O(1) — never regime_from_index()
+                    safe, _, _ = _safety_from_row(avg_value, abnormal, i)  # O(1) — never safety()
+
+                    entry_i = i + 1
+                    entry = float(df.close.iloc[entry_i])
+                    if not np.isfinite(entry) or entry <= 0:
+                        continue
+
+                    atr = float(f.iloc[i].get("atr14", np.nan))
+                    atr_abs = atr if (np.isfinite(atr) and atr > 0) else None
+
+                    _, dist_sup = _support_resistance_distance(df, i, atr_abs)
+                    structure_stop_price = (
+                        entry - dist_sup * atr_abs
+                        if (dist_sup is not None and atr_abs is not None) else None
+                    )
+
+                    last = min(len(df) - 1, entry_i + 60)
+
+                    for scheme_name, scheme_fn in SL_CALIBRATION_SCHEMES.items():
+                        stop = scheme_fn(entry, atr_abs, structure_stop_price)
+                        if stop is None or not np.isfinite(stop) or stop <= 0 or stop >= entry:
+                            continue  # scheme unavailable for this signal — skip, never fabricate
+
+                        # SAME 3R convention for every scheme — see header comment.
+                        target = entry + 3 * (entry - stop)
+
+                        outcome = "TIMEOUT"; exit_price = float(df.close.iloc[last]); held = last - entry_i
+                        for j in range(entry_i, last + 1):
+                            bar = df.iloc[j]
+                            if bar.low <= stop:
+                                outcome, exit_price, held = "LOSS", stop, j - entry_i; break
+                            if bar.high >= target:
+                                outcome, exit_price, held = "WIN", target, j - entry_i; break
+
+                        risk = entry - stop
+                        r_mult = (exit_price - entry) / risk if risk > 0 else 0.0
+
+                        rows.append({
+                            "ticker": str(ticker).replace(".NS", ""), "strategy": f"S{s}",
+                            "signal_date": str(dt.date()), "market_regime": regime,
+                            "safety_score": safe, "scheme": scheme_name,
+                            "entry": round(entry, 2), "stop": round(stop, 2), "target": round(target, 2),
+                            "outcome": outcome, "r_multiple": round(float(r_mult), 3),
+                            "holding_bars": int(held),
+                        })
+        except Exception:
+            continue
+        finally:
+            if progress_cb:
+                progress_cb(n + 1, len(tickers), str(ticker))
+
+    result = pd.DataFrame(rows)
+    _persist_sl_calibration(result, start, end, len(tickers))
+    return result
+
+
+def _sl_calibration_aggregate(result):
+    """One row per (strategy, market_regime, scheme) — the shape persisted to
+    sl_calibration_results and used by both the DB writer and the UI report."""
+    cols = ["strategy", "market_regime", "scheme", "trades", "win_pct", "avg_r", "avg_holding_bars"]
+    if result.empty:
+        return pd.DataFrame(columns=cols)
+    g = result.groupby(["strategy", "market_regime", "scheme"]).agg(
+        trades=("r_multiple", "count"),
+        win_pct=("outcome", lambda x: float((x == "WIN").mean() * 100)),
+        avg_r=("r_multiple", "mean"),
+        avg_holding_bars=("holding_bars", "mean"),
+    ).reset_index()
+    g["win_pct"] = g.win_pct.round(1)
+    g["avg_r"] = g.avg_r.round(3)
+    g["avg_holding_bars"] = g.avg_holding_bars.round(1)
+    return g
+
+
+def sl_calibration_report(result):
+    """UI-facing version of _sl_calibration_aggregate(): renames for display and flags
+    under-sampled buckets rather than omitting them (same philosophy as
+    s4_extension_bucket_report() — small-N buckets are noise, not evidence, but they are
+    still shown so nobody mistakes silence for a clean result)."""
+    g = _sl_calibration_aggregate(result)
+    if g.empty:
+        return g
+    g = g.rename(columns={
+        "strategy": "Strategy", "market_regime": "Regime", "scheme": "Scheme",
+        "trades": "Trades", "win_pct": "Win %", "avg_r": "Avg R", "avg_holding_bars": "Avg Holding Bars",
+    })
+    g[f"Reliable (>={SL_CALIBRATION_MIN_BUCKET_SAMPLES} samples)"] = g.Trades >= SL_CALIBRATION_MIN_BUCKET_SAMPLES
+    return g.sort_values(["Strategy", "Regime", "Avg R"], ascending=[True, True, False]).reset_index(drop=True)
+
+
+def ensure_sl_calibration_tables():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS sl_calibration_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, market TEXT,
+            start_date TEXT, end_date TEXT, universe_size INTEGER, trades_captured INTEGER,
+            status TEXT
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS sl_calibration_results(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER,
+            strategy TEXT, market_regime TEXT, scheme TEXT,
+            trades INTEGER, win_pct REAL, avg_r REAL, avg_holding_bars REAL
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_sl_calibration_tables()
+
+
+def _persist_sl_calibration(result, start, end, universe_size):
+    if result.empty:
+        return
+    agg = _sl_calibration_aggregate(result)
+    con = _db()
+    try:
+        cur = con.execute(
+            """INSERT INTO sl_calibration_runs(created_at,market,start_date,end_date,universe_size,trades_captured,status)
+               VALUES(?,?,?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"), "INDIA", str(start), str(end),
+             universe_size, len(result), "COMPLETED")
+        )
+        run_id = cur.lastrowid
+        db_rows = [
+            (run_id, r.strategy, r.market_regime, r.scheme, int(r.trades), float(r.win_pct),
+             float(r.avg_r), float(r.avg_holding_bars))
+            for r in agg.itertuples()
+        ]
+        con.executemany(
+            """INSERT INTO sl_calibration_results(run_id,strategy,market_regime,scheme,trades,win_pct,avg_r,avg_holding_bars)
+               VALUES(?,?,?,?,?,?,?,?)""", db_rows
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 RAW_SIGNAL_NUMERIC_FEATURES = [
     "score", "score_htf", "score_footprint", "score_entry_quality", "score_relative_strength",
     "dist_ema20_atr", "dist_ema50_atr", "dist_ema200_atr", "atr_pct",
@@ -6102,6 +6354,387 @@ def run_trade_debate_panel(scan_result_df, capital=None, max_slots=None, risk_pc
         "tech": tech, "skeptic": skeptic, "risk": risk, "bear": bear,
         "final": final, "errors": errors,
     }
+
+
+# ========================= 5-AGENT SYSTEM LEARNING PANEL =========================
+# A THIRD, distinct thing from both the rule-based "🎓 Strategy Coach" tab (decision-tree
+# extraction, no LLM) and the single-bot "🧑‍🏫 AI System Coach (LLM)" section above (Phase 6,
+# one written analysis). This panel reuses Phase 6/8's exact SDK/model/structured-output
+# pattern but analyzes the WHOLE SYSTEM (not individual trade candidates like Phase 8, and
+# not with a single bot like Phase 6) with 5 specialized agents whose disagreements are
+# meant to surface, synthesized by a Judge at the end.
+#
+# UNLIKE PHASE 8: there is no per-candidate list to batch over here - this is ONE
+# system-wide aggregated payload, so each of the 4 analysts gets ONE message and returns
+# ONE structured finding object (not a JSON array). _call_learning_panel_agent() below is
+# _call_agent()'s pattern adapted for an object response instead of an array.
+#
+# COST CONTROL: exactly 5 API calls per run (4 analysts + 1 Judge), same as Phase 8's total,
+# regardless of how much underlying data exists - only aggregated stats are sent.
+#
+# DATA SOURCES (all reused, none recomputed from scratch):
+#   (a) build_coach_payload() - the exact same payload the single-bot AI System Coach uses.
+#   (b) the winners-vs-losers/marking-read data (_feature_gap_table/RAW_SIGNAL_NUMERIC_FEATURES/
+#       RAW_SIGNAL_SCORE_COMPONENTS), computed here from a raw_signal_result DataFrame the
+#       caller passes in (the UI passes st.session_state.get("raw_signal_result") - kept out
+#       of this function's signature so it stays plain-Python testable without a Streamlit
+#       context). Absent/too-small data is reported in the payload, never treated as failure.
+#   (c) Part A's sl_calibration_results table, queried directly here.
+
+_LEARNING_PANEL_FINDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "finding": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+        "evidence_summary": {"type": "string"},
+    },
+    "required": ["finding", "confidence", "evidence_summary"],
+    "additionalProperties": False,
+}
+
+_LEARNING_PANEL_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recommendations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "priority": {"type": "integer"},
+                    "recommendation": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["priority", "recommendation", "reasoning"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["recommendations"],
+    "additionalProperties": False,
+}
+
+
+def build_learning_panel_payload(raw_signal_result=None):
+    """Aggregates everything the System Learning Panel needs into one JSON-able
+    payload. Returns (payload:dict, has_enough_data:bool) - same convention as
+    build_coach_payload(), which this reuses rather than recomputing.
+
+    raw_signal_result: the Raw Strategy Learning DataFrame (st.session_state
+    ["raw_signal_result"] in the UI), or None/empty if that section hasn't been
+    run yet - handled gracefully, never raises.
+    """
+    coach_payload, coach_has_enough = build_coach_payload()
+    payload = {"system": coach_payload}
+
+    # --- (b) Winners-vs-losers marking-read, if Raw Signal Capture has been run ---
+    if raw_signal_result is not None and not raw_signal_result.empty:
+        wl = raw_signal_result[raw_signal_result["outcome"].isin(["WIN", "LOSS"])]
+        wins_df = wl[wl["outcome"] == "WIN"]
+        losses_df = wl[wl["outcome"] == "LOSS"]
+        if len(wins_df) >= 10 and len(losses_df) >= 10:
+            overall_gap = _feature_gap_table(wins_df, losses_df, RAW_SIGNAL_NUMERIC_FEATURES)
+            per_strategy = {}
+            for strat in sorted(wl["strategy"].dropna().unique()):
+                s_wins = wins_df[wins_df["strategy"] == strat]
+                s_losses = losses_df[losses_df["strategy"] == strat]
+                if len(s_wins) >= 10 and len(s_losses) >= 10:
+                    comp_df = _feature_gap_table(s_wins, s_losses, RAW_SIGNAL_SCORE_COMPONENTS, min_n=5)
+                    per_strategy[str(strat)] = comp_df.to_dict(orient="records")
+            payload["marking_read"] = {
+                "available": True,
+                "wins": int(len(wins_df)), "losses": int(len(losses_df)),
+                "overall_feature_gaps": overall_gap.to_dict(orient="records"),
+                "per_strategy_component_gaps": per_strategy,
+            }
+        else:
+            payload["marking_read"] = {
+                "available": False,
+                "reason": f"Only {len(wins_df)} win(s)/{len(losses_df)} loss(es) captured so far — "
+                          f"need at least ~10 of each before a winners-vs-losers read means anything.",
+            }
+    else:
+        payload["marking_read"] = {
+            "available": False,
+            "reason": "Raw Signal Capture has not been run yet in this session — no winners-vs-losers marking-read data available.",
+        }
+
+    # --- (c) Part A: SL calibration evidence, queried directly ---
+    con = _db()
+    try:
+        sl_cal = pd.read_sql_query(
+            "SELECT strategy, market_regime, scheme, trades, win_pct, avg_r, avg_holding_bars FROM sl_calibration_results",
+            con,
+        ) if _table_exists(con, "sl_calibration_results") else pd.DataFrame()
+    except Exception:
+        sl_cal = pd.DataFrame()
+    finally:
+        con.close()
+
+    if not sl_cal.empty:
+        sl_cal = sl_cal.copy()
+        sl_cal["reliable"] = sl_cal["trades"] >= SL_CALIBRATION_MIN_BUCKET_SAMPLES
+        payload["sl_calibration"] = {
+            "available": True,
+            "min_reliable_samples": SL_CALIBRATION_MIN_BUCKET_SAMPLES,
+            "buckets": sl_cal.to_dict(orient="records"),
+        }
+    else:
+        payload["sl_calibration"] = {
+            "available": False,
+            "reason": "The Stop-Loss Calibration Study has not been run yet — no scheme evidence available.",
+        }
+
+    payload["totals"] = {
+        "backtest_trades": coach_payload["totals"]["backtest_trades"],
+        "forward_closed": coach_payload["totals"]["forward_closed"],
+        "marking_read_available": payload["marking_read"]["available"],
+        "sl_calibration_available": payload["sl_calibration"]["available"],
+    }
+    return payload, coach_has_enough
+
+
+def _call_learning_panel_agent(system_prompt, payload, schema, max_tokens=2000):
+    """_call_agent()'s (Phase 8) pattern adapted for ONE system-wide payload -> ONE
+    structured finding OBJECT (not a per-candidate array). Returns (dict, error)."""
+    if not _anthropic_configured():
+        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    user_content = "Here is the current aggregated system data:\n\n" + json.dumps(payload, indent=2, default=str)
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            return None, "Agent did not return a JSON object."
+        return parsed, None
+    except json.JSONDecodeError as e:
+        return None, f"Could not parse agent response as JSON: {e}"
+    except anthropic.AuthenticationError as e:
+        return None, f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return None, f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return None, f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return None, f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return None, f"Unexpected error: {e}"
+
+
+def learning_panel_agent_strategy_performance(payload):
+    system = """You are the Strategy Performance Analyst on a 5-agent System Learning Panel
+reviewing a solo trader's algorithmic research framework. Using ONLY payload["system"]
+["backtest_performance"] (win rate / avg R per strategy: S1-S4 = stock strategies, FUNDA/FUNDB =
+fundamental screens, FX_SMC = forex/crypto) and payload["system"]["edge_by_score_band"] (win
+rate / avg R by setup-score band per strategy), determine which strategy performs best OVERALL,
+and note if the ranking would plausibly change across market regimes when regime information is
+present in the data. State sample sizes next to every claim — never treat n<20 as reliable
+evidence. Return ONE overall finding for the whole system, not a per-strategy list."""
+    return _call_learning_panel_agent(system, payload, _LEARNING_PANEL_FINDING_SCHEMA)
+
+
+def learning_panel_agent_marking_component(payload):
+    system = """You are the Marking/Component Analyst on a 5-agent System Learning Panel. Using
+ONLY payload["marking_read"], determine which score components (HTF, Footprint, Entry Quality,
+Relative Strength, Safety) show a REAL difference between winners and losers versus which show
+none. If payload["marking_read"]["available"] is false, say plainly that Raw Signal Capture has
+not been run yet and this section is skipped for now — do NOT invent a finding. When data IS
+available, treat "Gap (in std devs)" >= 0.5 as a strong read, 0.2-0.5 as weak/secondary, and below
+0.2 as no measurable difference (a candidate to de-weight or drop). Always state the win/loss
+sample sizes (payload["marking_read"]["wins"]/["losses"]) behind your claim. This is informational
+only — it never changes S1-S4 scoring."""
+    return _call_learning_panel_agent(system, payload, _LEARNING_PANEL_FINDING_SCHEMA)
+
+
+def learning_panel_agent_risk_sl(payload):
+    system = """You are the Risk & Stop-Loss Analyst on a 5-agent System Learning Panel — the
+direct answer to the trader's question "how much stop-loss should I use, and does it depend on
+the stock's chart structure or the market regime?" Using ONLY payload["sl_calibration"], which
+reports REAL historical win% / avg-R per (strategy, market_regime, scheme) bucket for candidate
+stop-loss schemes (fixed_pct_7 = the CURRENT LIVE 7% stop the scanner actually uses today,
+atr_mult_1_5 / atr_mult_2_0 / atr_mult_2_5 = ATR-multiple stops, structure_swing_low = a
+support/swing-low based stop), recommend which scheme looks best PER strategy/regime combination
+— but only where the evidence genuinely supports a claim.
+CRITICAL RULES, follow all of them:
+1. If payload["sl_calibration"]["available"] is false, say plainly the Stop-Loss Calibration
+   Study has not been run yet and no recommendation can be made yet — do not guess.
+2. NEVER recommend a scheme for a bucket whose "trades" count is below
+   payload["sl_calibration"]["min_reliable_samples"] — for those, say "not enough data yet"
+   rather than recommending anything, even if the win%/avg R numbers look attractive.
+3. Always state the exact trade count, win%, and avg R behind every recommendation you do make.
+4. Always compare against fixed_pct_7 (the current live stop) explicitly — do not suggest a
+   change unless a candidate scheme measurably AND reliably beats it for that specific
+   strategy/regime combination.
+5. This is informational only — it never changes the live 7% stop-loss automatically; only a
+   human decides whether to act on it."""
+    return _call_learning_panel_agent(system, payload, _LEARNING_PANEL_FINDING_SCHEMA)
+
+
+def learning_panel_agent_devils_advocate(payload):
+    system = """You are the Devil's Advocate / Overfitting Skeptic on a 5-agent System Learning
+Panel. You receive the SAME payload the other three analysts (Strategy Performance, Marking/
+Component, Risk & Stop-Loss) saw, and your job is to challenge their likely claims, specifically:
+1. Compare payload["system"]["backtest_performance"] against payload["system"]
+   ["forward_test_closed"] per strategy — if they diverge meaningfully (different sign of edge,
+   or a big win%/avg-R gap), flag this explicitly as likely curve-fitting or regime drift; this is
+   the single most important thing to surface.
+2. Flag any bucket/component/scheme claim likely to be based on fewer than 20-30 samples,
+   whether drawn from edge_by_score_band, marking_read, or sl_calibration — name the sample size
+   you're objecting to.
+3. If the data genuinely does not support suspicion (large, consistent samples, no meaningful
+   backtest/forward divergence), say so plainly rather than inventing doubt — a false alarm here
+   is as costly as missed overfitting."""
+    return _call_learning_panel_agent(system, payload, _LEARNING_PANEL_FINDING_SCHEMA)
+
+
+def learning_panel_agent_judge(payload, strategy_finding, marking_finding, risk_finding, skeptic_finding):
+    if not _anthropic_configured():
+        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+
+    system = """You are the Judge/Synthesizer for a 5-agent System Learning Panel. You will
+receive the original aggregated system payload plus four independent findings: Strategy
+Performance Analyst, Marking/Component Analyst, Risk & Stop-Loss Analyst, and Devil's Advocate /
+Overfitting Skeptic. Combine them into ONE final prioritized list of concrete, numbered
+recommendations for the developer. Weight the Devil's Advocate's sample-size and divergence
+objections HEAVILY — never rank a recommendation highly if the Skeptic flagged its underlying
+evidence as small-sample or as diverging between backtest and forward-test. Prefer fewer,
+well-supported recommendations over a padded list — omit a candidate recommendation entirely
+rather than include it on weak grounds. Never propose automatically changing the live S1-S4
+qualification rules or the live 7% stop-loss — only describe what a human should consider
+changing, and why, citing the evidence."""
+
+    user_content = json.dumps({
+        "payload": payload,
+        "strategy_performance_finding": strategy_finding,
+        "marking_component_finding": marking_finding,
+        "risk_sl_finding": risk_finding,
+        "devils_advocate_finding": skeptic_finding,
+    }, indent=2, default=str)
+
+    try:
+        client = anthropic.Anthropic(api_key=_anthropic_key())
+        resp = client.messages.create(
+            model=ANTHROPIC_COACH_MODEL,
+            max_tokens=3000,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+            output_config={"format": {"type": "json_schema", "schema": _LEARNING_PANEL_JUDGE_SCHEMA}},
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict) or "recommendations" not in parsed:
+            return None, "Judge did not return a JSON object with a recommendations array."
+        return parsed, None
+    except json.JSONDecodeError as e:
+        return None, f"Could not parse Judge response as JSON: {e}"
+    except anthropic.AuthenticationError as e:
+        return None, f"ANTHROPIC_API_KEY is set but was rejected (invalid/revoked key): {e}"
+    except anthropic.RateLimitError as e:
+        return None, f"Anthropic API rate limit hit — try again shortly: {e}"
+    except anthropic.APIStatusError as e:
+        return None, f"Anthropic API returned an error (HTTP {e.status_code}): {e}"
+    except anthropic.APIConnectionError as e:
+        return None, f"Could not reach the Anthropic API (network issue): {e}"
+    except Exception as e:
+        return None, f"Unexpected error: {e}"
+
+
+def run_system_learning_panel(raw_signal_result=None):
+    """Full pipeline: build payload -> 4 analyst calls -> Judge. Returns a dict
+    with keys: payload, strategy, marking, risk, skeptic (each a finding dict or
+    None on a per-agent failure), judge (final recommendations dict or None),
+    errors (list of any agent errors — non-fatal, the panel degrades gracefully
+    with whatever partial results it has, matching run_trade_debate_panel()'s
+    existing errors-list pattern rather than crashing on one bad call)."""
+    payload, has_enough = build_learning_panel_payload(raw_signal_result)
+    if not has_enough:
+        return {"error": (
+            f"Not enough data yet for a reliable panel analysis "
+            f"({payload['totals']['backtest_trades']} backtest trades, "
+            f"{payload['totals']['forward_closed']} closed forward tests). "
+            f"Run more backtests or let more forward tests resolve first."
+        )}
+
+    errors = []
+
+    strategy_finding, e1 = learning_panel_agent_strategy_performance(payload)
+    if e1: errors.append(f"Strategy Performance Analyst: {e1}")
+
+    marking_finding, e2 = learning_panel_agent_marking_component(payload)
+    if e2: errors.append(f"Marking/Component Analyst: {e2}")
+
+    risk_finding, e3 = learning_panel_agent_risk_sl(payload)
+    if e3: errors.append(f"Risk & Stop-Loss Analyst: {e3}")
+
+    skeptic_finding, e4 = learning_panel_agent_devils_advocate(payload)
+    if e4: errors.append(f"Devil's Advocate: {e4}")
+
+    judge_result, e5 = learning_panel_agent_judge(payload, strategy_finding, marking_finding, risk_finding, skeptic_finding)
+    if e5: errors.append(f"Judge: {e5}")
+
+    return {
+        "payload": payload,
+        "strategy": strategy_finding, "marking": marking_finding,
+        "risk": risk_finding, "skeptic": skeptic_finding,
+        "judge": judge_result, "errors": errors,
+    }
+
+
+def ensure_learning_panel_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS system_learning_panel_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
+            total_backtest_trades INTEGER, total_forward_closed INTEGER,
+            marking_read_available INTEGER, sl_calibration_available INTEGER,
+            strategy_finding_json TEXT, marking_finding_json TEXT,
+            risk_finding_json TEXT, skeptic_finding_json TEXT,
+            judge_json TEXT, errors_json TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+ensure_learning_panel_table()
+
+
+def save_learning_panel_run(result):
+    payload = result.get("payload", {}) or {}
+    totals = payload.get("totals", {}) or {}
+    con = _db()
+    try:
+        con.execute(
+            """INSERT INTO system_learning_panel_runs(
+                created_at, total_backtest_trades, total_forward_closed,
+                marking_read_available, sl_calibration_available,
+                strategy_finding_json, marking_finding_json, risk_finding_json,
+                skeptic_finding_json, judge_json, errors_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                totals.get("backtest_trades"), totals.get("forward_closed"),
+                int(bool(totals.get("marking_read_available"))),
+                int(bool(totals.get("sl_calibration_available"))),
+                json.dumps(result.get("strategy"), default=str),
+                json.dumps(result.get("marking"), default=str),
+                json.dumps(result.get("risk"), default=str),
+                json.dumps(result.get("skeptic"), default=str),
+                json.dumps(result.get("judge"), default=str),
+                json.dumps(result.get("errors", []), default=str),
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 # ========================= ML WIN PROBABILITY =========================

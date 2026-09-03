@@ -813,6 +813,72 @@ with tabs[2]:
         with st.expander("View raw captured signals"):
             st.dataframe(raw_result, width='stretch', hide_index=True)
 
+    st.divider()
+    st.subheader("🎯 Stop-Loss Calibration Study")
+    st.caption(
+        "Backtests candidate stop-loss schemes (the current fixed 7% baseline, three ATR-multiple "
+        "widths, and a structure/swing-low based stop) against the SAME real historical S1-S4 "
+        "signals, broken out by strategy AND market regime. **Purely additive research — this does "
+        "NOT change the live scanner's stop-loss, the existing ≥85 gated backtest, or forward-test "
+        "tracking**, all of which keep using the fixed entry×0.93 (7%) stop untouched. Every scheme "
+        "is compared using the same 3R target convention so the comparison isolates stop PLACEMENT, "
+        "not a different reward:risk ratio."
+    )
+    st.caption("🔒 Same hard rule as above: reads the same local SQLite dataset (period/universe selected above), makes ZERO Dhan/API calls.")
+
+    sl_cal_strategies = st.multiselect("Strategies", [1, 2, 3, 4], default=[1, 2, 3, 4], key="sl_cal_strategies")
+
+    if st.button("🎯 RUN STOP-LOSS CALIBRATION STUDY", type="primary", key="sl_cal_run"):
+        if not tickers:
+            st.warning("Select at least one universe above first.")
+        elif not sl_cal_strategies:
+            st.warning("Select at least one strategy.")
+        else:
+            with st.spinner(f"Loading local data for {len(tickers):,} tickers..."):
+                sl_cal_data = load_local_backtest_data(tickers, start_date, end_date)
+            if not sl_cal_data:
+                st.error("No local data available for this universe/date range. Sync it in Data Manager first.")
+            else:
+                sl_cal_prog = st.progress(0.0)
+                def _sl_cal_cb(done, total, sym):
+                    sl_cal_prog.progress(done / max(total, 1), text=f"{sym} ({done}/{total})")
+                t0 = time.perf_counter()
+                with st.spinner(f"Running SL calibration study on {len(sl_cal_data):,} locally-available tickers × {len(SL_CALIBRATION_SCHEMES)} schemes..."):
+                    sl_cal_result = run_sl_calibration_study(
+                        sl_cal_data, sl_cal_strategies, pd.Timestamp(start_date), pd.Timestamp(end_date), progress_cb=_sl_cal_cb
+                    )
+                sl_cal_prog.empty()
+                st.session_state["sl_calibration_result"] = sl_cal_result
+                st.success(f"Captured {len(sl_cal_result):,} scheme-trade rows in {time.perf_counter() - t0:.1f}s.")
+
+    sl_cal_result = st.session_state.get("sl_calibration_result", pd.DataFrame())
+    if not sl_cal_result.empty:
+        sl_cal_report = sl_calibration_report(sl_cal_result)
+        st.markdown("#### Strategy × Regime × Scheme — Win% / Avg R")
+
+        rep_cols = st.columns(3)
+        strat_filter = rep_cols[0].multiselect("Filter: Strategy", sorted(sl_cal_report["Strategy"].unique()), key="sl_cal_filter_strat")
+        regime_filter = rep_cols[1].multiselect("Filter: Regime", sorted(sl_cal_report["Regime"].unique()), key="sl_cal_filter_regime")
+        reliable_only = rep_cols[2].checkbox("Reliable buckets only", value=False, key="sl_cal_reliable_only")
+
+        view = sl_cal_report.copy()
+        if strat_filter:
+            view = view[view["Strategy"].isin(strat_filter)]
+        if regime_filter:
+            view = view[view["Regime"].isin(regime_filter)]
+        reliable_col = f"Reliable (>={SL_CALIBRATION_MIN_BUCKET_SAMPLES} samples)"
+        if reliable_only:
+            view = view[view[reliable_col]]
+        st.dataframe(view, width='stretch', hide_index=True)
+        st.caption(
+            f"Buckets below {SL_CALIBRATION_MIN_BUCKET_SAMPLES} samples are marked unreliable — treat "
+            "them as noise, not evidence. A scheme missing for a given strategy/regime means it was "
+            "unavailable for every signal there (e.g. no nearby support for structure_swing_low), not zero trades."
+        )
+
+        with st.expander("View raw scheme-trade rows"):
+            st.dataframe(sl_cal_result, width='stretch', hide_index=True)
+
 with tabs[3]:
     st.subheader('🔬 Forward Testing — Persistent Strategy Outcome Tracker')
     st.caption("Every scanner-selected ≥gate signal is stored in SQLite with its original conditions. Refreshing the page does not clear it.")
@@ -1031,6 +1097,80 @@ with tabs[4]:
                     con.close()
                 if coach_full:
                     st.markdown(coach_full[0])
+
+    st.divider()
+    st.subheader("🧑‍🤝‍🧑 System Learning Panel (5 Agents)")
+    st.caption(
+        "Same underlying data as AI System Coach above, but analyzed by 5 specialized agents "
+        "with different priorities, then synthesized by a Judge — useful when you want the "
+        "disagreements surfaced, not just one summary."
+    )
+    st.caption(
+        "5 API calls per run (4 analysts + 1 Judge) — you control when it runs. Reads the AI "
+        "System Coach payload, the Raw Strategy Learning winners-vs-losers data (Backtest tab — "
+        "skipped gracefully if that section hasn't been run yet), and the Stop-Loss Calibration "
+        "Study results (Backtest tab — same graceful skip if empty)."
+    )
+
+    if not _anthropic_configured():
+        st.info("ANTHROPIC_API_KEY not set in Streamlit secrets — add it to enable this section.")
+    elif st.button("🧑‍🤝‍🧑 RUN SYSTEM LEARNING PANEL", type="primary", key="learning_panel_run"):
+        raw_for_panel = st.session_state.get("raw_signal_result", pd.DataFrame())
+        with st.spinner("Running 4 analysts + Judge (5 API calls)..."):
+            panel_result = run_system_learning_panel(raw_for_panel)
+        if panel_result.get("error"):
+            st.warning(panel_result["error"])
+        else:
+            save_learning_panel_run(panel_result)
+            st.session_state["latest_learning_panel"] = panel_result
+            if panel_result["errors"]:
+                st.warning("Panel completed with some agent errors: " + "; ".join(panel_result["errors"]))
+            else:
+                st.success("Panel analysis complete and saved.")
+
+    latest_panel = st.session_state.get("latest_learning_panel")
+    if latest_panel:
+        judge = latest_panel.get("judge")
+        st.markdown("#### 🏁 Judge's Prioritized Recommendations")
+        if judge and judge.get("recommendations"):
+            for rec in sorted(judge["recommendations"], key=lambda r: r.get("priority", 999)):
+                st.markdown(f"**{rec.get('priority', '?')}. {rec.get('recommendation', '')}**")
+                st.caption(rec.get("reasoning", ""))
+        else:
+            st.info("Judge did not return recommendations this run (see any errors above).")
+
+        st.markdown("#### Individual Agent Findings")
+        panel_tabs = st.tabs(["📈 Strategy Performance", "🎯 Marking/Component", "🛡️ Risk & Stop-Loss", "🕵️ Devil's Advocate"])
+        panel_specs = [
+            ("strategy", "Strategy Performance Analyst"),
+            ("marking", "Marking/Component Analyst"),
+            ("risk", "Risk & Stop-Loss Analyst"),
+            ("skeptic", "Devil's Advocate / Overfitting Skeptic"),
+        ]
+        for tab, (key, label) in zip(panel_tabs, panel_specs):
+            with tab:
+                finding = latest_panel.get(key)
+                if finding:
+                    st.markdown(f"**Confidence: {finding.get('confidence', '?')}**")
+                    st.write(finding.get("finding", ""))
+                    st.caption(finding.get("evidence_summary", ""))
+                else:
+                    st.info(f"{label} did not return a result this run.")
+
+    with st.expander("📜 Panel Run History"):
+        con = _db()
+        try:
+            panel_hist = pd.read_sql_query(
+                "SELECT id, created_at, total_backtest_trades, total_forward_closed, "
+                "marking_read_available, sl_calibration_available FROM system_learning_panel_runs ORDER BY id DESC",
+                con,
+            )
+        finally:
+            con.close()
+        if panel_hist.empty:
+            st.info("No panel runs yet — run your first analysis above.")
+        else:
+            st.dataframe(panel_hist, width='stretch', hide_index=True)
 
 with tabs[5]:
     st.subheader("💎 Long-Term Fundamentals + News")
