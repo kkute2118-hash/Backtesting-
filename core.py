@@ -540,6 +540,13 @@ def _db():
     for col,typ in [("signal_date","TEXT"),("signal_json","TEXT")]:
         if col not in existing_cols:
             con.execute(f"ALTER TABLE forward_tests ADD COLUMN {col} {typ}")
+    # S4 SEPA migration: old rows tagged strategy='S4' were qualified under the
+    # pre-SEPA literal formula, not the live SEPA rule. Re-tag them so
+    # historical results stay distinguishable from new S4_SEPA signals.
+    # Idempotent by construction: once a row's strategy has been rewritten to
+    # 'S4_RECOVERY_LEGACY' it no longer matches WHERE strategy='S4', so
+    # running this again (every _db() call) touches zero rows thereafter.
+    con.execute("UPDATE forward_tests SET strategy='S4_RECOVERY_LEGACY' WHERE strategy='S4'")
     con.execute("""CREATE TABLE IF NOT EXISTS scanner_signals(
         signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
         signal_key TEXT UNIQUE NOT NULL,
@@ -1590,6 +1597,122 @@ def advanced_small_micro_safety(info,d,news_risk=0):
     if news_risk>=30: extra-=10; flags.append("News/event risk")
     score=int(np.clip(score+extra,0,100)); status="ELIGIBLE" if score>=70 else "CAUTION" if score>=50 else "REJECT"
     return score,status,flags
+
+
+# ========================= S4 SEPA — UNIVERSE + SAFETY GATE (shared by S1-S4) =========================
+# Part of the SEPA (Specific Entry Point Analysis) replacement of live Strategy 4.
+# nse_liquid_universe()/clean_liquid_universe() are shared by every strategy's live
+# scan (see scan_dataset()) so that no strategy, not only S4, can surface a
+# manipulated/illiquid name. The SEPA strategy logic itself lives further down,
+# next to s4_base_conditions()/strategy_signal().
+
+def nse_liquid_universe(exclude_sme=True):
+    """The Dhan NSE cash-equity list (~1900-2100 names depending on the day's
+    scrip master). Same universe for S1, S2, S3, and S4 - no BSE, no SME board
+    by default, no derivatives-only names."""
+    symbols = sorted(dhan_map().keys())
+    tickers = [f"{s}.NS" for s in symbols]
+    if exclude_sme:
+        tickers = [t for t in tickers if not t.endswith("SM.NS") and "-SM" not in t]
+    return tickers
+
+
+def _price_action_quality(d, lookback=60):
+    """Scores candle quality over the last `lookback` sessions:
+      - low average wick-to-range ratio (clean bodies, not indecision candles)
+      - close-location-value averaging mid-to-high (closes near the top of the
+        day's range more often than not)
+      - no clustering of huge single-day wicks or overnight gaps (operator-stock tell)
+    Returns (score 0-100, flags list).
+    """
+    x = d.tail(lookback).copy()
+    if len(x) < 20:
+        return 0, ["Insufficient history for price action check"]
+
+    rng = (x.high - x.low).replace(0, np.nan)
+    upper_wick = (x.high - x[["open", "close"]].max(axis=1)) / rng
+    lower_wick = (x[["open", "close"]].min(axis=1) - x.low) / rng
+    wick_ratio = (upper_wick + lower_wick).clip(lower=0)
+    close_loc = (x.close - x.low) / rng
+
+    avg_wick_ratio = float(wick_ratio.mean())
+    avg_close_loc = float(close_loc.mean())
+    extreme_wick_days = int((wick_ratio >= 0.65).sum())
+
+    gap_pct = ((x.open - x.close.shift(1)) / x.close.shift(1)).abs()
+    big_gap_days = int((gap_pct >= 0.07).sum())
+
+    flags = []
+    score = 100
+    if avg_wick_ratio > 0.55:
+        score -= 25
+        flags.append("High average wick ratio (indecisive/choppy candles)")
+    elif avg_wick_ratio > 0.40:
+        score -= 10
+        flags.append("Moderate wick ratio")
+
+    if avg_close_loc < 0.45:
+        score -= 15
+        flags.append("Closes tend toward the lower half of the daily range")
+
+    if extreme_wick_days >= 8:
+        score -= 20
+        flags.append(f"{extreme_wick_days} extreme-wick days in last {lookback} sessions")
+
+    if big_gap_days >= 5:
+        score -= 20
+        flags.append(f"{big_gap_days} large overnight gaps in last {lookback} sessions")
+
+    return int(np.clip(score, 0, 100)), flags
+
+
+def clean_liquid_universe(data, fundamentals=None, min_price=20,
+                           min_safety_score=60, min_price_action_score=55):
+    """Takes {ticker: OHLCV df} for nse_liquid_universe(), returns
+    (clean_data, audit_df) where clean_data only contains tickers that are
+    liquid, not manipulation-prone (via advanced_small_micro_safety), AND show
+    decent price action. Feed clean_data into ANY strategy scan (S1-S4).
+
+    fundamentals: optional {ticker: info_dict} from company_info() if already
+    fetched - improves the debt/insider part of the safety check. Fine to omit.
+    """
+    fundamentals = fundamentals or {}
+    clean = {}
+    audit = []
+
+    for ticker, d in data.items():
+        if d is None or len(d) < 60:
+            audit.append({"Ticker": str(ticker).replace(".NS", ""), "Passed": False,
+                          "Reason": "Insufficient history"})
+            continue
+
+        info = fundamentals.get(ticker, {})
+        safety_score, safety_status, safety_flags = advanced_small_micro_safety(info, d)
+        price_ok = float(d.close.iloc[-1]) >= min_price
+        pa_score, pa_flags = _price_action_quality(d)
+
+        passed = (
+            safety_status != "REJECT" and
+            safety_score >= min_safety_score and
+            price_ok and
+            pa_score >= min_price_action_score
+        )
+
+        all_flags = list(safety_flags) + pa_flags + ([] if price_ok else [f"Price below {min_price}"])
+        audit.append({
+            "Ticker": str(ticker).replace(".NS", ""),
+            "Safety Score": safety_score,
+            "Price Action Score": pa_score,
+            "Passed": passed,
+            "Flags": ", ".join(all_flags) if all_flags else "",
+        })
+        if passed:
+            clean[ticker] = d
+
+    audit_df = pd.DataFrame(audit)
+    if not audit_df.empty:
+        audit_df = audit_df.sort_values(["Passed", "Safety Score"], ascending=[False, False])
+    return clean, audit_df
 
 
 # ========================= FOREX + CRYPTO DATA ENGINE =========================
@@ -2863,6 +2986,384 @@ def s4_base_conditions(x):
         )
     )
 
+
+# ========================= S4 SEPA STRATEGY (replaces live S4) =========================
+# Minervini "SEPA" (Specific Entry Point Analysis): fundamental template, trend
+# template, and monthly/weekly/daily VCP-VCC entry timing. This REPLACES the old
+# literal-translation S4 formula (s4_base_conditions() above) as the LIVE S4 rule
+# via strategy_signal(x, s=4) below. s4_base_conditions() itself is untouched and
+# keeps powering s4_ema20_extension_calibration(), a separate research tool.
+#
+# The old "S4 Recovery" pattern-study functions that used to live in this file
+# (strategy4_recovery_features/signal, _s4_recovery_quality, study_s4_recovery,
+# and their walk-forward variant) have been removed - SEPA fully replaces that
+# research direction, nothing from it is reused here.
+
+SEPA_CACHE_TTL_HOURS = 24
+
+def _sepa_fundamentals_payload(symbol):
+    """Fetch + cache quarterly earnings and statistics for the SEPA fundamental
+    screen. Reuses the fundamentals_cache table already created by
+    _ensure_research_tables()."""
+    _ensure_research_tables()
+    sym = str(symbol).upper().replace(".NS", "").replace(".BO", "")
+    con = _db()
+    try:
+        row = con.execute(
+            "SELECT fetched_at,payload FROM fundamentals_cache WHERE symbol=?", (f"SEPA_{sym}",)
+        ).fetchone()
+    finally:
+        con.close()
+    if row and _fresh(row[0], SEPA_CACHE_TTL_HOURS):
+        try:
+            return json.loads(row[1])
+        except Exception:
+            pass
+    if not twelvedata_configured():
+        return {}
+    payload = {}
+    for ep, params in [
+        ("earnings", {"symbol": sym, "exchange": "XNSE"}),
+        ("statistics", {"symbol": sym, "exchange": "XNSE"}),
+        ("profile", {"symbol": sym, "exchange": "XNSE"}),
+    ]:
+        j = _td_get(ep, params)
+        if j and "_error" not in j:
+            payload[ep] = j
+    con = _db()
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO fundamentals_cache VALUES(?,?,?,?,?)",
+            (f"SEPA_{sym}", datetime.now().isoformat(timespec="seconds"),
+             json.dumps(payload, default=str), 0, "SEPA_RAW"),
+        )
+        con.commit()
+    finally:
+        con.close()
+    return payload
+
+
+def sepa_fundamental_screen(symbol, d=None, mcap_min_cr=100, mcap_max_cr=5000):
+    """The Minervini fundamental template (Screen C, S4-specific). Returns
+    per-point pass/fail/unverifiable, an overall score (0-100), and ELIGIBLE /
+    WATCH / REJECT status. `d` is the daily OHLCV frame (price/volume/RSI/MA
+    points come from features() rather than an external API).
+
+    KNOWN DATA GAP: Twelve Data's quarterly revenue is not reliably populated
+    for Indian small/microcaps, so "Sales QoQ growth" always reports
+    "Unverifiable" here. Do not treat "Unverifiable" as a pass anywhere
+    downstream - it is a genuine gap, not a soft pass.
+    """
+    payload = _sepa_fundamentals_payload(symbol)
+    earnings = payload.get("earnings", {}) if isinstance(payload.get("earnings"), dict) else {}
+    stats = payload.get("statistics", {}) if isinstance(payload.get("statistics"), dict) else {}
+    prof = payload.get("profile", {}) if isinstance(payload.get("profile"), dict) else {}
+
+    def num(src, *keys):
+        for k in keys:
+            v = src.get(k)
+            try:
+                if v is not None:
+                    return float(v)
+            except Exception:
+                pass
+        return np.nan
+
+    points = {}
+
+    quarterly = earnings.get("quarterly", []) if isinstance(earnings.get("quarterly"), list) else []
+    if len(quarterly) >= 5:
+        eps_latest = float(quarterly[0].get("eps_actual", np.nan))
+        eps_prev_q = float(quarterly[1].get("eps_actual", np.nan))
+        eps_prev_yr = float(quarterly[4].get("eps_actual", np.nan))
+        eps_3y = [float(q.get("eps_actual", np.nan)) for q in quarterly[:13] if q.get("eps_actual") is not None]
+        p1_pass = np.isfinite(eps_latest) and np.isfinite(eps_prev_q) and eps_prev_q > 0 and (eps_latest / eps_prev_q - 1) >= 0.25
+        p2_pass = (eps_3y[-1] > 0 and (eps_3y[0] / eps_3y[-1] - 1) >= 0.20) if len(eps_3y) >= 8 else None
+        p3_pass = np.isfinite(eps_latest) and np.isfinite(eps_prev_yr) and eps_prev_yr > 0 and eps_latest > eps_prev_yr
+        points["EPS QoQ >=25%"] = p1_pass
+        points["EPS 3Y CAGR >20%"] = p2_pass if p2_pass is not None else "Unverifiable"
+        points["EPS YoY growth"] = p3_pass
+    else:
+        points["EPS QoQ >=25%"] = "Unverifiable"
+        points["EPS 3Y CAGR >20%"] = "Unverifiable"
+        points["EPS YoY growth"] = "Unverifiable"
+
+    points["Sales QoQ growth"] = "Unverifiable"  # Twelve Data revenue coverage gap - see docstring above.
+
+    mcap = num(stats, "market_capitalization") or num(prof, "market_capitalization")
+    mcap_cr = mcap / 1e7 if np.isfinite(mcap) else np.nan
+    points["Market cap band (100-5000 Cr)"] = (
+        bool(mcap_min_cr <= mcap_cr <= mcap_max_cr) if np.isfinite(mcap_cr) else "Unverifiable"
+    )
+    points["Is microcap (<500 Cr)"] = bool(mcap_cr < 500) if np.isfinite(mcap_cr) else "Unverifiable"
+
+    if d is not None and len(d) >= 210:
+        x = features(d)
+        z = x.iloc[-1]
+        vol20 = float(z.vol20) if pd.notna(z.vol20) else np.nan
+        points["Avg volume (1mo) > 50,000"] = bool(np.isfinite(vol20) and vol20 > 50_000)
+        points["Price > 20"] = bool(z.close > 20)
+        points["RSI(14) > 40"] = bool(pd.notna(z.rsi14) and z.rsi14 > 40)
+        points["Price > 200 EMA"] = bool(pd.notna(z.ema200) and z.close > z.ema200)
+        points["50 EMA > 200 EMA (timing)"] = bool(pd.notna(z.ema50) and pd.notna(z.ema200) and z.ema50 > z.ema200)
+    else:
+        for k in ["Avg volume (1mo) > 50,000", "Price > 20", "RSI(14) > 40",
+                   "Price > 200 EMA", "50 EMA > 200 EMA (timing)"]:
+            points[k] = "Unverifiable"
+
+    hard_pass = [v for v in points.values() if v is True]
+    hard_fail = [v for v in points.values() if v is False]
+    verifiable_total = len(hard_pass) + len(hard_fail)
+    score = int(round(100 * len(hard_pass) / verifiable_total)) if verifiable_total else 0
+    status = "ELIGIBLE" if score >= 70 else "WATCH" if score >= 45 else "REJECT"
+
+    return {
+        "symbol": str(symbol).upper().replace(".NS", "").replace(".BO", ""),
+        "score": score,
+        "status": status,
+        "market_cap_cr": round(mcap_cr, 1) if np.isfinite(mcap_cr) else None,
+        "points": points,
+    }
+
+
+def strategy4_sepa_watchlist(x):
+    """Monthly 10 EMA crosses above monthly 20 EMA (or monthly close reclaims
+    monthly 10 EMA) on a strong month, with RSI/volume/price floors. Puts a
+    stock on the watchlist - this is NOT the entry trigger; entry timing is
+    strategy4_sepa_signal() below. This is what live S4 now calls (see
+    strategy_signal(x, s=4))."""
+    if x.empty:
+        return pd.Series(False, index=x.index)
+
+    monthly_bull_cross = (x.mema10 > x.mema20) & (x.mema10.shift(1) <= x.mema20.shift(1))
+    monthly_bull_cross_count = monthly_bull_cross.shift(1).rolling(20, min_periods=20).sum()
+    monthly_reclaim = (x.mclose > x.mema10) & (x.mprevclose <= x.mema10)
+
+    return (
+        (x.mmom >= 20) &
+        (x.mrsi14 >= 50) &
+        (x.mema10 >= x.mema20) &
+        (x.vol30 >= 50000) &
+        (x.close >= 20) &
+        ((monthly_bull_cross_count >= 1) | monthly_reclaim)
+    )
+
+
+def _demand_candle(x):
+    """Closes in the top part of its range, decent body, above-average volume -
+    the confirmation candle that ends a contraction/base."""
+    rng = (x.high - x.low).replace(0, np.nan)
+    close_loc = (x.close - x.low) / rng
+    body = (x.close - x.open).abs() / rng
+    return (close_loc >= 0.65) & (body >= 0.35) & (x.close > x.open) & (x.relvol >= 1.15)
+
+
+def _tight_contraction(x, lookback=10):
+    """Small-bodied, narrowing-range candles right before the demand candle -
+    the daily-chart footprint of a VCP/VCC base ('tightness')."""
+    daily_range = (x.high - x.low) / x.close.replace(0, np.nan)
+    avg_range = daily_range.rolling(lookback, min_periods=max(3, lookback // 2)).mean()
+    prior_range = daily_range.shift(lookback).rolling(lookback, min_periods=max(3, lookback // 2)).mean()
+    contraction_ratio = avg_range / prior_range.replace(0, np.nan)
+    vol_ratio = x.volume.rolling(lookback, min_periods=max(3, lookback // 2)).mean() / x.vol20.replace(0, np.nan)
+    return contraction_ratio, vol_ratio
+
+
+def strategy4_sepa_features(d):
+    """Builds scenario-detection features on top of features(d)."""
+    x = features(d)
+    if x.empty:
+        return x
+
+    contraction_ratio, vol_ratio = _tight_contraction(x)
+    x["sepa_contraction_ratio"] = contraction_ratio
+    x["sepa_base_vol_ratio"] = vol_ratio
+    x["sepa_demand_candle"] = _demand_candle(x)
+
+    # Scenario A: monthly has pulled back close to its own 10 EMA.
+    x["sepa_monthly_near_ema10"] = ((x.mclose - x.mema10).abs() / x.mema10.replace(0, np.nan)) <= 0.06
+
+    # Scenario B: monthly stayed extended -> weekly should be basing at its own
+    # 20 EMA (tight, no breakdown candles) rather than at the 10.
+    x["sepa_weekly_near_ema20"] = ((x.wclose - x.wema20).abs() / x.wema20.replace(0, np.nan)) <= 0.05
+    x["sepa_weekly_holding"] = x.wclose >= x.wema20 * 0.95
+
+    # Daily basing zone: Scenario A bases near daily 200 EMA, Scenario B near daily 50 EMA.
+    x["sepa_near_daily_200"] = ((x.close - x.ema200).abs() / x.ema200.replace(0, np.nan)) <= 0.06
+    x["sepa_near_daily_50"] = ((x.close - x.ema50).abs() / x.ema50.replace(0, np.nan)) <= 0.06
+
+    # Long-term trend template (Minervini stack), required in both scenarios.
+    x["sepa_trend_template"] = (
+        (x.ema50 > x.ema200) &
+        (x.ema200 > x.ema200.shift(80)) &  # ~4 months of daily bars = "200 sloping up"
+        (x.close >= x.ema200 * 0.85)       # allow buying near/below 200
+    )
+    return x
+
+
+def strategy4_sepa_signal(d):
+    """Final S4 entry trigger: watchlist gate AND a valid VCC/demand-candle
+    confirmation in the correct basing zone for whichever scenario applies.
+    This is the precision entry-timing layer; strategy_signal(x, s=4) only
+    evaluates the coarser strategy4_sepa_watchlist() gate."""
+    x = strategy4_sepa_features(d)
+    if x.empty:
+        return pd.Series(False, index=getattr(d, "index", []))
+
+    watchlisted = strategy4_sepa_watchlist(x)
+
+    scenario_a = (
+        x.sepa_monthly_near_ema10 &
+        x.sepa_near_daily_200 &
+        (x.sepa_contraction_ratio <= 0.75) &
+        (x.sepa_base_vol_ratio <= 0.90) &
+        x.sepa_demand_candle
+    )
+    scenario_b = (
+        ~x.sepa_monthly_near_ema10 &
+        x.sepa_weekly_near_ema20 &
+        x.sepa_weekly_holding &
+        x.sepa_near_daily_50 &
+        (x.sepa_contraction_ratio <= 0.75) &
+        (x.sepa_base_vol_ratio <= 0.90) &
+        x.sepa_demand_candle
+    )
+
+    return watchlisted & x.sepa_trend_template & (scenario_a | scenario_b)
+
+
+def _s4_sepa_quality(d):
+    x = strategy4_sepa_features(d)
+    if x.empty:
+        return 0, {}
+    z = x.iloc[-1]
+    scenario = "A (monthly->10EMA / daily->200EMA)" if bool(z.sepa_monthly_near_ema10) else "B (weekly->20EMA / daily->50EMA)"
+
+    pts = 0
+    pts += 20 if pd.notna(z.mmom) and z.mmom >= 40 else 15 if pd.notna(z.mmom) and z.mmom >= 25 else 10 if pd.notna(z.mmom) and z.mmom >= 20 else 0
+    pts += 15 if pd.notna(z.mrsi14) and z.mrsi14 >= 65 else 10 if pd.notna(z.mrsi14) and z.mrsi14 >= 55 else 5
+    pts += 15 if bool(z.sepa_trend_template) else 0
+    pts += 15 if pd.notna(z.sepa_contraction_ratio) and z.sepa_contraction_ratio <= 0.55 else 10 if pd.notna(z.sepa_contraction_ratio) and z.sepa_contraction_ratio <= 0.75 else 0
+    pts += 10 if pd.notna(z.sepa_base_vol_ratio) and z.sepa_base_vol_ratio <= 0.65 else 6 if pd.notna(z.sepa_base_vol_ratio) and z.sepa_base_vol_ratio <= 0.90 else 0
+    pts += 15 if bool(z.sepa_demand_candle) else 0
+    pts += 10 if bool(z.sepa_near_daily_200) or bool(z.sepa_near_daily_50) else 0
+
+    return int(min(100, pts)), {
+        "Scenario": scenario,
+        "Monthly Move %": round(float(z.mmom), 1) if pd.notna(z.mmom) else np.nan,
+        "Monthly RSI": round(float(z.mrsi14), 1) if pd.notna(z.mrsi14) else np.nan,
+        "Trend Template OK": bool(z.sepa_trend_template),
+        "Contraction Ratio": round(float(z.sepa_contraction_ratio), 2) if pd.notna(z.sepa_contraction_ratio) else np.nan,
+        "Base Vol Ratio": round(float(z.sepa_base_vol_ratio), 2) if pd.notna(z.sepa_base_vol_ratio) else np.nan,
+        "Demand Candle": bool(z.sepa_demand_candle),
+    }
+
+
+def stock_dna(d, lookback_months=36):
+    """The size of the stock's historical monthly up-legs, so position size
+    scales with what the stock is actually capable of (a 20%-mover shouldn't
+    be sized the same as a 300%-mover)."""
+    x = _monthly_asof(d)
+    if x is None or len(x) < 6:
+        return {"legs_n": 0, "median_leg_pct": np.nan, "max_leg_pct": np.nan, "size_multiplier": 0.5}
+    mom = x.close.pct_change().tail(lookback_months) * 100
+    up_legs = mom[mom > 5]
+    median_leg = float(up_legs.median()) if len(up_legs) else np.nan
+    max_leg = float(up_legs.max()) if len(up_legs) else np.nan
+
+    if not np.isfinite(median_leg):
+        mult = 0.5
+    elif median_leg >= 60:
+        mult = 1.0
+    elif median_leg >= 30:
+        mult = 0.75
+    elif median_leg >= 15:
+        mult = 0.5
+    else:
+        mult = 0.25
+
+    return {
+        "legs_n": int(len(up_legs)),
+        "median_leg_pct": round(median_leg, 1) if np.isfinite(median_leg) else None,
+        "max_leg_pct": round(max_leg, 1) if np.isfinite(max_leg) else None,
+        "size_multiplier": mult,
+    }
+
+
+def sepa_trailing_stop(d, setup_timeframe="monthly"):
+    """One timeframe below the setup timeframe: monthly setup -> trail on daily
+    50 EMA; weekly setup -> trail on daily 20 EMA. Returns current stop level
+    and whether today's close has broken it."""
+    x = features(d)
+    if x.empty:
+        return {"stop_level": None, "broken": False, "basis": setup_timeframe}
+    z = x.iloc[-1]
+    stop_level = float(z.ema50) if setup_timeframe == "monthly" else float(z.ema20)
+    stop_level = stop_level if np.isfinite(stop_level) else np.nan
+    broken = bool(np.isfinite(stop_level) and z.close < stop_level)
+    return {"stop_level": round(stop_level, 2) if np.isfinite(stop_level) else None,
+            "broken": broken, "basis": f"daily EMA below {setup_timeframe} setup"}
+
+
+def sepa_breakeven_shift(entry_price, current_price, higher_low_price=None, trigger_pct=15.0):
+    """Once open profit crosses trigger_pct, move stop to breakeven or the
+    most recent higher low, whichever is higher."""
+    if entry_price is None or current_price is None or entry_price <= 0:
+        return None
+    gain_pct = (current_price / entry_price - 1) * 100
+    if gain_pct < trigger_pct:
+        return None
+    candidates = [entry_price]
+    if higher_low_price is not None:
+        candidates.append(higher_low_price)
+    return max(candidates)
+
+
+def scan_s4_sepa(data, fundamentals=None, min_score=60, max_stocks=None,
+                  apply_fundamental_screen=False):
+    """Full S4 pipeline: run clean_liquid_universe() first, then scan the
+    result for SEPA entries. `data` should be {ticker: OHLCV df} already loaded
+    for nse_liquid_universe()."""
+    clean_data, safety_audit = clean_liquid_universe(data, fundamentals=fundamentals)
+
+    rows = []
+    items = list(clean_data.items())
+    if max_stocks:
+        items = items[:int(max_stocks)]
+    for ticker, d in items:
+        if d is None or len(d) < 260:
+            continue
+        try:
+            sig = strategy4_sepa_signal(d).iloc[-1]
+        except Exception:
+            continue
+        if not bool(sig):
+            continue
+        score, parts = _s4_sepa_quality(d)
+        if score < min_score:
+            continue
+        dna = stock_dna(d)
+        row = {
+            "Ticker": str(ticker).replace(".NS", ""),
+            "Score": score,
+            "Entry": round(float(d.close.iloc[-1]), 2),
+            "Size Multiplier": dna["size_multiplier"],
+            "Median Leg %": dna["median_leg_pct"],
+            **parts,
+        }
+        if apply_fundamental_screen:
+            fs = sepa_fundamental_screen(ticker, d)
+            row["Fundamental Score"] = fs["score"]
+            row["Fundamental Status"] = fs["status"]
+            row["Market Cap (Cr)"] = fs["market_cap_cr"]
+        rows.append(row)
+
+    results = pd.DataFrame(rows)
+    if not results.empty:
+        results = results.sort_values(["Score", "Median Leg %"], ascending=[False, False])
+    return results, safety_audit
+
+
 def strategy_signal(x,s):
     if x.empty:
         return pd.Series(False,index=x.index)
@@ -3014,28 +3515,16 @@ def strategy_signal(x,s):
 
     if s==4:
         # ================================================================
-        # STRATEGY 4 — direct translation of the user's original formula
+        # STRATEGY 4 — SEPA (Specific Entry Point Analysis) watchlist gate
         # ================================================================
-        #
-        # monthly return >= 20%
-        # monthly RSI(14) >= 50
-        # monthly EMA10 >= monthly EMA20
-        # daily EMA(volume,30) >= 50000
-        # daily close >= 20
-        #
-        # AND:
-        #   monthly count(20,1 where monthly EMA10 > EMA20 and
-        #                  1 month ago EMA10 <= EMA20) >= 1
-        #   OR
-        #   current monthly close > monthly EMA10 AND
-        #       1 month ago close <= 1 month ago EMA10
-        #
-        # AND daily close <= 1.03 * daily EMA20
-        #
-        # Monthly count uses completed monthly observations immediately
-        # preceding the current month, exactly like the scanner's offset=1.
-
-        return s4_base_conditions(x) & (x.close <= 1.03 * x.ema20)
+        # LIVE S4 no longer runs the old literal-translation formula below
+        # (monthly return>=20%, monthly RSI>=50, EMA10/20 cross or reclaim,
+        # daily close<=1.03xEMA20). It now runs the Minervini SEPA watchlist
+        # rule instead - see strategy4_sepa_watchlist() above. The old formula
+        # is preserved verbatim in s4_base_conditions() purely so
+        # s4_ema20_extension_calibration() (a separate research tool) keeps
+        # working; it is deliberately NOT called from here anymore.
+        return strategy4_sepa_watchlist(x)
 
     return pd.Series(False,index=x.index)
 
@@ -3113,6 +3602,11 @@ def strategy_condition_matrix(x, s):
         }
 
     if s == 4:
+        # Mirrors strategy4_sepa_watchlist() exactly (live S4's coarser
+        # watchlist gate) - the old fixed "Close <= 1.03 x EMA20" proximity
+        # rule is gone from live S4, so it is not listed here either. The
+        # tighter VCP/VCC entry-timing rules live in strategy4_sepa_signal(),
+        # which is a separate precision layer the radar does not track.
         monthly_bull_cross = (x.mema10 > x.mema20) & (x.mema10.shift(1) <= x.mema20.shift(1))
         monthly_bull_cross_count = monthly_bull_cross.shift(1).rolling(20, min_periods=20).sum()
         monthly_reclaim = (x.mclose > x.mema10) & (x.mprevclose <= x.mema10)
@@ -3123,7 +3617,6 @@ def strategy_condition_matrix(x, s):
             "Vol30 >= 50000": x.vol30 >= 50000,
             "Close >= 20": x.close >= 20,
             "Recent monthly cross or reclaim": (monthly_bull_cross_count >= 1) | monthly_reclaim,
-            "Close <= 1.03 x EMA20": x.close <= 1.03 * x.ema20,
         }
 
     return {}
@@ -3435,134 +3928,6 @@ def radar_missing_rule_summary(radar_df):
     g = (pd.DataFrame(rows).groupby(["Strategy", "Missing Rule"]).size()
          .reset_index(name="Stocks").sort_values("Stocks", ascending=False))
     return g.reset_index(drop=True)
-
-
-# ========================= STRATEGY 4 RECOVERY STUDY =========================
-def strategy4_recovery_features(d):
-    """Research-only pattern detector for the S4 problem described by the user.
-
-    It does NOT modify Strategy 4. It studies a different entry structure:
-    impulse -> consolidation/retracement -> reclaim -> higher-high confirmation.
-    Every calculation is strictly as-of the current bar.
-    """
-    if d is None or len(d) < 120:
-        return pd.DataFrame(index=getattr(d, "index", []))
-    x=d.copy().sort_index()
-    x["ema20_r"]=ema(x.close,20)
-    x["ema50_r"]=ema(x.close,50)
-    x["atr14_r"]=(pd.concat([
-        x.high-x.low,
-        (x.high-x.close.shift()).abs(),
-        (x.low-x.close.shift()).abs()
-    ],axis=1).max(axis=1)).rolling(14,min_periods=14).mean()
-    x["vol20_r"]=sma(x.volume,20)
-    x["relvol_r"]=x.volume/x.vol20_r.replace(0,np.nan)
-
-    # Prior impulse: use only completed bars before the current consolidation.
-    x["prior_high_60"]=x.high.shift(10).rolling(50,min_periods=30).max()
-    x["prior_low_60"]=x.low.shift(10).rolling(50,min_periods=30).min()
-    x["impulse_return"]=(x.prior_high_60/x.prior_low_60-1)
-
-    # Consolidation range: prior 15 bars, excluding today's bar.
-    x["base_high"]=x.high.shift(1).rolling(15,min_periods=10).max()
-    x["base_low"]=x.low.shift(1).rolling(15,min_periods=10).min()
-    x["base_range"]=(x.base_high/x.base_low-1)
-    x["base_atr"]=(x.high-x.low).shift(1).rolling(15,min_periods=10).mean()
-    x["prior_atr"]=(x.high-x.low).shift(16).rolling(30,min_periods=20).mean()
-    x["range_compression"]=x.base_atr/x.prior_atr.replace(0,np.nan)
-    x["base_vol"] = x.volume.shift(1).rolling(15,min_periods=10).mean()
-    x["impulse_vol"] = x.volume.shift(16).rolling(30,min_periods=20).mean()
-    x["volume_contraction"]=x.base_vol/x.impulse_vol.replace(0,np.nan)
-
-    # Retracement depth from prior impulse high into the base.
-    x["retracement"]=(x.prior_high_60-x.base_low)/(x.prior_high_60-x.prior_low_60).replace(0,np.nan)
-
-    # Current confirmation: reclaim EMA20 + break above the base high / recent swing high.
-    x["reclaim_ema20"]=(x.close>x.ema20_r)&(x.close.shift(1)<=x.ema20_r.shift(1))
-    x["higher_high"] = x.high > x.high.shift(1).rolling(10,min_periods=5).max()
-    x["base_breakout"] = x.close > x.base_high
-    x["close_location"]=(x.close-x.low)/(x.high-x.low).replace(0,np.nan)
-    return x
-
-def strategy4_recovery_signal(d, min_impulse=0.20, max_base_range=0.18,
-                              max_retracement=0.65, max_range_ratio=0.80,
-                              max_volume_ratio=0.90, min_relvol=1.20):
-    """Return a boolean series for the research-only S4 recovery pattern.
-
-    Core idea: a meaningful prior move, controlled retracement/consolidation,
-    volatility/volume contraction, then a reclaim + higher-high confirmation.
-    This is deliberately separate from the exact S4 rule set.
-    """
-    x=strategy4_recovery_features(d)
-    if x.empty: return pd.Series(False,index=getattr(d,"index",[]))
-    monthly=_monthly_asof(d)
-    monthly["rsi14"]=rsi(monthly.close,14)
-    monthly["ema10"]=ema(monthly.close,10)
-    monthly["ema20"]=ema(monthly.close,20)
-    monthly["mom"]=monthly.close.pct_change()*100
-    vals=[]
-    for dt in d.index:
-        mm=monthly[monthly.index.to_period("M")<=dt.to_period("M")]
-        vals.append(mm.iloc[-1] if not mm.empty else pd.Series(dtype=float))
-    x["mrsi4"]=[v.get("rsi14",np.nan) for v in vals]
-    x["mema10_4"]=[v.get("ema10",np.nan) for v in vals]
-    x["mema20_4"]=[v.get("ema20",np.nan) for v in vals]
-    x["mmom4"]=[v.get("mom",np.nan) for v in vals]
-
-    return (
-        (x.impulse_return>=min_impulse) &
-        (x.base_range<=max_base_range) &
-        (x.retracement<=max_retracement) &
-        (x.range_compression<=max_range_ratio) &
-        (x.volume_contraction<=max_volume_ratio) &
-        (x.close>=x.ema50_r) &
-        (x.mrsi4>=50) &
-        (x.mema10_4>=x.mema20_4) &
-        (x.reclaim_ema20 | x.base_breakout) &
-        x.higher_high &
-        (x.close_location>=0.60) &
-        (x.relvol_r>=min_relvol)
-    )
-
-def _s4_recovery_quality(d):
-    x=strategy4_recovery_features(d)
-    if x.empty: return 0,{}
-    z=x.iloc[-1]
-    pts=0
-    pts += 20 if pd.notna(z.impulse_return) and z.impulse_return>=0.40 else 15 if pd.notna(z.impulse_return) and z.impulse_return>=0.30 else 10 if pd.notna(z.impulse_return) and z.impulse_return>=0.20 else 0
-    pts += 20 if pd.notna(z.base_range) and z.base_range<=0.10 else 15 if pd.notna(z.base_range) and z.base_range<=0.14 else 10 if pd.notna(z.base_range) and z.base_range<=0.18 else 0
-    pts += 15 if pd.notna(z.retracement) and z.retracement<=0.40 else 10 if pd.notna(z.retracement) and z.retracement<=0.55 else 5 if pd.notna(z.retracement) and z.retracement<=0.65 else 0
-    pts += 15 if pd.notna(z.range_compression) and z.range_compression<=0.60 else 10 if pd.notna(z.range_compression) and z.range_compression<=0.80 else 5 if pd.notna(z.range_compression) and z.range_compression<=1 else 0
-    pts += 10 if pd.notna(z.volume_contraction) and z.volume_contraction<=0.70 else 7 if pd.notna(z.volume_contraction) and z.volume_contraction<=0.90 else 0
-    pts += 10 if pd.notna(z.relvol_r) and z.relvol_r>=1.50 else 7 if pd.notna(z.relvol_r) and z.relvol_r>=1.20 else 0
-    pts += 10 if bool(z.higher_high) and bool(z.base_breakout) else 6 if bool(z.higher_high) or bool(z.reclaim_ema20) else 0
-    return int(min(100,pts)), {
-        "Impulse %": round(float(z.impulse_return*100),1) if pd.notna(z.impulse_return) else np.nan,
-        "Base Range %": round(float(z.base_range*100),1) if pd.notna(z.base_range) else np.nan,
-        "Retracement %": round(float(z.retracement*100),1) if pd.notna(z.retracement) else np.nan,
-        "Range Compression": round(float(z.range_compression),2) if pd.notna(z.range_compression) else np.nan,
-        "Volume Contraction": round(float(z.volume_contraction),2) if pd.notna(z.volume_contraction) else np.nan,
-        "RelVol": round(float(z.relvol_r),2) if pd.notna(z.relvol_r) else np.nan,
-        "Higher High": bool(z.higher_high),
-        "EMA20 Reclaim": bool(z.reclaim_ema20),
-        "Base Breakout": bool(z.base_breakout)
-    }
-
-def study_s4_recovery(data, min_score=70, max_stocks=None):
-    """Fast cross-sectional study. Does not alter exact S4 results."""
-    rows=[]
-    items=list(data.items())
-    if max_stocks: items=items[:int(max_stocks)]
-    for ticker,d in items:
-        if d is None or len(d)<160: continue
-        sig=strategy4_recovery_signal(d).iloc[-1]
-        score,parts=_s4_recovery_quality(d)
-        if not bool(sig) or score<min_score: continue
-        z=d.iloc[-1]
-        rows.append({"Ticker":str(ticker).replace(".NS",""),"Study Score":score,
-                     "Entry":round(float(z.close),2),"Signal":"RECOVERY → HIGHER HIGH",
-                     **parts})
-    return pd.DataFrame(rows).sort_values(["Study Score","RelVol"],ascending=[False,False]) if rows else pd.DataFrame()
 
 
 # ========================= MARKET REGIME =========================
@@ -7091,6 +7456,12 @@ def _s4_recovery_event(d,i):
     return {"Score":int(score),"Impulse %":round(impulse*100,1),"Base Range %":round(base_range*100,1),"Retracement %":round(retr*100,1),"Base Vol Ratio":round(compression,2),"RelVol":round(relvol,2),"Reclaim":bool(reclaim),"Higher High":bool(hh)}
 
 def study_s4_recovery_walkforward(data,start_date,end_date,min_score=70):
+    """NOTE: kept even though the old strategy4_recovery_* pattern-study
+    helpers above it were removed as part of the S4 SEPA replacement - this
+    walk-forward study (and its _s4_recovery_event() helper) has an
+    independent caller in the Research & Risk Control tab (app.py), which is
+    unrelated to the "S4 Recovery Study" tab that was removed. Deliberately
+    left as a standalone research tool; not part of live S4."""
     rows=[]; start=pd.Timestamp(start_date); end=pd.Timestamp(end_date)
     for ticker,d in data.items():
         if d is None or len(d)<180:continue
@@ -7241,6 +7612,15 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0})
     counts.setdefault("safety_reject", 0)
 
+    # Shared universe/safety/liquidity gate, applied to EVERY strategy (S1-S4)
+    # before any strategy_signal() is evaluated. No strategy can surface a
+    # manipulated/illiquid/choppy-price-action name, regardless of which one
+    # found it - this is deliberately unconditional, not a per-strategy option.
+    clean_data, safety_gate_audit = clean_liquid_universe(data)
+    counts["safety_gate_audit"] = safety_gate_audit
+    counts["safety_gate_excluded"] = max(0, len(data) - len(clean_data))
+    data = clean_data
+
     ml_model = train_win_probability_model("INDIA")
     # Exposed so a caller can report on the model without re-training it
     # (train_win_probability_model is cached, but the cache is Streamlit's and
@@ -7288,9 +7668,21 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             stop = entry * .93
             target = entry + 3 * (entry - stop)
 
+            # Learning-edge lookups stay keyed by "S4" (unchanged): the backtest
+            # engine (which populates learning_observations) also labels this
+            # slot "S4" regardless of which formula strategy_signal(x, 4)
+            # currently runs, so this key must match that bucket to find any
+            # historical edge at all. Only the value persisted into
+            # forward_tests is renamed - see below and the migration in _db().
             edge_r, learn_conf = current_candidate_edge("INDIA", f"S{s}", float(score))
             learned_rank = float(np.clip(score + edge_r * 2.0, 0, 100))
             adaptive_score = adaptive_candidate_score(float(score), "INDIA", f"S{s}", parts)
+
+            # The "Strategy" field below is what a caller (add_forward_candidates)
+            # ultimately writes into forward_tests.strategy. S4 is tagged
+            # "S4_SEPA" there (not "S4") so pre-SEPA and post-SEPA forward-test
+            # rows stay distinguishable, per the forward_tests migration in _db().
+            strategy_label = "S4_SEPA" if s == 4 else f"S{s}"
             row = {
                 "Score": score,
                 "Adaptive Score": round(adaptive_score, 2),
@@ -7298,7 +7690,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 "Historical Edge R": round(edge_r, 3),
                 "Learning Confidence": learn_conf,
                 "Ticker": str(ticker).replace(".NS", ""),
-                "Strategy": f"S{s}",
+                "Strategy": strategy_label,
                 "Signal": "ALL RULES PASS",
                 "Regime": regime,
                 "Safety": safe_status,
@@ -7378,7 +7770,7 @@ def add_forward_candidates(candidates):
             symbol=str(r.get("Ticker","")).upper().replace(".NS","")
             strategy=str(r.get("Strategy","")).upper()
             score=float(r.get("Score",0))
-            if not symbol or strategy not in {"S1","S2","S3","S4"}:
+            if not symbol or strategy not in {"S1","S2","S3","S4_SEPA"}:
                 continue
             entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
             target=float(r.get("Target",r.get("Target 3R",np.nan)))
