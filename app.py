@@ -140,6 +140,14 @@ _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
 _DHAN_LAST_DATA_ERRORS=[]
 
+# A WebSocket tick older than this is treated as stale and re-fetched over REST,
+# so a dead/disconnected feed can never masquerade as a current price.
+LIVE_TICK_MAX_AGE_MINUTES = 10
+
+# How many recent calendar days a sync re-requests even though candles already
+# exist there, so partially-formed or exchange-revised bars are corrected.
+LATEST_SYNC_TAIL_DAYS = 10
+
 # Dhan access tokens are only valid 24h (SEBI/exchange requirement) with no
 # refresh-token flow for a bare access token - PIN+TOTP (or a browser OAuth
 # login) is required to mint a new one. If DHAN_PIN and DHAN_TOTP_SECRET are
@@ -399,6 +407,33 @@ def latest_completed_nse_session(now=None):
     return last_expected_nse_session(d)
 
 
+NSE_MARKET_OPEN_HOUR = 9
+NSE_MARKET_OPEN_MINUTE = 15
+
+
+def nse_market_is_open(now=None):
+    """True while the NSE cash session is actually trading (weekday, 09:15-15:30
+    IST wall-clock). Used to decide whether a live intraday price is meaningful;
+    outside the session the last completed daily candle IS the current price."""
+    now = now if now is not None else datetime.now()
+    if now.weekday() >= 5:
+        return False
+    open_t = now.replace(hour=NSE_MARKET_OPEN_HOUR, minute=NSE_MARKET_OPEN_MINUTE,
+                         second=0, microsecond=0)
+    close_t = now.replace(hour=NSE_MARKET_CLOSE_HOUR, minute=NSE_MARKET_CLOSE_MINUTE,
+                          second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+def current_session_date(now=None):
+    """The trading date a live price belongs to. During a live session that is
+    today; otherwise it is the most recently completed session."""
+    now = now if now is not None else datetime.now()
+    if nse_market_is_open(now):
+        return now.date()
+    return latest_completed_nse_session(now)
+
+
 def data_freshness_status(tickers, now=None):
     """Compare the MAX cached candle date across `tickers` against the most
     recently completed NSE session. Read-only diagnostics — never syncs."""
@@ -424,9 +459,12 @@ def data_freshness_status(tickers, now=None):
 
 
 def render_data_freshness_banner(tickers, now=None):
-    """Prominent, read-only freshness indicator for the Scanner/Backtest tabs.
-    Visibility only — per the app's explicit-sync architecture, this never
-    triggers a sync itself."""
+    """Prominent freshness indicator for the Scanner/Backtest tabs.
+
+    Read-only: it reports state, it never syncs. The Scanner tab pairs it with
+    an explicit top-up button so a stale cache can be fixed without leaving the
+    tab, which is what previously forced scans to run on old closes.
+    """
     if not tickers:
         st.info("Select a universe to check local data freshness.")
         return None
@@ -434,14 +472,21 @@ def render_data_freshness_banner(tickers, now=None):
     if status["latest"] is None:
         st.error("⚠️ No local candle data found for this universe yet. Run Data Manager → SYNC ONLY MISSING DATA before scanning.")
     elif status["current"]:
-        st.success(f"✅ Data current as of {status['latest'].strftime('%d-%b-%Y')}")
+        st.success(f"✅ Stored candles current as of {status['latest'].strftime('%d-%b-%Y')} (last completed session).")
     else:
         n = status["days_behind"]
-        unit = "day" if n == 1 else "days"
-        st.warning(
-            f"⚠️ Local data is {n} {unit} behind — latest cached session is "
-            f"{status['latest'].strftime('%d-%b-%Y')}, but {status['expected'].strftime('%d-%b-%Y')} "
-            "has already closed. Run SYNC ONLY MISSING DATA before scanning, or signals will be based on stale prices."
+        unit = "session" if n == 1 else "sessions"
+        st.error(
+            f"🛑 STALE DATA — local cache ends {status['latest'].strftime('%d-%b-%Y')}, but "
+            f"{status['expected'].strftime('%d-%b-%Y')} has already closed ({n} {unit} behind). "
+            "Scanning now would rank prices that are out of date and produce late entries. "
+            "Run the top-up button below first."
+        )
+    if nse_market_is_open(now):
+        st.info(
+            "🟢 NSE cash session is OPEN. Stored daily candles can only ever be as new as "
+            "yesterday's close — tick 'Use live intraday price' below to scan against the "
+            "current price instead of the last close."
         )
     return status
 
@@ -535,14 +580,29 @@ def _save(con,s,d):
     con.executemany("INSERT OR REPLACE INTO candles VALUES(?,?,?,?,?,?,?)",rows)
     con.commit();return len(rows)
 
-def update_dhan_symbol(symbol,start_date,end_date):
+def update_dhan_symbol(symbol,start_date,end_date,refresh_tail_days=0):
+    """Fill only the missing head/tail ranges for one symbol.
+
+    `refresh_tail_days` re-requests the most recent N calendar days even though
+    candles already exist there. Without it the newest stored bar was never
+    revisited, so any candle first written while its session was still open (or
+    later revised/adjusted by the exchange) stayed wrong forever - MAX(dt) had
+    already advanced past it, and the "end_date > mx" branch below could never
+    reach back to correct it. INSERT OR REPLACE makes the re-request idempotent.
+    """
     s=str(symbol).upper().replace(".NS","");con=_db()
     try:
         mn,mx=_bounds(con,s)
         if not mn:return _save(con,s,dhan_history(s,start_date,end_date))
         n=0;mn=pd.Timestamp(mn).date();mx=pd.Timestamp(mx).date()
         if pd.Timestamp(start_date).date()<mn:n+=_save(con,s,dhan_history(s,start_date,mn-timedelta(days=1)))
-        if pd.Timestamp(end_date).date()>mx:n+=_save(con,s,dhan_history(s,mx+timedelta(days=1),end_date))
+        tail=int(refresh_tail_days or 0)
+        if tail>0:
+            tail_start=max(mn,mx-timedelta(days=tail))
+            if tail_start<=pd.Timestamp(end_date).date():
+                n+=_save(con,s,dhan_history(s,tail_start,end_date))
+        elif pd.Timestamp(end_date).date()>mx:
+            n+=_save(con,s,dhan_history(s,mx+timedelta(days=1),end_date))
         return n
     finally:con.close()
 
@@ -553,7 +613,7 @@ def _read_cache(con,s,start_date,end_date):
     if d.empty:return pd.DataFrame()
     d.dt=pd.to_datetime(d.dt);d=d.set_index("dt");d.index.name="date";return d
 
-def download_prices(tickers,start,end,max_workers=4):
+def download_prices(tickers,start,end,max_workers=4,refresh_tail_days=0):
     """
     Dhan historical loader with bounded concurrency and transparent failures.
 
@@ -574,7 +634,7 @@ def download_prices(tickers,start,end,max_workers=4):
 
     def worker(symbol):
         try:
-            saved=update_dhan_symbol(symbol,start,end)
+            saved=update_dhan_symbol(symbol,start,end,refresh_tail_days=refresh_tail_days)
             return symbol,saved,None
         except Exception as exc:
             return symbol,0,str(exc)
@@ -615,6 +675,226 @@ def dhan_live_ltp(symbols):
     raw=r.json().get("data",{}).get("NSE_EQ",{});rev={a:b for a,b in pairs}
     return {rev[str(k)]:float(v["last_price"]) for k,v in raw.items()
             if str(k) in rev and isinstance(v,dict) and v.get("last_price") is not None}
+
+DHAN_QUOTE_CHUNK = 1000  # Dhan market-feed accepts up to 1000 instruments per request
+
+
+def _dhan_quote_raw(security_ids):
+    """POST /marketfeed/quote for one chunk of NSE_EQ security IDs, honouring the
+    same global data-API rate limit as dhan_history()."""
+    global _DHAN_LAST_REQUEST
+    with _DHAN_RATE_LOCK:
+        wait = DHAN_MIN_INTERVAL - (time.monotonic() - _DHAN_LAST_REQUEST)
+        if wait > 0:
+            time.sleep(wait)
+        _DHAN_LAST_REQUEST = time.monotonic()
+    r = requests.post(f"{DHAN_BASE_URL}/marketfeed/quote", headers=_dhan_headers(),
+                      json={"NSE_EQ": [int(s) for s in security_ids]}, timeout=30)
+    r.raise_for_status()
+    return r.json().get("data", {}).get("NSE_EQ", {}) or {}
+
+
+def _quote_num(payload, *keys):
+    """Dhan has shipped several spellings of the same quote fields across API
+    versions. Read the first key that carries a usable number instead of
+    hard-coding one spelling and silently getting NaN."""
+    for k in keys:
+        if not isinstance(payload, dict):
+            return np.nan
+        if k in payload and payload[k] is not None:
+            try:
+                v = float(payload[k])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(v):
+                return v
+    return np.nan
+
+
+def dhan_quote_snapshot(symbols):
+    """Bulk live quote for NSE equities: last price plus the session's running
+    open/high/low and volume.
+
+    This is the piece the scanner was missing. dhan_live_ltp() returns only a
+    last price, and the WebSocket manager only ever tracked the handful of
+    active forward-test symbols - so a universe scan had no way to see today's
+    price at all and always ranked yesterday's close.
+
+    Returns {SYMBOL: {"ltp","open","high","low","prev_close","volume","ts"}}.
+    Symbols Dhan does not return are simply absent; callers fall back to the
+    stored daily candle rather than failing the whole scan.
+    """
+    clean = sorted({str(s).upper().replace(".NS", "").strip() for s in symbols if str(s).strip()})
+    if not clean:
+        return {}
+    mp = dhan_map()
+    pairs = [(mp[s], s) for s in clean if s in mp]
+    if not pairs:
+        return {}
+
+    out = {}
+    ts = datetime.now().isoformat(timespec="seconds")
+    for i in range(0, len(pairs), DHAN_QUOTE_CHUNK):
+        chunk = pairs[i:i + DHAN_QUOTE_CHUNK]
+        rev = {str(sid): sym for sid, sym in chunk}
+        try:
+            raw = _dhan_quote_raw([sid for sid, _ in chunk])
+        except Exception:
+            continue
+        for sid, payload in raw.items():
+            sym = rev.get(str(sid))
+            if not sym or not isinstance(payload, dict):
+                continue
+            ohlc = payload.get("ohlc") if isinstance(payload.get("ohlc"), dict) else {}
+            ltp = _quote_num(payload, "last_price", "LTP", "lastTradedPrice")
+            if not np.isfinite(ltp) or ltp <= 0:
+                continue
+            out[sym] = {
+                "ltp": ltp,
+                "open": _quote_num(ohlc, "open", "Open"),
+                "high": _quote_num(ohlc, "high", "High"),
+                "low": _quote_num(ohlc, "low", "Low"),
+                # Dhan reports the PREVIOUS session's close in the quote ohlc
+                # block (same convention as other Indian broker APIs), so it is
+                # deliberately not treated as today's close.
+                "prev_close": _quote_num(ohlc, "close", "Close"),
+                "volume": _quote_num(payload, "volume", "Volume", "last_quantity"),
+                "ts": ts,
+            }
+    return out
+
+
+def live_price_map(symbols, prefer_websocket=True):
+    """Best available current price per symbol, with provenance.
+
+    Order of preference: a fresh WebSocket tick (already streaming, zero extra
+    API cost) -> a bulk REST quote -> nothing. Returns
+    {SYMBOL: {"price","ts","source"}}.
+    """
+    clean = sorted({str(s).upper().replace(".NS", "").strip() for s in symbols if str(s).strip()})
+    if not clean:
+        return {}
+    prices = {}
+
+    if prefer_websocket:
+        try:
+            live = read_live_prices(clean)
+        except Exception:
+            live = pd.DataFrame()
+        if live is not None and not live.empty:
+            cutoff = datetime.now() - timedelta(minutes=LIVE_TICK_MAX_AGE_MINUTES)
+            for r in live.itertuples():
+                try:
+                    px = float(r.ltp)
+                    tick_ts = pd.Timestamp(r.ts).to_pydatetime()
+                except Exception:
+                    continue
+                if np.isfinite(px) and px > 0 and tick_ts >= cutoff:
+                    prices[str(r.symbol).upper()] = {
+                        "price": px, "ts": str(r.ts), "source": "WEBSOCKET"
+                    }
+
+    missing = [s for s in clean if s not in prices]
+    if missing:
+        try:
+            quotes = dhan_quote_snapshot(missing)
+        except Exception:
+            quotes = {}
+        for sym, q in quotes.items():
+            prices[sym] = {"price": float(q["ltp"]), "ts": q["ts"], "source": "QUOTE"}
+    return prices
+
+
+def build_live_daily_bars(symbols):
+    """Today's still-forming daily candle per symbol, from the live quote feed.
+
+    Only meaningful while the cash session is open. Outside market hours the
+    completed daily candle already IS the latest price, so this returns {} and
+    callers transparently keep using the stored candle.
+    """
+    if not nse_market_is_open():
+        return {}
+    try:
+        quotes = dhan_quote_snapshot(symbols)
+    except Exception:
+        return {}
+    session = date.today()
+    bars = {}
+    for sym, q in quotes.items():
+        ltp = float(q["ltp"])
+        o = q["open"] if np.isfinite(q["open"]) and q["open"] > 0 else ltp
+        # The running high/low can lag the last tick by a moment, so widen them
+        # with the LTP instead of publishing a bar where close > high.
+        h = max(ltp, q["high"] if np.isfinite(q["high"]) else ltp, o)
+        l = min(ltp, q["low"] if np.isfinite(q["low"]) and q["low"] > 0 else ltp, o)
+        v = q["volume"] if np.isfinite(q["volume"]) and q["volume"] >= 0 else 0.0
+        bars[sym] = {"date": session, "open": o, "high": h, "low": l,
+                     "close": ltp, "volume": v, "ts": q["ts"]}
+    return bars
+
+
+def apply_live_bar(df, bar):
+    """Return a copy of a daily OHLCV frame with today's forming candle appended
+    (or replaced if a row for that date already exists).
+
+    Deliberately in-memory only: a partial intraday bar must never be written
+    into the `candles` table, or every backtest from that day forward would be
+    computed against a candle that never actually closed at that price.
+    """
+    if df is None or df.empty or not bar:
+        return df
+    try:
+        ts = pd.Timestamp(bar["date"])
+        close = float(bar["close"])
+    except Exception:
+        return df
+    if not np.isfinite(close) or close <= 0:
+        return df
+    values = {
+        "open": float(bar.get("open", close) or close),
+        "high": float(bar.get("high", close) or close),
+        "low": float(bar.get("low", close) or close),
+        "close": close,
+        "volume": float(bar.get("volume", 0.0) or 0.0),
+    }
+    # Build the row as its own float frame and concat, rather than assigning via
+    # .loc: a cached frame whose OHLCV columns came back from SQLite as int64
+    # raises on an in-place float assignment under pandas 2/3 dtype rules.
+    row = pd.DataFrame(
+        {c: [values.get(c, np.nan)] for c in df.columns},
+        index=pd.DatetimeIndex([ts], name=df.index.name),
+    )
+    out = df[df.index != ts].copy()
+    # Widen only the OHLCV columns we are about to write. astype(errors="ignore")
+    # would do this in one line but is deprecated from pandas 2.2 onward.
+    for c in values:
+        if c in out.columns and not pd.api.types.is_float_dtype(out[c]):
+            out[c] = pd.to_numeric(out[c], errors="coerce").astype("float64")
+    out = pd.concat([out, row])
+    out.index.name = df.index.name
+    return out.sort_index()
+
+
+def attach_live_bars(data, symbols=None):
+    """Overlay today's forming candle onto a {ticker: daily_df} scan dataset.
+
+    Returns (data_with_live, live_bars). On any failure the original dataset is
+    returned unchanged - a live-feed problem degrades the scan to end-of-day
+    prices, it never blocks it.
+    """
+    if not data:
+        return data, {}
+    wanted = symbols if symbols is not None else list(data.keys())
+    bars = build_live_daily_bars(wanted)
+    if not bars:
+        return data, {}
+    merged = {}
+    for ticker, df in data.items():
+        key = str(ticker).upper().replace(".NS", "")
+        bar = bars.get(key)
+        merged[ticker] = apply_live_bar(df, bar) if bar else df
+    return merged, bars
+
 
 def dhan_connection_diagnostic():
     """
@@ -891,17 +1171,31 @@ def live_forward_test_table():
     if q.empty:
         return q
 
-    live = read_live_prices(q.symbol.tolist())
-    if not live.empty:
-        # forward_tests already has its own 'ltp' column, and read_live_prices()
-        # also returns one — merging both without renaming makes pandas
-        # silently produce 'ltp_x'/'ltp_y' instead of a plain 'ltp', so
-        # q["ltp"] below raised KeyError once a live tick actually existed.
-        live_renamed = live[["symbol", "ts", "ltp"]].rename(columns={"ltp": "live_ltp", "ts": "live_ts"})
-        q = q.merge(live_renamed, on="symbol", how="left")
-        q["LTP"] = q["live_ltp"]
-        q["P/L %"] = (q["LTP"] / q["entry"] - 1) * 100
-        q["Live Updated"] = q["live_ts"]
+    # WebSocket ticks first, then a REST quote for anything the socket has not
+    # delivered. Previously this table stayed blank whenever the socket was
+    # connecting, throttled, or had simply not ticked an illiquid symbol yet.
+    prices = live_price_map(q.symbol.tolist())
+    if prices:
+        q["LTP"] = [prices.get(str(s).upper(), {}).get("price", np.nan) for s in q.symbol]
+        q["Live Updated"] = [prices.get(str(s).upper(), {}).get("ts", "") for s in q.symbol]
+        q["Price Source"] = [prices.get(str(s).upper(), {}).get("source", "—") for s in q.symbol]
+    else:
+        q["LTP"] = np.nan
+        q["Live Updated"] = ""
+        q["Price Source"] = "—"
+
+    entry = pd.to_numeric(q["entry"], errors="coerce")
+    stop = pd.to_numeric(q["sl"], errors="coerce")
+    target = pd.to_numeric(q["target"], errors="coerce")
+    ltp = pd.to_numeric(q["LTP"], errors="coerce")
+    # Fall back to the last stored close so the P/L column is never blank.
+    ltp = ltp.fillna(pd.to_numeric(q.get("ltp"), errors="coerce"))
+    q["LTP"] = ltp
+    q["P/L %"] = (ltp / entry - 1) * 100
+    q["P/L ₹"] = ltp - entry
+    q["Unrealized R"] = (ltp - entry) / (entry - stop).replace(0, np.nan)
+    q["To Target %"] = (target / ltp - 1) * 100
+    q["To Stop %"] = (stop / ltp - 1) * 100
     return q
 
 
@@ -2468,6 +2762,404 @@ def strategy_signal(x,s):
 
     return pd.Series(False,index=x.index)
 
+# ========================= EARLY WARNING RADAR =========================
+# The scanner is binary: a stock either passes ALL rules of a strategy or it is
+# invisible. That is correct for signal generation, but it means the first time
+# you ever hear about a stock is the day it already triggered - which is exactly
+# the "late entry" problem. This module answers the other question: which stocks
+# are ABOUT to trigger, and which are coiled tightly enough that the move is
+# likely to be sharp when they do.
+#
+# It changes nothing about S1-S4 qualification. It is a watchlist builder.
+
+def strategy_condition_matrix(x, s):
+    """Every individual condition of a strategy as its own boolean Series.
+
+    ANDing these reproduces strategy_signal(x, s) exactly; keeping them separate
+    is what lets the radar say "7 of 8 rules pass, the missing one is monthly
+    RSI >= 50 and it is at 48.2".
+    """
+    if x.empty:
+        return {}
+    daily_ret = _pct_change(x.close)
+
+    if s == 1:
+        return {
+            "Weekly RSI >= 50": x.wrsi14 >= 50,
+            "Monthly RSI >= 50": x.mrsi14 >= 50,
+            "Monthly close >= EMA15": x.mclose >= x.mema15,
+            "Close >= 15": x.close >= 15,
+            "Vol20 >= 15000": x.vol20 >= 15000,
+            "Monthly open inside prev range": (x.mopen <= x.mprevhigh) & (x.mopen >= x.mprevlow),
+            "Monthly close inside prev range": (x.mclose >= x.mprevlow) & (x.mclose <= x.mprevhigh),
+            "Within 30% of monthly EMA10": ((x.mclose - x.mema10) / x.mema10) <= .30,
+            "Monthly 20m max momentum >= 20": x.mmax20 >= 20,
+        }
+
+    if s == 2:
+        ema20_below_50_cross = (x.ema20 < x.ema50) & (x.ema20.shift(1) >= x.ema50.shift(1))
+        ema10_below_20_cross = (x.ema10 < x.ema20) & (x.ema10.shift(1) >= x.ema20.shift(1))
+        ema20_above_50_cross = (x.ema20 > x.ema50) & (x.ema20.shift(1) <= x.ema50.shift(1))
+        ema50_above_200_cross = (x.ema50 > x.ema200) & (x.ema50.shift(1) <= x.ema200.shift(1))
+        bearish_20_50 = ema20_below_50_cross.shift(1).rolling(20, min_periods=20).sum()
+        bearish_10_20 = ema10_below_20_cross.shift(1).rolling(10, min_periods=10).sum()
+        bullish_20_50 = ema20_above_50_cross.shift(1).rolling(20, min_periods=20).sum()
+        bullish_50_200 = ema50_above_200_cross.shift(1).rolling(20, min_periods=20).sum()
+        ret_1d, ret_2d = daily_ret.shift(1), daily_ret.shift(2)
+        return {
+            "30d max daily move >= 5%": daily_ret.rolling(30, min_periods=30).max() >= 5,
+            "No recent EMA20<50 cross": bearish_20_50 < 1,
+            "No recent EMA10<20 cross": bearish_10_20 < 1,
+            "EMA50 >= EMA250": x.ema50 >= x.ema250,
+            "Vol20 >= 10000": x.vol20 >= 10000,
+            "Close >= 15": x.close >= 15,
+            "Monthly RSI >= 55": x.mrsi14 >= 55,
+            "Weekly RSI >= 50": x.wrsi14 >= 50,
+            "Inside previous day's range": (
+                (x.open <= x.high.shift(1)) & (x.open >= x.low.shift(1)) &
+                (x.close >= x.low.shift(1)) & (x.close <= x.high.shift(1))
+            ),
+            "1d-ago return within -4..5%": (ret_1d <= 5) & (ret_1d >= -4),
+            "2d-ago return within -4..5%": (ret_2d <= 5) & (ret_2d >= -4),
+            "Close within 4% above EMA10": ((x.close - x.ema10) / x.ema10) <= 0.04,
+            "Exactly one bullish EMA cross": (bullish_20_50 == 1) | (bullish_50_200 == 1),
+        }
+
+    if s == 3:
+        vwap = (x.close * x.volume).rolling(20).sum() / x.volume.rolling(20).sum()
+        vwap_ema = ema(vwap, 20)
+        return {
+            "Liquidity >= 15 crore": vwap_ema * x.vol20 >= 150_000_000,
+            "Close >= EMA200": x.close >= x.ema200,
+            "Weekly RSI >= 40": x.wrsi14 >= 40,
+            "Close within 4% of EMA50": (x.close <= x.ema50 * 1.04) & (x.close >= x.ema50 * .96),
+        }
+
+    if s == 4:
+        monthly_bull_cross = (x.mema10 > x.mema20) & (x.mema10.shift(1) <= x.mema20.shift(1))
+        monthly_bull_cross_count = monthly_bull_cross.shift(1).rolling(20, min_periods=20).sum()
+        monthly_reclaim = (x.mclose > x.mema10) & (x.mprevclose <= x.mema10)
+        return {
+            "Monthly return >= 20%": x.mmom >= 20,
+            "Monthly RSI >= 50": x.mrsi14 >= 50,
+            "Monthly EMA10 >= EMA20": x.mema10 >= x.mema20,
+            "Vol30 >= 50000": x.vol30 >= 50000,
+            "Close >= 20": x.close >= 20,
+            "Recent monthly cross or reclaim": (monthly_bull_cross_count >= 1) | monthly_reclaim,
+            "Close <= 1.03 x EMA20": x.close <= 1.03 * x.ema20,
+        }
+
+    return {}
+
+
+# How far a numeric gate may be from its threshold and still count as "nearly
+# passing". Expressed as a fraction of the threshold, so it scales with the
+# metric rather than assuming everything is a percentage.
+NEAR_MISS_TOLERANCE = 0.06
+
+
+def _near_miss_distance(name, x, i):
+    """Signed distance to the threshold for the gates worth measuring, as a
+    fraction (0.04 = the value must improve 4% to pass).
+
+    Only gates whose "distance" is a meaningful, continuously-closing quantity
+    are measured. A structural condition ("inside previous day's range") either
+    holds or does not, and pretending it is 3% away would be noise, so it
+    returns NaN and is reported as a structural miss instead.
+    """
+    def val(attr):
+        try:
+            v = float(x[attr].iloc[i])
+            return v if np.isfinite(v) else np.nan
+        except Exception:
+            return np.nan
+
+    def gap_up(value, threshold):
+        # value must RISE to threshold
+        if not np.isfinite(value) or not np.isfinite(threshold) or threshold == 0:
+            return np.nan
+        return max(0.0, (threshold - value) / abs(threshold))
+
+    def gap_down(value, threshold):
+        # value must FALL to threshold
+        if not np.isfinite(value) or not np.isfinite(threshold) or threshold == 0:
+            return np.nan
+        return max(0.0, (value - threshold) / abs(threshold))
+
+    table_up = {
+        "Weekly RSI >= 50": ("wrsi14", 50), "Monthly RSI >= 50": ("mrsi14", 50),
+        "Monthly RSI >= 55": ("mrsi14", 55), "Weekly RSI >= 40": ("wrsi14", 40),
+        "Close >= 15": ("close", 15), "Close >= 20": ("close", 20),
+        "Vol20 >= 15000": ("vol20", 15000), "Vol20 >= 10000": ("vol20", 10000),
+        "Vol30 >= 50000": ("vol30", 50000),
+        "Monthly return >= 20%": ("mmom", 20),
+        "Monthly 20m max momentum >= 20": ("mmax20", 20),
+    }
+    if name in table_up:
+        attr, thr = table_up[name]
+        return gap_up(val(attr), thr)
+
+    if name == "Monthly close >= EMA15":
+        return gap_up(val("mclose"), val("mema15"))
+    if name == "Monthly EMA10 >= EMA20":
+        return gap_up(val("mema10"), val("mema20"))
+    if name == "EMA50 >= EMA250":
+        return gap_up(val("ema50"), val("ema250"))
+    if name == "Close >= EMA200":
+        return gap_up(val("close"), val("ema200"))
+    if name == "Close <= 1.03 x EMA20":
+        return gap_down(val("close"), 1.03 * val("ema20"))
+    if name == "Close within 4% above EMA10":
+        return gap_down(val("close"), 1.04 * val("ema10"))
+    if name == "Within 30% of monthly EMA10":
+        return gap_down(val("mclose"), 1.30 * val("mema10"))
+    if name == "Close within 4% of EMA50":
+        c, e = val("close"), val("ema50")
+        if not np.isfinite(c) or not np.isfinite(e) or e == 0:
+            return np.nan
+        return gap_down(c, e * 1.04) if c > e else gap_up(c, e * .96)
+    if name == "30d max daily move >= 5%":
+        try:
+            m = float(_pct_change(x.close).rolling(30, min_periods=30).max().iloc[i])
+        except Exception:
+            return np.nan
+        return gap_up(m, 5)
+    return np.nan
+
+
+def compression_features(df, i=-1):
+    """Volatility-contraction and accumulation readings for one bar.
+
+    Large moves are preceded by compression far more often than by expansion, so
+    these are the "before the move" part of the radar, independent of any
+    strategy rule.
+    """
+    out = {"Squeeze %ile": np.nan, "NR7": False, "Inside Bars": 0,
+           "Range Ratio": np.nan, "Vol Dry-Up": np.nan,
+           "From 52w High %": np.nan, "Above 52w Low %": np.nan}
+    if df is None or len(df) < 70:
+        return out
+    d = df.iloc[:len(df) + i + 1] if i < -1 else df
+    d = d.tail(300)
+    if len(d) < 70:
+        return out
+    high, low, close, vol = d.high, d.low, d.close, d.volume
+
+    rng = (high - low) / close.replace(0, np.nan)
+    r = rng.iloc[-1]
+    hist = rng.tail(120).dropna()
+    if np.isfinite(r) and len(hist) >= 30:
+        # Where today's range sits in its own 120-day distribution. Low = coiled.
+        out["Squeeze %ile"] = round(float((hist < r).mean() * 100), 1)
+    last7 = (high - low).tail(7)
+    out["NR7"] = bool(len(last7) == 7 and np.isfinite(last7.iloc[-1]) and last7.iloc[-1] == last7.min())
+
+    # Consecutive bars fully inside the prior bar's range.
+    inside = 0
+    for k in range(len(d) - 1, 0, -1):
+        if high.iloc[k] <= high.iloc[k - 1] and low.iloc[k] >= low.iloc[k - 1]:
+            inside += 1
+        else:
+            break
+    out["Inside Bars"] = int(inside)
+
+    r5 = (high - low).tail(5).mean()
+    r60 = (high - low).tail(60).mean()
+    if np.isfinite(r5) and np.isfinite(r60) and r60 > 0:
+        out["Range Ratio"] = round(float(r5 / r60), 3)
+
+    v5 = vol.tail(5).mean()
+    v50 = vol.tail(50).mean()
+    if np.isfinite(v5) and np.isfinite(v50) and v50 > 0:
+        # Below 1.0 = volume drying up into the base, the classic pre-breakout tell.
+        out["Vol Dry-Up"] = round(float(v5 / v50), 3)
+
+    win = close.tail(250)
+    hi52, lo52, c = float(win.max()), float(win.min()), float(close.iloc[-1])
+    if np.isfinite(hi52) and hi52 > 0:
+        out["From 52w High %"] = round((c / hi52 - 1) * 100, 2)
+    if np.isfinite(lo52) and lo52 > 0:
+        out["Above 52w Low %"] = round((c / lo52 - 1) * 100, 2)
+    return out
+
+
+def _compression_score(comp):
+    """0-100. Higher = tighter coil on lighter volume near the highs, i.e. the
+    structure that most often precedes an expansion move."""
+    score = 0.0
+    pct = comp.get("Squeeze %ile")
+    if np.isfinite(pct if pct is not None else np.nan):
+        score += (100 - pct) * 0.35          # tighter range than usual
+    rr = comp.get("Range Ratio")
+    if rr is not None and np.isfinite(rr):
+        score += float(np.clip((1.4 - rr) / 0.9, 0, 1)) * 20
+    vd = comp.get("Vol Dry-Up")
+    if vd is not None and np.isfinite(vd):
+        score += float(np.clip((1.2 - vd) / 0.7, 0, 1)) * 20
+    if comp.get("NR7"):
+        score += 8
+    score += min(int(comp.get("Inside Bars") or 0), 3) * 3
+    fh = comp.get("From 52w High %")
+    if fh is not None and np.isfinite(fh):
+        # Coiling right under the highs beats coiling 40% below them.
+        score += float(np.clip((25 + fh) / 25, 0, 1)) * 12
+    return float(np.clip(score, 0, 100))
+
+
+def early_warning_radar(data, strategies, regime, max_missing=2, min_readiness=0,
+                        progress_cb=None, stats=None):
+    """Stocks that are CLOSE to triggering a strategy, ranked by readiness.
+
+    For every stock/strategy pair it counts how many of that strategy's rules
+    currently pass, names the ones that do not, measures how far the numeric
+    ones are from their thresholds, and combines that with the compression
+    reading into a single Readiness score.
+
+    `max_missing` = how many failing rules a stock may still have and appear.
+    max_missing=0 reproduces the normal scanner's qualified list.
+
+    Pass a dict as `stats` to receive skip counts. Without it a systematic
+    feature-engine failure would produce a silently empty radar.
+    """
+    rows = []
+    counts = stats if isinstance(stats, dict) else {}
+    counts.setdefault("scanned", 0)
+    counts.setdefault("too_short", 0)
+    counts.setdefault("feature_error", 0)
+    counts.setdefault("last_error", "")
+    total = max(1, len(data))
+    for n, (ticker, df) in enumerate(data.items()):
+        if progress_cb and n % 25 == 0:
+            try:
+                progress_cb(n / total)
+            except Exception:
+                pass
+        if df is None or len(df) < 260:
+            counts["too_short"] += 1
+            continue
+        try:
+            f = features_fast(str(ticker), df)
+        except Exception as exc:
+            counts["feature_error"] += 1
+            counts["last_error"] = f"{ticker}: {exc}"
+            continue
+        if f is None or len(f) < 260:
+            counts["too_short"] += 1
+            continue
+        counts["scanned"] += 1
+        f = f.replace([np.inf, -np.inf], np.nan)
+        comp = compression_features(df)
+        comp_score = _compression_score(comp)
+
+        for s in strategies:
+            conds = strategy_condition_matrix(f, int(s))
+            if not conds:
+                continue
+            passed, failed = [], []
+            for name, series in conds.items():
+                try:
+                    ok = bool(series.iloc[-1])
+                except Exception:
+                    ok = False
+                (passed if ok else failed).append(name)
+
+            n_total = len(conds)
+            n_missing = len(failed)
+            if n_missing > max_missing:
+                continue
+
+            gaps = {name: _near_miss_distance(name, f, -1) for name in failed}
+            measurable = [g for g in gaps.values() if np.isfinite(g)]
+            worst_gap = max(measurable) if measurable else np.nan
+            structural = [name for name, g in gaps.items() if not np.isfinite(g)]
+
+            # Proximity: full marks when nothing is missing, decaying with both
+            # the number of failing rules and how far the worst one is.
+            if n_missing == 0:
+                proximity = 100.0
+            else:
+                gap_term = 0.0 if not np.isfinite(worst_gap) else \
+                    float(np.clip(1 - worst_gap / NEAR_MISS_TOLERANCE, 0, 1))
+                # A structural miss cannot be measured, so it is scored as a
+                # half-gap rather than silently treated as almost-passing.
+                if structural:
+                    gap_term = min(gap_term, 0.5) if np.isfinite(worst_gap) else 0.4
+                proximity = float(np.clip((1 - n_missing / (max_missing + 1)) * 60 + gap_term * 40, 0, 100))
+
+            z = f.iloc[-1]
+            close = float(z.close) if np.isfinite(z.close) else np.nan
+            ema20 = float(z.ema20) if np.isfinite(z.ema20) else np.nan
+            atr = float(z.atr14) if np.isfinite(z.atr14) else np.nan
+
+            regime_bonus = {"BULL": 8, "NEUTRAL": 0, "BEAR": -10}.get(str(regime).upper(), 0)
+            readiness = float(np.clip(
+                proximity * 0.55 + comp_score * 0.35 + regime_bonus + 5, 0, 100
+            ))
+            if readiness < min_readiness:
+                continue
+
+            rows.append({
+                "Readiness": round(readiness, 1),
+                "Ticker": str(ticker).replace(".NS", ""),
+                "Strategy": f"S{int(s)}",
+                "State": "🔥 TRIGGERED" if n_missing == 0 else (
+                    "⚡ 1 RULE AWAY" if n_missing == 1 else "👀 2 RULES AWAY"),
+                "Rules Passing": f"{n_total - n_missing}/{n_total}",
+                "Missing Rules": ", ".join(failed) if failed else "—",
+                "Worst Gap %": round(worst_gap * 100, 2) if np.isfinite(worst_gap) else np.nan,
+                "Proximity": round(proximity, 1),
+                "Compression": round(comp_score, 1),
+                "Squeeze %ile": comp["Squeeze %ile"],
+                "Range Ratio": comp["Range Ratio"],
+                "Vol Dry-Up": comp["Vol Dry-Up"],
+                "NR7": comp["NR7"],
+                "Inside Bars": comp["Inside Bars"],
+                "From 52w High %": comp["From 52w High %"],
+                "Close": round(close, 2) if np.isfinite(close) else np.nan,
+                "Dist to EMA20 %": round((close / ema20 - 1) * 100, 2)
+                                   if np.isfinite(close) and np.isfinite(ema20) and ema20 else np.nan,
+                "ATR %": round(atr / close * 100, 2)
+                         if np.isfinite(atr) and np.isfinite(close) and close else np.nan,
+                "RSI": round(float(z.rsi14), 1) if np.isfinite(z.rsi14) else np.nan,
+                "RelVol": round(float(z.relvol), 2) if np.isfinite(z.relvol) else np.nan,
+                "Regime": regime,
+            })
+
+    if progress_cb:
+        try:
+            progress_cb(1.0)
+        except Exception:
+            pass
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["Readiness", "Compression"], ascending=[False, False]).reset_index(drop=True)
+
+
+def radar_missing_rule_summary(radar_df):
+    """Which single rule is blocking the most near-miss candidates.
+
+    Useful as evidence: if 300 stocks are held back only by "Monthly RSI >= 55",
+    that rule is the binding constraint of the whole universe right now, not a
+    per-stock accident.
+    """
+    if radar_df is None or radar_df.empty:
+        return pd.DataFrame(columns=["Strategy", "Missing Rule", "Stocks"])
+    if "Missing Rules" not in radar_df.columns or "Strategy" not in radar_df.columns:
+        return pd.DataFrame(columns=["Strategy", "Missing Rule", "Stocks"])
+    rows = []
+    for strategy, miss in zip(radar_df["Strategy"], radar_df["Missing Rules"]):
+        if not isinstance(miss, str) or not miss or miss == "—":
+            continue
+        for name in [m.strip() for m in miss.split(",") if m.strip()]:
+            rows.append({"Strategy": strategy, "Missing Rule": name})
+    if not rows:
+        return pd.DataFrame(columns=["Strategy", "Missing Rule", "Stocks"])
+    g = (pd.DataFrame(rows).groupby(["Strategy", "Missing Rule"]).size()
+         .reset_index(name="Stocks").sort_values("Stocks", ascending=False))
+    return g.reset_index(drop=True)
+
+
 # ========================= STRATEGY 4 RECOVERY STUDY =========================
 def strategy4_recovery_features(d):
     """Research-only pattern detector for the S4 problem described by the user.
@@ -3446,13 +4138,47 @@ def _load_feature_snapshot(symbol):
     except Exception:
         return None
 
+def _frame_ends_on_open_session(df):
+    """True when the frame's last row is today's candle while the cash session
+    is still trading, i.e. a bar that has not closed yet."""
+    if df is None or len(df) == 0:
+        return False
+    try:
+        return pd.Timestamp(df.index[-1]).date() >= date.today() and nse_market_is_open()
+    except Exception:
+        return False
+
+
+def _frame_fingerprint(df):
+    """Identity of a price frame for cache validation: last date is NOT enough.
+
+    The persisted feature snapshot used to be reused whenever the last DATE
+    matched. That silently returned stale features in two real cases: a candle
+    revised by the exchange after it was first stored, and today's still-forming
+    intraday bar, whose close changes every time the scanner runs. Including the
+    row count and the last close makes both invalidate correctly.
+    """
+    if df is None or len(df) == 0:
+        return None
+    try:
+        last_close = float(df["close"].iloc[-1])
+    except Exception:
+        last_close = float("nan")
+    return (pd.Timestamp(df.index[-1]).isoformat(), int(len(df)), round(last_close, 6))
+
+
+def _snapshot_matches(snapshot, df):
+    a = _frame_fingerprint(snapshot)
+    b = _frame_fingerprint(df)
+    return a is not None and b is not None and a == b
+
+
 @st.cache_data(ttl=86400,show_spinner=False)
 def features_fast(symbol, df):
     """Strict as-of feature engine. Historical rows never see future days inside
     their current week/month. This is the core anti-lookahead safeguard."""
     key=_load_feature_snapshot(symbol)
-    last_dt=pd.Timestamp(df.index[-1]).isoformat() if df is not None and not df.empty else ""
-    if key is not None and not key.empty and pd.Timestamp(key.index[-1]).isoformat()==last_dt:
+    if key is not None and not key.empty and _snapshot_matches(key, df):
         return key
     d=df.sort_index().copy()
     x=d.copy()
@@ -3491,8 +4217,12 @@ def features_fast(symbol, df):
     for out,src in fields.items():
         x[out]=[mo_map.get(p,{}).get(src,np.nan) for p in mo_key]
     x=x.replace([np.inf,-np.inf],np.nan)
-    try:_save_feature_snapshot(symbol,x)
-    except Exception:pass
+    # Never persist features derived from a still-forming intraday bar: the
+    # snapshot store is shared with the backtest/research paths, which must only
+    # ever see completed sessions.
+    if not _frame_ends_on_open_session(x):
+        try:_save_feature_snapshot(symbol,x)
+        except Exception:pass
     return x
 
 # ========================= RAW STRATEGY LEARNING ARCHITECTURE — Phase 9 =========================
@@ -4112,10 +4842,94 @@ def build_local_backtest_dataset(tickers,start_date,end_date):
     data=load_local_market_dataset(tickers,start_date,end_date,min_bars=260)
     return len(data), [str(t).replace(".NS","") for t in tickers if t not in data]
 
-def sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5):
-    """Explicit acquisition stage only. Backtest itself never calls this."""
+def sync_missing_backtest_data(tickers,start_date,end_date,max_workers=5,refresh_tail_days=LATEST_SYNC_TAIL_DAYS):
+    """Explicit acquisition stage only. Backtest itself never calls this.
+
+    The tail refresh re-requests the newest already-stored days so an exchange
+    revision, or a candle first written while its session was still open, is
+    corrected instead of being trusted permanently.
+    """
     data_start=_bt_required_data_start(start_date)
-    return download_prices(tuple(tickers),data_start,end_date,max_workers=max_workers)
+    return download_prices(tuple(tickers),data_start,end_date,max_workers=max_workers,
+                           refresh_tail_days=refresh_tail_days)
+
+
+def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5, progress_cb=None):
+    """Fast top-up of only the most recent sessions for an already-built cache.
+
+    The full "SYNC ONLY MISSING DATA" job walks a 1000-day window for every
+    symbol, which is why it was easy to skip before scanning - and skipping it
+    is exactly how the scanner ended up ranking stale closes. This asks Dhan
+    only for the last `tail_days` calendar days per symbol, so bringing 500
+    stocks up to the latest completed session is a short job that can be run
+    from the Scanner tab itself.
+
+    Returns a summary dict; never raises for individual symbol failures.
+    """
+    symbols = [str(t).upper().replace(".NS", "") for t in tickers]
+    symbols = list(dict.fromkeys([s for s in symbols if s]))
+    if not symbols:
+        return {"symbols": 0, "updated": 0, "latest": None, "errors": [], "advanced": 0}
+
+    end = last_expected_nse_session()
+    start = end - timedelta(days=int(tail_days))
+
+    con = _db()
+    try:
+        qmarks = ",".join(["?"] * len(symbols))
+        pre = {r[0]: r[1] for r in con.execute(
+            f"SELECT symbol,MAX(dt) FROM candles WHERE symbol IN ({qmarks}) GROUP BY symbol",
+            symbols).fetchall()}
+    finally:
+        con.close()
+
+    errors = []
+    updated = 0
+    workers = max(1, min(int(max_workers), 5))
+    done = 0
+
+    def worker(symbol):
+        try:
+            # tail refresh, so a candle stored mid-session is corrected once the
+            # real close is published rather than being trusted forever.
+            return symbol, update_dhan_symbol(symbol, start, end, refresh_tail_days=int(tail_days)), None
+        except Exception as exc:
+            return symbol, 0, str(exc)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(worker, s) for s in symbols]
+        for fut in as_completed(futures):
+            symbol, saved, err = fut.result()
+            if err:
+                errors.append(f"{symbol}: {err}")
+            elif saved:
+                updated += 1
+            done += 1
+            if progress_cb:
+                try:
+                    progress_cb(done / len(symbols))
+                except Exception:
+                    pass
+
+    global _DHAN_LAST_DATA_ERRORS
+    if errors:
+        _DHAN_LAST_DATA_ERRORS = (_DHAN_LAST_DATA_ERRORS + errors)[-100:]
+
+    con = _db()
+    try:
+        post = {r[0]: r[1] for r in con.execute(
+            f"SELECT symbol,MAX(dt) FROM candles WHERE symbol IN ({qmarks}) GROUP BY symbol",
+            symbols).fetchall()}
+    finally:
+        con.close()
+
+    newest = max((v for v in post.values() if v), default=None)
+    advanced = sum(1 for s in symbols if post.get(s) and pre.get(s) != post.get(s))
+    if newest and advanced:
+        _log_sync_freshness(newest, advanced)
+
+    return {"symbols": len(symbols), "updated": updated, "latest": newest,
+            "errors": errors[:20], "advanced": advanced}
 
 
 def compute_and_store_sync_diagnostics(tickers):
@@ -5550,7 +6364,8 @@ tabs=st.tabs([
     "🧪 Custom Strategy",
     "🧬 Research & Risk Control",
     "🎓 Strategy Coach",
-    "💱 Forex/Crypto SMC"
+    "💱 Forex/Crypto SMC",
+    "🚨 Early Warning Radar"
 ])
 
 with tabs[0]:
@@ -5616,6 +6431,49 @@ with tabs[1]:
         st.caption(f"Could not verify data freshness (index universe fetch failed): {ex}")
     render_data_freshness_banner(scan_freshness_tickers)
 
+    fcol1, fcol2 = st.columns([1, 1])
+    with fcol1:
+        if st.button("⬇️ TOP-UP LATEST SESSIONS NOW", type="primary", key="scan_topup_latest",
+                     disabled=not scan_freshness_tickers):
+            if not dhan_configured():
+                st.error("Dhan is not configured. Add DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN to Streamlit Secrets.")
+            else:
+                topbar = st.progress(0.0)
+                try:
+                    with st.spinner(f"Requesting only the last {LATEST_SYNC_TAIL_DAYS} days for "
+                                    f"{len(scan_freshness_tickers):,} stocks..."):
+                        summary = sync_latest_sessions(
+                            scan_freshness_tickers,
+                            progress_cb=lambda frac: topbar.progress(min(1.0, frac))
+                        )
+                    topbar.empty()
+                    st.success(
+                        f"✅ Top-up complete — {summary['advanced']:,} of {summary['symbols']:,} stocks "
+                        f"advanced. Newest stored session: {summary['latest'] or '—'}."
+                    )
+                    if summary["errors"]:
+                        st.warning("Dhan errors during top-up: " + " | ".join(summary["errors"][:6]))
+                    st.rerun()
+                except Exception as ex:
+                    topbar.empty()
+                    st.error(f"Top-up failed: {ex}")
+        st.caption(
+            f"Fetches only the last {LATEST_SYNC_TAIL_DAYS} days per stock and re-requests the newest "
+            "stored bars, so a candle saved mid-session is corrected once it really closes. Much faster "
+            "than the full Data Manager sync."
+        )
+    with fcol2:
+        use_live_prices = st.checkbox(
+            "Use live intraday price (scan against the current price)",
+            value=nse_market_is_open(),
+            key="scan_use_live_price"
+        )
+        st.caption(
+            "While the session is open this overlays today's still-forming candle "
+            "(open/high/low/LTP/volume from Dhan's bulk quote feed) on top of the stored daily "
+            "history, in memory only. Stored candles are never overwritten with a partial bar."
+        )
+
     st.info(
         "Every selected stock is tested independently against every selected strategy. "
         "A stock appears under a strategy only when ALL rules of that strategy pass. "
@@ -5672,6 +6530,40 @@ with tabs[1]:
             if not data:
                 st.error("Local dataset is empty/incomplete. Use Data Manager → SYNC ONLY MISSING DATA once, then scan again. Scanner itself never downloads historical data.")
                 st.stop()
+
+            # ---- Live intraday overlay -------------------------------------
+            # Stored daily candles can never be newer than the last completed
+            # session, so an in-session scan against them is always a day late.
+            # When enabled, today's forming candle is merged in memory so the
+            # strategies evaluate the price that exists right now.
+            scan_live_bars = {}
+            scan_price_asof = None
+            if st.session_state.get("scan_use_live_price"):
+                if not nse_market_is_open():
+                    st.info("Live price overlay skipped — the NSE cash session is closed, so the last stored close already is the current price.")
+                else:
+                    with st.spinner("Fetching live intraday prices from Dhan..."):
+                        data, scan_live_bars = attach_live_bars(data)
+                    if scan_live_bars:
+                        scan_price_asof = max(b["ts"] for b in scan_live_bars.values())
+                        st.success(
+                            f"🟢 Live overlay applied to {len(scan_live_bars):,} of {len(data):,} stocks "
+                            f"(as of {scan_price_asof})."
+                        )
+                    else:
+                        st.warning(
+                            "Live price overlay requested but Dhan returned no quotes — this scan is "
+                            "running on the last stored close. Check the Dhan Connection Test."
+                        )
+
+            scan_data_last_date = max(
+                (pd.Timestamp(df.index[-1]).date() for df in data.values()), default=None
+            )
+            st.caption(
+                f"Scanning against price data as of "
+                f"{scan_data_last_date.strftime('%d-%b-%Y') if scan_data_last_date else '—'}"
+                + (f" · live tick {scan_price_asof}" if scan_price_asof else " · last completed close")
+            )
 
             proxy = max(data.values(), key=len)
             regime, regime_score = regime_from_index(proxy)
@@ -6257,6 +7149,132 @@ def refresh_forward_positions():
 
     return updates, len(newly_closed)
 
+def forward_positions_view(use_live=True):
+    """Forward-test book with a real current price and live P/L.
+
+    The tab previously showed the raw `forward_tests` rows, where the only price
+    column was `ltp` — a value written by refresh_forward_positions() from the
+    last STORED daily candle. So it was as stale as the candle cache, and there
+    was no gain/loss column at all. This adds:
+      - Current Price taken from the live feed when the session is open
+      - Gain/Loss % and per-share Gain/Loss
+      - Unrealized R, measured on the position's own risk (entry - stop)
+      - How far price still is from target and from stop
+      - Days held, plus where the price came from and when
+
+    Returns (dataframe, meta).
+    """
+    con = _db()
+    try:
+        ft = pd.read_sql_query(
+            """SELECT id,signal_date,created_at,symbol,strategy,score,regime,entry,sl,target,
+                      status,ltp,mfe,mae,exit_price,result_r,updated_at
+               FROM forward_tests ORDER BY signal_date DESC, score DESC""", con)
+    finally:
+        con.close()
+
+    meta = {"live_symbols": 0, "as_of": None, "source": "STORED CLOSE", "market_open": nse_market_is_open()}
+    if ft.empty:
+        return ft, meta
+
+    for c in ["score", "entry", "sl", "target", "ltp", "mfe", "mae", "exit_price", "result_r"]:
+        ft[c] = pd.to_numeric(ft[c], errors="coerce")
+
+    live = {}
+    active_symbols = sorted({str(s).upper().replace(".NS", "")
+                             for s in ft.loc[ft.status == "ACTIVE", "symbol"].tolist()})
+    if use_live and active_symbols:
+        try:
+            live = live_price_map(active_symbols)
+        except Exception:
+            live = {}
+    if live:
+        meta["live_symbols"] = len(live)
+        meta["as_of"] = max(v["ts"] for v in live.values())
+        sources = {v["source"] for v in live.values()}
+        meta["source"] = "WEBSOCKET" if sources == {"WEBSOCKET"} else ("QUOTE" if sources == {"QUOTE"} else "MIXED")
+
+    def _price_row(r):
+        sym = str(r.symbol).upper().replace(".NS", "")
+        if r.status != "ACTIVE":
+            # A closed position's price is its realised exit, not a live quote.
+            px = r.exit_price if np.isfinite(r.exit_price) else r.ltp
+            return px, "EXIT FILL", str(r.updated_at or "")
+        hit = live.get(sym)
+        if hit and np.isfinite(hit["price"]) and hit["price"] > 0:
+            return float(hit["price"]), hit["source"], hit["ts"]
+        return (r.ltp if np.isfinite(r.ltp) else r.entry), "STORED CLOSE", str(r.updated_at or "")
+
+    priced = [_price_row(r) for r in ft.itertuples()]
+    ft["Current Price"] = [p[0] for p in priced]
+    ft["Price Source"] = [p[1] for p in priced]
+    ft["Price As Of"] = [p[2] for p in priced]
+
+    entry = ft["entry"]
+    cur = pd.to_numeric(ft["Current Price"], errors="coerce")
+    risk = (entry - ft["sl"]).replace(0, np.nan)
+    reward = (ft["target"] - entry).replace(0, np.nan)
+
+    ft["Gain/Loss %"] = (cur / entry - 1) * 100
+    ft["Gain/Loss ₹"] = cur - entry
+    ft["Unrealized R"] = (cur - entry) / risk
+    ft["To Target %"] = (ft["target"] / cur - 1) * 100
+    ft["To Stop %"] = (ft["sl"] / cur - 1) * 100
+    # How much of the planned entry->target distance has been travelled.
+    # Clipped to the same range the UI progress bar renders, so a runner past
+    # its target reads as a full bar rather than overflowing it.
+    ft["Progress to Target %"] = ((cur - entry) / reward * 100).clip(lower=-100, upper=100)
+
+    signal_dt = pd.to_datetime(ft["signal_date"].fillna(ft["created_at"]), errors="coerce")
+    ft["Days Held"] = (pd.Timestamp(date.today()) - signal_dt.dt.normalize()).dt.days
+
+    # Vectorised, so no reliance on itertuples' renaming of columns whose names
+    # are not valid Python identifiers ("Gain/Loss %" and friends).
+    gl = ft["Gain/Loss %"]
+    active = ft["status"].eq("ACTIVE")
+    ft["Alert"] = np.select(
+        [
+            ~active,
+            active & cur.ge(ft["target"]),
+            active & cur.le(ft["sl"]),
+            active & gl.ge(5),
+            active & gl.le(-4),
+            active & gl.notna(),
+        ],
+        ["🏁 CLOSED", "🎯 AT/ABOVE TARGET", "🛑 AT/BELOW STOP",
+         "🟢 IN PROFIT", "🔴 UNDER WATER", "⚪ FLAT"],
+        default="—",
+    )
+
+    out = pd.DataFrame({
+        "Alert": ft["Alert"],
+        "Signal Date": ft["signal_date"],
+        "Ticker": ft["symbol"],
+        "Strategy": ft["strategy"],
+        "Status": ft["status"],
+        "Score": ft["score"].round(1),
+        "Entry": entry.round(2),
+        "Current Price": cur.round(2),
+        "Gain/Loss %": ft["Gain/Loss %"].round(2),
+        "Gain/Loss ₹": ft["Gain/Loss ₹"].round(2),
+        "Unrealized R": ft["Unrealized R"].round(2),
+        "Stop": ft["sl"].round(2),
+        "Target": ft["target"].round(2),
+        "To Target %": ft["To Target %"].round(2),
+        "To Stop %": ft["To Stop %"].round(2),
+        "Progress to Target %": ft["Progress to Target %"].round(1),
+        "MFE %": ft["mfe"].round(2),
+        "MAE %": ft["mae"].round(2),
+        "Days Held": ft["Days Held"],
+        "Regime": ft["regime"],
+        "Realized R": ft["result_r"].round(2),
+        "Price Source": ft["Price Source"],
+        "Price As Of": ft["Price As Of"],
+        "id": ft["id"],
+    })
+    return out, meta
+
+
 def forward_summary_table():
     """Persistent strategy scorecard from forward-test records."""
     con=_db()
@@ -6560,8 +7578,78 @@ with tabs[3]:
         a,b,c,d,e=st.columns(5)
         a.metric("Persistent signals",len(ft)); b.metric("Open",int((ft.Status=="ACTIVE").sum()))
         c.metric("Wins",wins); d.metric("Losses",losses); e.metric("Avg R",f"{avg_r:.2f}" if np.isfinite(avg_r) else "—")
-        st.subheader("📋 Forward Positions")
-        st.dataframe(ft,width='stretch',hide_index=True)
+
+        st.subheader("📋 Forward Positions — Live P/L")
+        pc1, pc2 = st.columns([1, 2])
+        with pc1:
+            fwd_use_live = st.checkbox(
+                "Use live price", value=True, key="fwd_use_live_price",
+                help="Prices open positions from the Dhan feed. Uncheck to see the last stored daily close instead."
+            )
+            if st.button("🔄 Refresh prices", key="fwd_refresh_prices"):
+                st.rerun()
+
+        try:
+            positions, pos_meta = forward_positions_view(use_live=fwd_use_live)
+        except Exception as ex:
+            positions, pos_meta = pd.DataFrame(), {}
+            st.error(f"Could not build the live position view: {ex}")
+
+        if not positions.empty:
+            open_pos = positions[positions["Status"] == "ACTIVE"]
+            with pc2:
+                if pos_meta.get("live_symbols"):
+                    st.success(
+                        f"🟢 Live prices for {pos_meta['live_symbols']:,} open position(s) "
+                        f"via {pos_meta['source']} · as of {pos_meta['as_of']}"
+                    )
+                elif not fwd_use_live:
+                    st.info("Live pricing is off — showing the last stored daily close.")
+                elif pos_meta.get("market_open"):
+                    st.warning(
+                        "No live quote returned — showing the last stored close. "
+                        "Run the Dhan Connection Test in the Data Manager."
+                    )
+                else:
+                    st.info("NSE cash session is closed — the last completed close is the current price.")
+
+            if not open_pos.empty:
+                gl = pd.to_numeric(open_pos["Gain/Loss %"], errors="coerce")
+                ur = pd.to_numeric(open_pos["Unrealized R"], errors="coerce")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Open positions", len(open_pos))
+                m2.metric("Avg unrealized", f"{gl.mean():+.2f}%" if gl.notna().any() else "—")
+                m3.metric("Open in profit", int((gl > 0).sum()))
+                m4.metric("Open unrealized R", f"{ur.sum():+.2f}" if ur.notna().any() else "—")
+
+            show_only_open = st.checkbox("Show open positions only", value=True, key="fwd_open_only")
+            table = open_pos if show_only_open else positions
+            st.dataframe(
+                table.drop(columns=["id"], errors="ignore"),
+                width='stretch', hide_index=True,
+                column_config={
+                    "Gain/Loss %": st.column_config.NumberColumn("Gain/Loss %", format="%+.2f%%"),
+                    "Gain/Loss ₹": st.column_config.NumberColumn("Gain/Loss ₹", format="%+.2f"),
+                    "Unrealized R": st.column_config.NumberColumn("Unrealized R", format="%+.2f"),
+                    "To Target %": st.column_config.NumberColumn("To Target %", format="%+.2f%%"),
+                    "To Stop %": st.column_config.NumberColumn("To Stop %", format="%+.2f%%"),
+                    "Progress to Target %": st.column_config.ProgressColumn(
+                        "Progress to Target", min_value=-100, max_value=100, format="%.0f%%"
+                    ),
+                }
+            )
+            st.caption(
+                "Gain/Loss is measured against the recorded entry. Unrealized R divides that by the "
+                "position's own risk (entry − stop), so it is comparable across stocks of any price. "
+                "Target/stop resolution still happens only on completed daily candles — a live price "
+                "touching the level raises an alert here, it does not close the record."
+            )
+            st.download_button(
+                "⬇️ Download live position book",
+                table.to_csv(index=False).encode(), "forward_positions_live.csv", "text/csv",
+                key="download_forward_positions"
+            )
+
         st.subheader("🏆 Strategy Performance Scorecard")
         try:
             fs=forward_summary_table()
@@ -6953,6 +8041,30 @@ with tabs[8]:
         format_func=lambda x: f"{x} calendar days",
         key="dm_sync_days"
     )
+    if st.button(f"⚡ FAST TOP-UP (last {LATEST_SYNC_TAIL_DAYS} days only)",key="dm_sync_tail"):
+        try:
+            tail_tickers=index_universe(sync_universe)
+            tailbar=st.progress(0.0)
+            with st.spinner(f"Topping up the latest sessions for {len(tail_tickers):,} stocks..."):
+                tail_summary=sync_latest_sessions(
+                    tail_tickers,
+                    progress_cb=lambda frac: tailbar.progress(min(1.0,frac))
+                )
+            tailbar.empty()
+            st.success(
+                f"✅ {tail_summary['advanced']:,} of {tail_summary['symbols']:,} stocks advanced. "
+                f"Newest stored session: {tail_summary['latest'] or '—'}."
+            )
+            if tail_summary["errors"]:
+                st.warning("Dhan errors: "+" | ".join(tail_summary["errors"][:6]))
+            st.rerun()
+        except Exception as ex:
+            st.error(f"Fast top-up failed: {ex}")
+    st.caption(
+        "Use the fast top-up for the daily refresh once the full history is built. "
+        "The full sync below is only needed the first time, or after widening the historical range."
+    )
+
     if st.button("🔄 SYNC ONLY MISSING DATA",type="primary",key="dm_sync_missing"):
         try:
             sync_tickers=index_universe(sync_universe)
@@ -7659,6 +8771,194 @@ with tabs[13]:
                             st.info("None detected.")
                 except Exception as ex:
                     st.error(f"Debug detection error: {ex}")
+
+with tabs[14]:
+    st.subheader("🚨 Early Warning Radar — setups forming BEFORE they trigger")
+    st.caption(
+        "The Daily Scanner is binary: a stock is invisible until the day it passes every rule, "
+        "which is the day the move has usually already started. This tab shows the stocks that are "
+        "one or two rules away, names the rule that is blocking them, measures how far it has to "
+        "travel, and weighs that against how tightly the stock is coiled. It changes nothing about "
+        "S1–S4 qualification — it is a watchlist, not a signal."
+    )
+
+    ra, rb, rc = st.columns(3)
+    radar_universes = ra.multiselect(
+        "Universes",
+        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        ["Nifty 500"],
+        key="radar_universes"
+    )
+    radar_strategies = rb.multiselect(
+        "Strategies", [1,2,3,4], [1,2,3,4], key="radar_strategies"
+    )
+    radar_max_missing = rc.selectbox(
+        "How close must a setup be?",
+        [0,1,2],
+        index=1,
+        format_func=lambda n: {0:"Triggered only (0 rules missing)",
+                               1:"1 rule away",
+                               2:"Up to 2 rules away"}[n],
+        key="radar_max_missing"
+    )
+
+    rd_, re_ = st.columns(2)
+    radar_min_readiness = rd_.slider("Minimum readiness", 0, 100, 45, 5, key="radar_min_readiness")
+    radar_use_live = re_.checkbox(
+        "Use live intraday price", value=nse_market_is_open(), key="radar_use_live",
+        help="Overlays today's forming candle so the radar reflects the price right now."
+    )
+
+    st.markdown("### 📅 Data Freshness")
+    try:
+        _radar_universe=set()
+        for u in radar_universes:
+            _radar_universe.update(index_universe(u))
+        radar_tickers=sorted(_radar_universe)
+    except Exception as ex:
+        radar_tickers=[]
+        st.caption(f"Could not verify data freshness: {ex}")
+    render_data_freshness_banner(radar_tickers)
+
+    if st.button("🚨 RUN EARLY WARNING RADAR", type="primary", key="radar_run"):
+        if not radar_tickers:
+            st.warning("Select at least one universe.")
+        elif not radar_strategies:
+            st.warning("Select at least one strategy.")
+        else:
+            try:
+                radar_data={}
+                with st.spinner(f"Loading local price cache for {len(radar_tickers):,} stocks..."):
+                    con=_db()
+                    try:
+                        for ticker in radar_tickers:
+                            clean=str(ticker).upper().replace(".NS","")
+                            d=_read_cache(con,clean,date.today()-timedelta(days=1000),date.today())
+                            if d is not None and len(d)>=260:
+                                radar_data[ticker]=d
+                    finally:
+                        con.close()
+
+                if not radar_data:
+                    st.error("Local dataset is empty. Run a sync in the Data Manager or the Scanner tab first.")
+                else:
+                    radar_asof=None
+                    if radar_use_live and nse_market_is_open():
+                        with st.spinner("Fetching live intraday prices..."):
+                            radar_data, radar_bars = attach_live_bars(radar_data)
+                        if radar_bars:
+                            radar_asof=max(b["ts"] for b in radar_bars.values())
+
+                    radar_proxy=max(radar_data.values(), key=len)
+                    radar_regime, _radar_rs = regime_from_index(radar_proxy)
+
+                    radar_bar=st.progress(0.0)
+                    radar_stats={}
+                    with st.spinner(f"Evaluating {len(radar_data):,} stocks against every rule..."):
+                        radar_df=early_warning_radar(
+                            radar_data, radar_strategies, radar_regime,
+                            max_missing=int(radar_max_missing),
+                            min_readiness=int(radar_min_readiness),
+                            progress_cb=lambda f: radar_bar.progress(min(1.0,f)),
+                            stats=radar_stats
+                        )
+                    radar_bar.empty()
+                    st.session_state["radar_result"]=radar_df
+                    st.session_state["radar_meta"]={
+                        "regime":radar_regime,"asof":radar_asof,
+                        "stats":radar_stats,"universe":len(radar_data)
+                    }
+            except Exception as ex:
+                st.error(f"Radar error: {ex}")
+
+    radar_df=st.session_state.get("radar_result")
+    radar_meta=st.session_state.get("radar_meta",{})
+    if radar_df is not None:
+        rstats=radar_meta.get("stats",{})
+        st.caption(
+            f"Regime: **{radar_meta.get('regime','—')}** · {rstats.get('scanned',0):,} stocks evaluated"
+            + (f" · live price as of {radar_meta['asof']}" if radar_meta.get("asof") else " · last completed close")
+        )
+        if rstats.get("feature_error"):
+            st.warning(
+                f"{rstats['feature_error']:,} stock(s) were skipped because their features could not be "
+                f"computed. Last error — {rstats.get('last_error','')}"
+            )
+
+        if radar_df.empty:
+            st.info(
+                "Nothing on the radar at this readiness level. Lower the minimum readiness, or widen "
+                "'How close must a setup be?' to 2 rules."
+            )
+        else:
+            triggered=int((radar_df["State"]=="🔥 TRIGGERED").sum())
+            one_away=int((radar_df["State"]=="⚡ 1 RULE AWAY").sum())
+            two_away=int((radar_df["State"]=="👀 2 RULES AWAY").sum())
+            coiled=int((pd.to_numeric(radar_df["Compression"],errors="coerce")>=65).sum())
+            m1,m2,m3,m4=st.columns(4)
+            m1.metric("Triggered now",triggered)
+            m2.metric("1 rule away",one_away)
+            m3.metric("2 rules away",two_away)
+            m4.metric("Tightly coiled",coiled)
+
+            st.markdown("### 🎯 Highest-priority watchlist")
+            st.caption(
+                "Readiness blends how close the setup is to triggering (55%) with how compressed the "
+                "stock is (35%) and the market regime. A coiled stock one rule away is where an early "
+                "alert is worth the most."
+            )
+            st.dataframe(
+                radar_df,
+                width='stretch', hide_index=True,
+                column_config={
+                    "Readiness": st.column_config.ProgressColumn(
+                        "Readiness", min_value=0, max_value=100, format="%.0f"),
+                    "Compression": st.column_config.ProgressColumn(
+                        "Compression", min_value=0, max_value=100, format="%.0f"),
+                    "Worst Gap %": st.column_config.NumberColumn(
+                        "Worst Gap %", format="%.2f%%",
+                        help="How far the most distant failing rule still has to travel."),
+                }
+            )
+            st.download_button(
+                "⬇️ Download radar watchlist",
+                radar_df.to_csv(index=False).encode(),
+                "early_warning_radar.csv","text/csv",key="radar_download"
+            )
+
+            st.markdown("### 🧱 What is blocking the most stocks right now")
+            st.caption(
+                "When one rule holds back hundreds of otherwise-qualifying stocks, that rule is the "
+                "binding constraint on the whole universe today — evidence about the market's state, "
+                "not a per-stock accident."
+            )
+            try:
+                st.dataframe(radar_missing_rule_summary(radar_df).head(25),
+                             width='stretch',hide_index=True)
+            except Exception as ex:
+                st.error(f"Blocking-rule summary error: {ex}")
+
+            st.markdown("### 🧨 Coiled springs — tightest setups near a trigger")
+            spring=radar_df[
+                (pd.to_numeric(radar_df["Compression"],errors="coerce")>=60) &
+                (radar_df["State"]!="👀 2 RULES AWAY")
+            ].head(25)
+            if spring.empty:
+                st.info("No tightly-compressed near-trigger setups in this scan.")
+            else:
+                st.dataframe(
+                    spring[["Ticker","Strategy","State","Readiness","Compression","Squeeze %ile",
+                            "Range Ratio","Vol Dry-Up","NR7","Inside Bars","From 52w High %",
+                            "Close","ATR %","Missing Rules"]],
+                    width='stretch',hide_index=True
+                )
+                st.caption(
+                    "Squeeze %ile is today's range against its own 120-day distribution — low means "
+                    "coiled. Range Ratio compares the last 5 days' range to the last 60. Vol Dry-Up "
+                    "below 1.0 means volume is contracting into the base."
+                )
+    else:
+        st.info("Set your filters and run the radar to build a pre-trigger watchlist.")
 
 st.markdown("---")
 st.caption(f"{APP_VERSION} • {ARCHITECTURE_STANDARD} • Research only • Real-money order execution disabled")

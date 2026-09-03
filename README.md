@@ -31,6 +31,81 @@ Forward Testing
 Learning Engine
 ```
 ---
+🕒 Data Freshness & Live Intraday Prices
+Stored daily candles can never be newer than the last completed NSE session, so
+a scan run during market hours was always evaluating yesterday's close. Two
+layers fix that.
+
+**1. Fast top-up.** `sync_latest_sessions()` requests only the last
+`LATEST_SYNC_TAIL_DAYS` (10) calendar days per symbol instead of walking the
+full 1000-day window, and it re-requests the newest already-stored bars. Without
+that re-request a candle first written while its session was still open could
+never be corrected: `MAX(dt)` had already moved past it, so the "download the
+missing range" branch could not reach back. It is exposed as a button in both
+the Daily Scanner and the Data Manager.
+
+**2. Live intraday overlay.** While the cash session is open, the Scanner and
+the Early Warning Radar can pull today's still-forming candle from Dhan's bulk
+quote feed (`dhan_quote_snapshot`, one request per 1000 instruments) and merge
+it into the daily history **in memory only**:
+
+```text
+stored daily candles (closed sessions)
+        + today's forming bar (open/high/low/LTP/volume)
+        = frame the strategies actually evaluate
+```
+
+A partial bar is never written to the `candles` table, and features derived from
+one are never persisted to the feature-snapshot store, so backtests and research
+continue to see completed sessions only.
+
+The feature cache is keyed on last date **plus** row count **plus** last close.
+Keying on the date alone silently reused stale features whenever a candle was
+revised, or whenever today's forming bar moved.
+
+---
+📈 Live Forward-Test P/L
+The persistent forward-test tracker shows a real current price and what the
+position is actually doing:
+
+| Column | Meaning |
+| --- | --- |
+| Current Price | live WebSocket tick, else a REST quote, else the last stored close |
+| Gain/Loss % and ₹ | move against the recorded entry |
+| Unrealized R | that move divided by the position's own risk (entry − stop) |
+| To Target % / To Stop % | how far price still has to travel |
+| Progress to Target % | share of the planned entry→target distance covered |
+| Price Source / Price As Of | provenance, so a stale price is never mistaken for a live one |
+
+Target and stop **resolution** still happens only on completed daily candles. A
+live price touching a level raises an alert in this table; it does not close the
+record.
+
+---
+🚨 Early Warning Radar
+The Daily Scanner is binary: a stock is invisible until the day it passes every
+rule of a strategy, which is usually the day the move has already started. The
+radar answers the other question — which stocks are *about* to trigger.
+
+`strategy_condition_matrix()` decomposes each strategy into its individual
+conditions; ANDing them reproduces `strategy_signal()` exactly (verified across
+43,200 bar/strategy evaluations). That decomposition is what lets the radar
+report "7 of 9 rules pass, the blocker is Monthly RSI ≥ 50 and it is 3.6% away".
+
+Alongside proximity it measures volatility compression, because expansion moves
+follow contraction: range percentile against the stock's own 120-day
+distribution, NR7, consecutive inside bars, 5-day vs 60-day range ratio, volume
+dry-up, and distance from the 52-week high.
+
+```text
+Readiness = 55% proximity-to-trigger + 35% compression + regime adjustment
+```
+
+The radar changes nothing about S1–S4 qualification. It builds a watchlist.
+Setting "how close" to 0 rules reproduces the normal scanner's qualified list
+exactly.
+
+---
 ⚡ Persistent Data & Fast Scanning
 The application maintains a local historical-data cache.
 When data already exists locally:
