@@ -1,0 +1,69 @@
+# Runs the forward test every trading day without the app being open.
+#
+# Streamlit Cloud only executes app.py while somebody has the page open, so
+# the forward test could never advance on its own. This drives the same engine
+# (core.py, via daily_job.py) on GitHub's runners after the NSE close:
+#
+#   restore DB -> renew token -> sync candles -> resolve open positions
+#   -> scan the just-closed session -> record candidates -> back up DB
+#
+# The scan runs AFTER the close on purpose. An intraday scan can show a setup
+# at 11:00 that has vanished by 15:30; recording that as a forward test would
+# pollute the learning data with signals that never really existed.
+name: Daily forward test
+
+on:
+  schedule:
+    # NSE closes 15:30 IST (10:00 UTC). Dhan publishes the finished daily
+    # candle some time after that, so the first attempt allows ~1h20m.
+    - cron: "20 11 * * 1-5"     # 16:50 IST
+    # Second attempt in case Dhan was still late. The job is idempotent, and
+    # add_forward_candidates() refuses a duplicate for the same
+    # symbol/strategy/date — so if the first run already succeeded, this one
+    # simply finds nothing new to add.
+    - cron: "30 13 * * 1-5"     # 19:00 IST
+  workflow_dispatch:
+    # Run it by hand from the Actions tab whenever you want.
+
+concurrency:
+  group: dhan-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  forward-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily forward test
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN: ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # GitHub forbids secret/variable NAMES starting with "GITHUB_", so the
+          # engine accepts these aliases instead. GH_BACKUP_TOKEN is optional —
+          # without it the workflow's own token is used, which is enough to
+          # commit to this repository given the contents:write permission above.
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH }}
+          # Optional tuning — set these as repository Variables to change them
+          # without editing this file.
+          SCAN_UNIVERSE: ${{ vars.SCAN_UNIVERSE }}
+          SCAN_STRATEGIES: ${{ vars.SCAN_STRATEGIES }}
+          SCAN_MIN_SCORE: ${{ vars.SCAN_MIN_SCORE }}
+          SYNC_TAIL_DAYS: ${{ vars.SYNC_TAIL_DAYS }}
+        run: python daily_job.py daily

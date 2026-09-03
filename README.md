@@ -31,6 +31,177 @@ Forward Testing
 Learning Engine
 ```
 ---
+🤖 Running Daily Without Opening the App
+Streamlit Cloud only executes the app while somebody has the page open, so
+nothing inside `app.py` can keep the forward test running on its own. The engine
+therefore lives in `core.py`, which imports with no UI, and `daily_job.py` drives
+it from GitHub Actions on a schedule.
+
+| File | Role |
+| --- | --- |
+| `core.py` | the engine — data, strategies, scoring, forward tests, learning. No UI. |
+| `app.py` | the Streamlit interface, importing `core` |
+| `daily_job.py` | headless runner for the scheduled jobs |
+| `.github/workflows/dhan-token-renewal.yml` | 02:30 UTC daily (08:00 IST) |
+| `.github/workflows/daily-forward-test.yml` | 11:20 and 13:30 UTC on weekdays (16:50 / 19:00 IST) |
+
+The daily run, in order: restore the database from GitHub → renew the Dhan token
+→ top up the newest candles → resolve open positions that hit stop or target →
+scan the just-closed session → record signals at/above the gate → back up the
+database.
+
+Two guards make it safe to leave running unattended:
+
+- **Stale candles skip the scan.** If Dhan has not published the latest session
+  yet, the job resolves positions and stops. It never records a candidate from
+  out-of-date prices, which is the late-entry problem the whole change set
+  exists to fix.
+- **No backup config, no run.** If `GITHUB_TOKEN`/`GITHUB_REPO` are missing the
+  job aborts immediately, so it can never push an empty database over your saved
+  forward tests.
+
+The scan runs **after the close**, on the finished daily candle, on purpose. An
+intraday scan can show a setup at 11:00 that has vanished by 15:30; recording
+that as a forward test would pollute the learning data with signals that never
+really existed.
+
+Setup — repository **Settings → Secrets and variables → Actions**:
+
+```text
+Secrets   DHAN_CLIENT_ID, DHAN_PIN, DHAN_TOTP_SECRET
+          (or DHAN_ACCESS_TOKEN if you are not using PIN+TOTP)
+          GH_BACKUP_TOKEN   optional; defaults to the built-in Actions token
+
+Variables DB_BACKUP_BRANCH  strongly recommended, e.g. db-backup
+          SCAN_UNIVERSE     default "Nifty 500"; join with | for several
+          SCAN_STRATEGIES   default "1,2,3,4"
+          SCAN_MIN_SCORE    default "85"
+```
+
+**GitHub refuses to create any secret or variable whose name starts with
+`GITHUB_`** — the prefix is reserved. The backup settings therefore accept
+non-reserved aliases, tried in this order:
+
+| Setting | Names accepted |
+| --- | --- |
+| token | `GITHUB_TOKEN`, `GH_TOKEN`, `GH_BACKUP_TOKEN` |
+| repository | `GITHUB_REPO`, `GH_REPO`, `DB_BACKUP_REPO` |
+| backup branch | `GITHUB_BACKUP_BRANCH`, `GH_BACKUP_BRANCH`, `DB_BACKUP_BRANCH` |
+
+The `GITHUB_*` names still work in Streamlit Secrets, which has no such rule.
+
+Set a dedicated backup branch before enabling the schedule. Each backup commits
+the entire SQLite file, so a daily job pointed at your code branch would add one
+binary blob per day to its history forever. The branch is created automatically
+on the first backup if it does not exist.
+
+---
+🩺 When the GitHub Backup Will Not Work
+**Data Manager → TEST GITHUB BACKUP** checks the whole path without writing a
+commit: configuration present, repository name well-formed, token authenticates,
+repository actually visible to that token, write permission held, backup branch
+present, existing backup found. It names the exact failure.
+
+The usual causes, in order of how often they bite:
+
+1. **Two separate secret stores.** The Streamlit app reads **Streamlit Secrets**;
+   the scheduled jobs read **GitHub Actions secrets**. Configuring one does not
+   configure the other — if the app shows red, add the values in *Streamlit*
+   Secrets (Manage app → Settings → Secrets), not in the repository.
+2. **A reserved name.** See the table above; a variable called
+   `GITHUB_BACKUP_BRANCH` cannot be created in Actions at all.
+3. **Fine-grained token missing the repository.** A fine-grained PAT returns 404
+   for a repository it was not explicitly granted, which looks identical to a
+   typo. It needs *Repository access* → this repo, and *Repository permissions →
+   Contents: Read and write*.
+4. **`GITHUB_REPO` set to a URL.** It must be `owner/repo`.
+
+Failures are no longer swallowed: `backup_db_to_github()` returns the real
+reason, the Data Manager prints it, and `daily_job.py` logs it. A restore that
+fails for any reason other than "no backup exists yet" aborts the scheduled run
+rather than backing an empty database up over your saved forward tests.
+
+Two further operational notes: GitHub disables scheduled workflows in a
+repository with no activity for 60 days, and cron runs can be delayed under load
+— which is why the forward-test job has a second attempt each evening. Both
+workflows also have a **Run workflow** button in the Actions tab.
+
+---
+🕒 Data Freshness & Live Intraday Prices
+Stored daily candles can never be newer than the last completed NSE session, so
+a scan run during market hours was always evaluating yesterday's close. Two
+layers fix that.
+
+**1. Fast top-up.** `sync_latest_sessions()` requests only the last
+`LATEST_SYNC_TAIL_DAYS` (10) calendar days per symbol instead of walking the
+full 1000-day window, and it re-requests the newest already-stored bars. Without
+that re-request a candle first written while its session was still open could
+never be corrected: `MAX(dt)` had already moved past it, so the "download the
+missing range" branch could not reach back. It is exposed as a button in both
+the Daily Scanner and the Data Manager.
+
+**2. Live intraday overlay.** While the cash session is open, the Scanner and
+the Early Warning Radar can pull today's still-forming candle from Dhan's bulk
+quote feed (`dhan_quote_snapshot`, one request per 1000 instruments) and merge
+it into the daily history **in memory only**:
+
+```text
+stored daily candles (closed sessions)
+        + today's forming bar (open/high/low/LTP/volume)
+        = frame the strategies actually evaluate
+```
+
+A partial bar is never written to the `candles` table, and features derived from
+one are never persisted to the feature-snapshot store, so backtests and research
+continue to see completed sessions only.
+
+The feature cache is keyed on last date **plus** row count **plus** last close.
+Keying on the date alone silently reused stale features whenever a candle was
+revised, or whenever today's forming bar moved.
+
+---
+📈 Live Forward-Test P/L
+The persistent forward-test tracker shows a real current price and what the
+position is actually doing:
+
+| Column | Meaning |
+| --- | --- |
+| Current Price | live WebSocket tick, else a REST quote, else the last stored close |
+| Gain/Loss % and ₹ | move against the recorded entry |
+| Unrealized R | that move divided by the position's own risk (entry − stop) |
+| To Target % / To Stop % | how far price still has to travel |
+| Progress to Target % | share of the planned entry→target distance covered |
+| Price Source / Price As Of | provenance, so a stale price is never mistaken for a live one |
+
+Target and stop **resolution** still happens only on completed daily candles. A
+live price touching a level raises an alert in this table; it does not close the
+record.
+
+---
+🚨 Early Warning Radar
+The Daily Scanner is binary: a stock is invisible until the day it passes every
+rule of a strategy, which is usually the day the move has already started. The
+radar answers the other question — which stocks are *about* to trigger.
+
+`strategy_condition_matrix()` decomposes each strategy into its individual
+conditions; ANDing them reproduces `strategy_signal()` exactly (verified across
+43,200 bar/strategy evaluations). That decomposition is what lets the radar
+report "7 of 9 rules pass, the blocker is Monthly RSI ≥ 50 and it is 3.6% away".
+
+Alongside proximity it measures volatility compression, because expansion moves
+follow contraction: range percentile against the stock's own 120-day
+distribution, NR7, consecutive inside bars, 5-day vs 60-day range ratio, volume
+dry-up, and distance from the 52-week high.
+
+```text
+Readiness = 55% proximity-to-trigger + 35% compression + regime adjustment
+```
+
+The radar changes nothing about S1–S4 qualification. It builds a watchlist.
+Setting "how close" to 0 rules reproduces the normal scanner's qualified list
+exactly.
+
+---
 ⚡ Persistent Data & Fast Scanning
 The application maintains a local historical-data cache.
 When data already exists locally:

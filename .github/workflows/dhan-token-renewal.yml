@@ -1,0 +1,53 @@
+# Keeps the Dhan access token alive so it never expires on you.
+#
+# Dhan invalidates access tokens every 24 hours. This mints a fresh one via
+# PIN + TOTP each morning before the market opens and stores it in the
+# database, which is then pushed back to GitHub — so the Streamlit app picks
+# up a valid token whenever you next open it, with nothing to paste by hand.
+name: Dhan token renewal
+
+on:
+  schedule:
+    # 02:30 UTC = 08:00 IST, about 75 minutes before the 09:15 IST open.
+    # Runs every day: a token minted on Friday would otherwise be dead by
+    # Monday, and by weekend research too.
+    - cron: "30 2 * * *"
+  workflow_dispatch:        # lets you renew on demand from the Actions tab
+
+concurrency:
+  # Never let two runs write the database backup at the same time.
+  group: dhan-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # backup_db_to_github() commits via the API
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Renew Dhan access token
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN: ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # GitHub forbids secret/variable NAMES starting with "GITHUB_", so the
+          # engine accepts these aliases instead. GH_BACKUP_TOKEN is optional —
+          # without it the workflow's own token is used, which is enough to
+          # commit to this repository given the contents:write permission above.
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH }}
+        run: python daily_job.py token
