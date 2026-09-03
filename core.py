@@ -486,6 +486,12 @@ def _dhan_generate_fresh_token():
     if isinstance(result, str):
         token = result
     elif isinstance(result, dict):
+        if result.get("status") == "error":
+            # A real Dhan API error (e.g. "Token can be generated once every
+            # 2 minutes.") - distinct from an unrecognized SDK response shape,
+            # so the caller sees the actual reason instead of a confusing
+            # "unrecognized response" message.
+            raise RuntimeError(f"Dhan rejected the token request: {result.get('message', 'unknown error')}")
         for key in ("accessToken", "access_token", "token"):
             v = result.get(key)
             if isinstance(v, str) and v:
@@ -508,13 +514,28 @@ def _dhan_ensure_fresh_token():
     with _DHAN_TOKEN_LOCK:
         token, issued_at = _read_cached_dhan_token()
         fresh = False
+        age_hours = None
         if token and issued_at:
             try:
                 age_hours = (datetime.now() - datetime.fromisoformat(issued_at)).total_seconds() / 3600
                 fresh = age_hours < DHAN_TOKEN_MAX_AGE_HOURS
             except Exception:
                 fresh = False
-        return token if fresh else _dhan_generate_fresh_token()
+        if fresh:
+            return token
+        try:
+            return _dhan_generate_fresh_token()
+        except Exception:
+            # Renewal failed - most commonly Dhan's own 2-minute rate limit on
+            # token generation, hit by an app rerun or a manual force-renew
+            # shortly after an automatic one. The cached token is only
+            # renewed early (past DHAN_TOKEN_MAX_AGE_HOURS) as a safety
+            # margin - it's still genuinely valid for Dhan's real 24h expiry,
+            # so keep using it rather than breaking every Dhan call over a
+            # renewal hiccup. Only propagate when there's nothing usable.
+            if token and age_hours is not None and age_hours < 24:
+                return token
+            raise
 
 def _dhan_headers():
     return {
