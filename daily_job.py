@@ -29,11 +29,16 @@ Configuration comes from environment variables (see core._secret):
 
     required   DHAN_CLIENT_ID
                DHAN_PIN + DHAN_TOTP_SECRET   (or DHAN_ACCESS_TOKEN)
-               GITHUB_TOKEN + GITHUB_REPO    (the database lives there)
-    optional   SCAN_UNIVERSE     default "Nifty 500"
+               GH_BACKUP_TOKEN + GH_REPO     (the database lives there)
+    optional   DB_BACKUP_BRANCH  dedicated branch for the backup commits
+               SCAN_UNIVERSE     default "Nifty 500"
                SCAN_STRATEGIES   default "1,2,3,4"
                SCAN_MIN_SCORE    default "85"
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
+
+GitHub refuses to create secrets or variables whose NAME starts with "GITHUB_",
+so the backup settings are read from the non-reserved aliases above (the
+original GITHUB_TOKEN / GITHUB_REPO names still work in Streamlit Secrets).
 """
 
 import argparse
@@ -83,8 +88,9 @@ def step_restore():
     backup at the end would overwrite the real one with it."""
     if not core._github_configured():
         raise RuntimeError(
-            "GITHUB_TOKEN/GITHUB_REPO are not set. The database cannot be restored, and "
-            "continuing would push an empty database over your saved forward tests."
+            "The GitHub backup is not configured (GH_BACKUP_TOKEN / GH_REPO). The database "
+            "cannot be restored, and continuing would push an empty database over your saved "
+            "forward tests."
         )
     restored = core.restore_db_from_github()
     if restored:
@@ -94,6 +100,15 @@ def step_restore():
         log("restore", "local database already present, keeping it")
     else:
         # First ever run: no backup exists yet. Safe — there is nothing to lose.
+        # Anything else (bad token, wrong repo, missing branch) is recorded by
+        # the engine, and is NOT safe to ignore: continuing would back an empty
+        # database up over the real one.
+        why = core._GITHUB_LAST_ERROR
+        if why:
+            raise RuntimeError(
+                f"Could not restore the database backup: {why} — refusing to continue, because "
+                "backing up now would overwrite your saved forward tests with an empty database."
+            )
         log("restore", "no backup found on GitHub; starting a new database")
     return restored
 
@@ -183,8 +198,8 @@ def step_backup():
     if not core._github_configured():
         log("backup", "GITHUB_TOKEN/GITHUB_REPO not set — SKIPPED, this run will be lost")
         return False
-    ok = core.backup_db_to_github()
-    log("backup", "database pushed to GitHub" if ok else "backup FAILED — check the token's Contents write permission")
+    ok, reason = core.backup_db_to_github(return_reason=True)
+    log("backup", reason if ok else f"FAILED — {reason}")
     return ok
 
 

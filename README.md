@@ -72,15 +72,54 @@ Secrets   DHAN_CLIENT_ID, DHAN_PIN, DHAN_TOTP_SECRET
           (or DHAN_ACCESS_TOKEN if you are not using PIN+TOTP)
           GH_BACKUP_TOKEN   optional; defaults to the built-in Actions token
 
-Variables GITHUB_BACKUP_BRANCH   strongly recommended, e.g. db-backup
-          SCAN_UNIVERSE          default "Nifty 500"; join with | for several
-          SCAN_STRATEGIES        default "1,2,3,4"
-          SCAN_MIN_SCORE         default "85"
+Variables DB_BACKUP_BRANCH  strongly recommended, e.g. db-backup
+          SCAN_UNIVERSE     default "Nifty 500"; join with | for several
+          SCAN_STRATEGIES   default "1,2,3,4"
+          SCAN_MIN_SCORE    default "85"
 ```
 
-Set `GITHUB_BACKUP_BRANCH` to a dedicated branch before enabling the schedule.
-Each backup commits the entire SQLite file, so a daily job pointed at your code
-branch would add one binary blob per day to its history forever.
+**GitHub refuses to create any secret or variable whose name starts with
+`GITHUB_`** — the prefix is reserved. The backup settings therefore accept
+non-reserved aliases, tried in this order:
+
+| Setting | Names accepted |
+| --- | --- |
+| token | `GITHUB_TOKEN`, `GH_TOKEN`, `GH_BACKUP_TOKEN` |
+| repository | `GITHUB_REPO`, `GH_REPO`, `DB_BACKUP_REPO` |
+| backup branch | `GITHUB_BACKUP_BRANCH`, `GH_BACKUP_BRANCH`, `DB_BACKUP_BRANCH` |
+
+The `GITHUB_*` names still work in Streamlit Secrets, which has no such rule.
+
+Set a dedicated backup branch before enabling the schedule. Each backup commits
+the entire SQLite file, so a daily job pointed at your code branch would add one
+binary blob per day to its history forever. The branch is created automatically
+on the first backup if it does not exist.
+
+---
+🩺 When the GitHub Backup Will Not Work
+**Data Manager → TEST GITHUB BACKUP** checks the whole path without writing a
+commit: configuration present, repository name well-formed, token authenticates,
+repository actually visible to that token, write permission held, backup branch
+present, existing backup found. It names the exact failure.
+
+The usual causes, in order of how often they bite:
+
+1. **Two separate secret stores.** The Streamlit app reads **Streamlit Secrets**;
+   the scheduled jobs read **GitHub Actions secrets**. Configuring one does not
+   configure the other — if the app shows red, add the values in *Streamlit*
+   Secrets (Manage app → Settings → Secrets), not in the repository.
+2. **A reserved name.** See the table above; a variable called
+   `GITHUB_BACKUP_BRANCH` cannot be created in Actions at all.
+3. **Fine-grained token missing the repository.** A fine-grained PAT returns 404
+   for a repository it was not explicitly granted, which looks identical to a
+   typo. It needs *Repository access* → this repo, and *Repository permissions →
+   Contents: Read and write*.
+4. **`GITHUB_REPO` set to a URL.** It must be `owner/repo`.
+
+Failures are no longer swallowed: `backup_db_to_github()` returns the real
+reason, the Data Manager prints it, and `daily_job.py` logs it. A restore that
+fails for any reason other than "no backup exists yet" aborts the scheduled run
+rather than backing an empty database up over your saved forward tests.
 
 Two further operational notes: GitHub disables scheduled workflows in a
 repository with no activity for 60 days, and cron runs can be delayed under load

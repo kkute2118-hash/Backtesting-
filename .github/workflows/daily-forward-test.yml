@@ -53,9 +53,13 @@ jobs:
           DHAN_PIN: ${{ secrets.DHAN_PIN }}
           DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
-          GITHUB_REPO: ${{ github.repository }}
-          GITHUB_BACKUP_BRANCH: ${{ vars.GITHUB_BACKUP_BRANCH }}
+          # GitHub forbids secret/variable NAMES starting with "GITHUB_", so the
+          # engine accepts these aliases instead. GH_BACKUP_TOKEN is optional —
+          # without it the workflow's own token is used, which is enough to
+          # commit to this repository given the contents:write permission above.
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH }}
           # Optional tuning — set these as repository Variables to change them
           # without editing this file.
           SCAN_UNIVERSE: ${{ vars.SCAN_UNIVERSE }}

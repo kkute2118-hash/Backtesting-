@@ -1251,13 +1251,46 @@ with tabs[8]:
     if _github_configured():
         st.success("🟢 GitHub backup configured — learning data is protected against Streamlit Cloud reboots. Auto-backs up after every closed forward test, learned backtest batch, and added candidate (rate-limited to once per 15 minutes).")
     else:
-        st.error("🔴 GitHub backup NOT configured — accumulated learning data will be LOST on the next Streamlit Cloud reboot/redeploy. Add GITHUB_TOKEN and GITHUB_REPO to Streamlit Secrets to enable it.")
-    if st.button("💾 Backup DB Now", key="db_backup_now"):
+        st.error(
+            "🔴 GitHub backup NOT configured — accumulated learning data will be LOST on the next "
+            "Streamlit Cloud reboot/redeploy. Add GITHUB_TOKEN and GITHUB_REPO to **Streamlit "
+            "Secrets**. Note that Streamlit Secrets and GitHub Actions secrets are separate stores: "
+            "configuring the scheduled jobs does not configure this app, and vice versa."
+        )
+
+    bk1, bk2 = st.columns(2)
+    if bk1.button("🔎 TEST GITHUB BACKUP", key="db_backup_test"):
+        with st.spinner("Checking credentials, repository access and write permission..."):
+            gdiag = github_backup_diagnostic()
+        checks = [
+            ("Configured", gdiag["configured"]),
+            ("Repo format", gdiag["repo_format"]),
+            ("Token valid", gdiag["token_valid"]),
+            ("Repo visible", gdiag["repo_visible"]),
+            ("Write access", gdiag["can_write"]),
+        ]
+        cols = st.columns(len(checks))
+        for col, (label, ok) in zip(cols, checks):
+            col.metric(label, "PASS" if ok else "FAIL")
+        if all(ok for _, ok in checks) and gdiag["branch_ok"]:
+            st.success("🟢 GitHub backup is working — credentials, repository access and write permission all verified.")
+        else:
+            st.error("🔴 GitHub backup is not usable yet. The reason is below.")
+        for msg in gdiag["details"]:
+            st.write("•", msg)
+        st.caption(
+            "This test never writes a commit. If every check passes but a backup still fails, "
+            "press Backup DB Now — the error message now names the exact cause."
+        )
+
+    if bk2.button("💾 Backup DB Now", type="primary", key="db_backup_now"):
         with st.spinner("Uploading market_data.sqlite3 to GitHub..."):
-            if backup_db_to_github():
-                st.success("✅ Backed up.")
-            else:
-                st.error("Backup failed — check GITHUB_TOKEN/GITHUB_REPO in Streamlit Secrets, and that the token has Contents: Read and write access to this repo.")
+            ok, reason = backup_db_to_github(return_reason=True)
+        if ok:
+            st.success(f"✅ {reason}")
+        else:
+            st.error(f"❌ Backup failed — {reason}")
+            st.caption("Run TEST GITHUB BACKUP for a step-by-step breakdown.")
 
     # ---- Explicit, read-only Dhan health check --------------------------------
     st.markdown("### 🔌 Dhan Connection Test")

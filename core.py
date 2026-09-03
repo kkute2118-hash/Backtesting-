@@ -68,16 +68,96 @@ DATA_DB="market_data.sqlite3"
 GITHUB_BACKUP_PATH = "backups/market_data.sqlite3"
 
 
+# GitHub refuses to create any Actions secret or repository variable whose name
+# starts with "GITHUB_" — the prefix is reserved. The original setting names all
+# used it, which made them impossible to configure for the scheduled jobs. Each
+# setting therefore accepts a non-reserved alias, tried in order.
+_GITHUB_SETTING_ALIASES = {
+    "GITHUB_TOKEN": ("GITHUB_TOKEN", "GH_TOKEN", "GH_BACKUP_TOKEN"),
+    "GITHUB_REPO": ("GITHUB_REPO", "GH_REPO", "DB_BACKUP_REPO"),
+    "GITHUB_BACKUP_BRANCH": ("GITHUB_BACKUP_BRANCH", "GH_BACKUP_BRANCH", "DB_BACKUP_BRANCH"),
+}
+
+# Last failure from a backup/restore attempt, so the UI can show a real reason
+# instead of a bare "backup failed".
+_GITHUB_LAST_ERROR = ""
+
+
+def _github_setting(name):
+    """Read one backup setting by its canonical name, honouring the aliases."""
+    for key in _GITHUB_SETTING_ALIASES.get(name, (name,)):
+        val = _secret(key)
+        if val not in (None, ""):
+            return str(val).strip()
+    return None
+
+
 def _github_backup_branch():
     """Branch the database backup is committed to.
 
     Defaults to the repository's default branch, which is what the in-app
-    "Backup DB Now" button has always used. Set GITHUB_BACKUP_BRANCH to a
-    dedicated branch (e.g. "db-backup") before enabling the daily job: each
-    backup commits the whole SQLite file, so a scheduled run would otherwise
-    add one binary blob per day to your code branch's history forever.
+    "Backup DB Now" button has always used. Set DB_BACKUP_BRANCH to a dedicated
+    branch (e.g. "db-backup") before enabling the daily job: each backup commits
+    the whole SQLite file, so a scheduled run would otherwise add one binary
+    blob per day to your code branch's history forever.
     """
-    return _secret("GITHUB_BACKUP_BRANCH") or None
+    return _github_setting("GITHUB_BACKUP_BRANCH") or None
+
+
+def _github_default_branch(repo):
+    r = requests.get(f"https://api.github.com/repos/{repo}", headers=_github_headers(), timeout=30)
+    if r.status_code != 200:
+        return None
+    return r.json().get("default_branch")
+
+
+def _github_ensure_branch(repo, branch):
+    """Create `branch` off the default branch if it does not exist yet.
+
+    Without this, pointing the backup at a dedicated branch that has never been
+    created makes every PUT fail with a 404 that looks identical to a bad token.
+    """
+    if not branch:
+        return True, ""
+    r = requests.get(f"https://api.github.com/repos/{repo}/git/ref/heads/{branch}",
+                     headers=_github_headers(), timeout=30)
+    if r.status_code == 200:
+        return True, ""
+    base = _github_default_branch(repo)
+    if not base:
+        return False, f"Could not read the repository's default branch to create '{branch}'."
+    head = requests.get(f"https://api.github.com/repos/{repo}/git/ref/heads/{base}",
+                        headers=_github_headers(), timeout=30)
+    if head.status_code != 200:
+        return False, f"Could not read '{base}' to branch from ({head.status_code})."
+    sha = head.json().get("object", {}).get("sha")
+    mk = requests.post(f"https://api.github.com/repos/{repo}/git/refs",
+                       headers=_github_headers(), timeout=30,
+                       json={"ref": f"refs/heads/{branch}", "sha": sha})
+    if mk.status_code in (200, 201):
+        return True, f"Created backup branch '{branch}' from '{base}'."
+    return False, f"Could not create branch '{branch}': {mk.status_code} {mk.text[:200]}"
+
+
+def _github_error_hint(status, body):
+    """Turn a GitHub API status into something actionable."""
+    if status == 401:
+        return ("401 Unauthorized — the token is invalid or expired. Generate a new one and "
+                "update it in Streamlit Secrets / Actions secrets.")
+    if status == 403:
+        return ("403 Forbidden — the token authenticated but is not allowed to write. A "
+                "fine-grained token needs Repository permissions → Contents: Read and write, "
+                "AND this repository selected under 'Repository access'. In Actions, the "
+                "workflow also needs 'permissions: contents: write'.")
+    if status == 404:
+        return ("404 Not Found — the repository name is wrong, the branch does not exist, or "
+                "the token cannot see this repository. GITHUB_REPO must be 'owner/repo', not "
+                "a URL.")
+    if status == 409:
+        return "409 Conflict — the backup changed underneath this write. Try again."
+    if status == 422:
+        return f"422 Unprocessable — GitHub rejected the request: {body[:200]}"
+    return f"HTTP {status}: {body[:200]}"
 
 def _secret(name, default=None):
     """One place to read configuration, from Streamlit Secrets OR the environment.
@@ -110,13 +190,13 @@ def _secret_required(name):
 
 def _github_configured():
     try:
-        return bool(_secret("GITHUB_TOKEN")) and bool(_secret("GITHUB_REPO"))
+        return bool(_github_setting("GITHUB_TOKEN")) and bool(_github_setting("GITHUB_REPO"))
     except Exception:
         return False
 
 def _github_headers():
     return {
-        "Authorization": f"token {_secret_required('GITHUB_TOKEN')}",
+        "Authorization": f"token {_github_setting('GITHUB_TOKEN') or ''}",
         "Accept": "application/vnd.github+json",
     }
 
@@ -125,46 +205,82 @@ def restore_db_from_github():
     is missing or empty, pulls the last backup from GitHub so learning data
     survives a Streamlit Cloud reboot. Never raises - a failed restore just
     means the app starts fresh, same as today's behavior without this patch."""
+    global _GITHUB_LAST_ERROR
     if not _github_configured():
         return False
     if os.path.exists(DATA_DB) and os.path.getsize(DATA_DB) > 0:
         return False  # local file already present this container session
     try:
-        repo = _secret_required("GITHUB_REPO")
+        repo = _github_setting("GITHUB_REPO")
         url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
         branch = _github_backup_branch()
         r = requests.get(url, headers=_github_headers(), timeout=30,
                          params={"ref": branch} if branch else None)
         if r.status_code != 200:
-            return False  # no backup exists yet, or auth issue - fail quiet
+            # No backup exists yet, or auth/branch problem. Record why so the
+            # Data Manager and the scheduled job can report it instead of
+            # silently starting from an empty database.
+            _GITHUB_LAST_ERROR = _github_error_hint(r.status_code, r.text)
+            return False
         content_b64 = r.json().get("content", "")
         raw = base64.b64decode(content_b64)
         with open(DATA_DB, "wb") as f:
             f.write(raw)
         return True
-    except Exception:
+    except Exception as exc:
+        _GITHUB_LAST_ERROR = f"{type(exc).__name__}: {exc}"
         return False
 
-def backup_db_to_github():
-    """Uploads the current local DB file to GitHub, overwriting the last
-    backup. Returns True on success, False otherwise (never raises)."""
+def backup_db_to_github(return_reason=False):
+    """Upload the local DB to GitHub, overwriting the last backup.
+
+    Returns True/False, or (ok, reason) when return_reason=True. Every failure
+    also lands in _GITHUB_LAST_ERROR. The previous version swallowed the API
+    response entirely, so a wrong repo name, an expired token and a missing
+    branch were all indistinguishable from each other — and from success.
+    """
+    global _GITHUB_LAST_ERROR
+
+    def done(ok, reason=""):
+        global _GITHUB_LAST_ERROR
+        _GITHUB_LAST_ERROR = "" if ok else reason
+        return (ok, reason) if return_reason else ok
+
     if not _github_configured():
-        return False
+        missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
+        return done(False, "Not configured — missing " + " and ".join(missing) +
+                           ". Set them in Streamlit Secrets (for the app) or Actions secrets "
+                           "(for the scheduled jobs); those two stores are separate.")
     if not os.path.exists(DATA_DB):
-        return False
+        return done(False, f"No local database at {DATA_DB} — nothing to back up yet.")
+
+    repo = _github_setting("GITHUB_REPO")
+    if "/" not in repo or repo.startswith("http"):
+        return done(False, f"GITHUB_REPO is '{repo}' but must be 'owner/repo' — not a URL.")
+
     try:
-        repo = _secret_required("GITHUB_REPO")
+        branch = _github_backup_branch()
+        note = ""
+        if branch:
+            ok, msg = _github_ensure_branch(repo, branch)
+            if not ok:
+                return done(False, msg)
+            note = msg
+
         url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
         with open(DATA_DB, "rb") as f:
             content_b64 = base64.b64encode(f.read()).decode()
+
         # Need the current file's SHA if it already exists, else GitHub
         # rejects the update as a conflicting create.
         sha = None
-        branch = _github_backup_branch()
         r = requests.get(url, headers=_github_headers(), timeout=30,
                          params={"ref": branch} if branch else None)
         if r.status_code == 200:
             sha = r.json().get("sha")
+        elif r.status_code in (401, 403):
+            return done(False, _github_error_hint(r.status_code, r.text))
+
         payload = {
             "message": f"Auto-backup DB {datetime.now().isoformat(timespec='seconds')}",
             "content": content_b64,
@@ -173,10 +289,111 @@ def backup_db_to_github():
             payload["sha"] = sha
         if branch:
             payload["branch"] = branch
-        put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=60)
-        return put_r.status_code in (200, 201)
-    except Exception:
-        return False
+
+        put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=120)
+        if put_r.status_code in (200, 201):
+            mb = os.path.getsize(DATA_DB) / 1_048_576
+            where = f"{repo}@{branch or 'default branch'}:{GITHUB_BACKUP_PATH}"
+            return done(True, (note + " " if note else "") + f"Backed up {mb:.1f} MB to {where}.")
+        return done(False, _github_error_hint(put_r.status_code, put_r.text))
+    except Exception as exc:
+        return done(False, f"{type(exc).__name__}: {exc}")
+
+
+def github_backup_diagnostic():
+    """Step-by-step check of the GitHub backup path, naming the exact failure.
+
+    Read-only: it never writes a commit. It verifies configuration, that the
+    token authenticates, that it can actually see the repository, that it holds
+    write permission, and whether a backup already exists.
+    """
+    result = {"configured": False, "repo_format": False, "token_valid": False,
+              "repo_visible": False, "can_write": False, "branch_ok": False,
+              "backup_exists": False, "details": []}
+    say = result["details"].append
+
+    token = _github_setting("GITHUB_TOKEN")
+    repo = _github_setting("GITHUB_REPO")
+    if not token or not repo:
+        missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
+        say(f"Missing {' and '.join(missing)}.")
+        say("These are two separate stores: the Streamlit app reads Streamlit Secrets, the "
+            "scheduled jobs read GitHub Actions secrets. Setting one does NOT configure the other.")
+        say("Aliases accepted: GH_TOKEN / GH_BACKUP_TOKEN for the token, GH_REPO for the repo, "
+            "DB_BACKUP_BRANCH for the branch (GitHub forbids names starting with GITHUB_).")
+        return result
+    result["configured"] = True
+    say(f"Token present ({len(token)} chars, starts '{token[:4]}…').")
+
+    if "/" not in repo or repo.startswith("http"):
+        say(f"GITHUB_REPO is '{repo}' but must be 'owner/repo' — not a URL.")
+        return result
+    result["repo_format"] = True
+    say(f"Repository: {repo}")
+
+    try:
+        r = requests.get(f"https://api.github.com/repos/{repo}", headers=_github_headers(), timeout=30)
+    except Exception as exc:
+        say(f"Could not reach api.github.com: {exc}")
+        return result
+
+    if r.status_code in (401,):
+        say(_github_error_hint(401, r.text))
+        return result
+    if r.status_code == 404:
+        say(_github_error_hint(404, r.text))
+        say("A fine-grained token also 404s on a repository it was not granted access to, "
+            "even when the repository exists.")
+        return result
+    if r.status_code != 200:
+        say(_github_error_hint(r.status_code, r.text))
+        return result
+
+    result["token_valid"] = True
+    result["repo_visible"] = True
+    info = r.json()
+    default_branch = info.get("default_branch")
+    say(f"Repository visible. Default branch: {default_branch}. "
+        f"Private: {info.get('private')}.")
+
+    perms = info.get("permissions") or {}
+    if perms.get("push") or perms.get("admin"):
+        result["can_write"] = True
+        say("Token has write (push) access.")
+    else:
+        say(_github_error_hint(403, ""))
+        say(f"Reported permissions: {perms or 'none'}")
+
+    branch = _github_backup_branch()
+    if not branch:
+        result["branch_ok"] = True
+        say(f"Backup branch: (default branch '{default_branch}'). "
+            "Set DB_BACKUP_BRANCH to a dedicated branch before enabling the daily job — "
+            "each backup commits the whole database file.")
+    else:
+        br = requests.get(f"https://api.github.com/repos/{repo}/git/ref/heads/{branch}",
+                          headers=_github_headers(), timeout=30)
+        if br.status_code == 200:
+            result["branch_ok"] = True
+            say(f"Backup branch '{branch}' exists.")
+        else:
+            say(f"Backup branch '{branch}' does not exist yet — it will be created "
+                "automatically on the next backup.")
+            result["branch_ok"] = result["can_write"]
+
+    fr = requests.get(f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}",
+                      headers=_github_headers(), timeout=30,
+                      params={"ref": branch} if branch else None)
+    if fr.status_code == 200:
+        result["backup_exists"] = True
+        size_mb = (fr.json().get("size") or 0) / 1_048_576
+        say(f"Existing backup found: {GITHUB_BACKUP_PATH} ({size_mb:.1f} MB).")
+    else:
+        say(f"No backup at {GITHUB_BACKUP_PATH} yet — the first successful backup creates it.")
+
+    if _GITHUB_LAST_ERROR:
+        say(f"Last backup error was: {_GITHUB_LAST_ERROR}")
+    return result
 
 def maybe_backup_db(min_interval_minutes=15):
     """Rate-limited backup trigger - call after any write worth protecting
