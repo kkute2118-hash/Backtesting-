@@ -1574,6 +1574,11 @@ with tabs[8]:
             )
             if tail_summary["errors"]:
                 st.warning("Dhan errors: "+" | ".join(tail_summary["errors"][:6]))
+            if tail_summary.get("no_data"):
+                st.info(
+                    f"ℹ️ {tail_summary['no_data']:,} symbol range(s) had no Dhan data (DH-907). "
+                    "That is a listing date, not a failure — details in the panel below."
+                )
             st.rerun()
         except Exception as ex:
             st.error(f"Fast top-up failed: {ex}")
@@ -1653,11 +1658,47 @@ with tabs[8]:
 
     if _DHAN_LAST_DATA_ERRORS:
         st.markdown("### ⚠️ Recent Dhan data-build errors")
+        st.caption(
+            "Real API failures only. A symbol whose history simply starts later than the "
+            "requested range (Dhan DH-907) is no longer listed here — see the panel below."
+        )
         st.dataframe(
             pd.DataFrame({"Error":_DHAN_LAST_DATA_ERRORS}),
             width='stretch',
             hide_index=True
         )
+
+    try:
+        floor_df=dhan_history_floor_table()
+    except Exception:
+        floor_df=pd.DataFrame()
+    if not floor_df.empty:
+        with st.expander(f"ℹ️ {len(floor_df):,} symbol(s) whose Dhan history starts later than the requested range — expected, not an error"):
+            st.caption(
+                f"The sync asks Dhan for {sync_days} calendar days plus a {BT_WARMUP_DAYS}-day indicator "
+                "warm-up. Stocks that listed after that start date have no candles to return for the "
+                "earlier part of the window, and Dhan answers DH-907 (\"no data present\"). "
+                "Each symbol below was probed once, the real start of its history was recorded, and the "
+                "futile request is not repeated on later syncs. These stocks still work in the scanner "
+                "and backtest once they have 260+ bars of their own."
+            )
+            st.dataframe(
+                floor_df.rename(columns={
+                    "symbol":"Symbol",
+                    "earliest_available":"Dhan history starts",
+                    "probed_from":"Range start requested",
+                    "checked_at":"Confirmed at"
+                }),
+                width='stretch',
+                hide_index=True
+            )
+    if _DHAN_LAST_NO_DATA:
+        with st.expander(f"🔎 DH-907 windows seen in this session ({len(_DHAN_LAST_NO_DATA):,})"):
+            st.dataframe(
+                pd.DataFrame({"Detail":_DHAN_LAST_NO_DATA}),
+                width='stretch',
+                hide_index=True
+            )
 
     with st.expander("⚠️ Sync Diagnostics — why are stocks below the 260-bar threshold?"):
         st.caption(
