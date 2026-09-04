@@ -16,6 +16,21 @@ st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professiona
 import core as _core
 globals().update({k: v for k, v in vars(_core).items() if not k.startswith("__")})
 
+
+def _engine(name, default=None):
+    """Read one engine attribute LIVE, tolerating an out-of-step core.py.
+
+    The globals().update() above takes a snapshot, which has two problems.
+    A value the engine rebinds during this run (the Dhan error lists) stays
+    stale until the next rerun; and if app.py is ever executed against an
+    older core.py - a partially applied deploy, or Streamlit reusing an
+    already-imported module after a push - every reference to a newly added
+    engine name raises NameError and takes the whole app down with it. Reading
+    through getattr with a default keeps a version skew cosmetic instead of
+    fatal.
+    """
+    return getattr(_core, name, default)
+
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab — Professional Final")
@@ -1485,7 +1500,7 @@ with tabs[8]:
             "press Backup DB Now — the error message now names the exact cause."
         )
 
-    if bk2.button("💾 Backup DB Now", type="primary", key="db_backup_now"):
+    if bk2.button("💾 Backup FULL DB Now", key="db_backup_now"):
         with st.spinner("Uploading market_data.sqlite3 to GitHub..."):
             ok, reason = backup_db_to_github(return_reason=True)
         if ok:
@@ -1493,6 +1508,91 @@ with tabs[8]:
         else:
             st.error(f"❌ Backup failed — {reason}")
             st.caption("Run TEST GITHUB BACKUP for a step-by-step breakdown.")
+
+    # ---- What is actually at risk right now ---------------------------------
+    st.markdown("#### 🧬 Irreplaceable data currently held")
+    st.caption(
+        "Candles can be re-downloaded from Dhan in one sync. Everything below cannot be "
+        "reproduced from anywhere — if it is lost, it is gone. The automatic backup pushes "
+        "exactly these tables, which is why it is small enough to run every 15 minutes."
+    )
+    try:
+        _rebuildable = _engine("REBUILDABLE_TABLES", set())
+        con = _db()
+        try:
+            _tabs = [r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name").fetchall()]
+            _counts = {}
+            for _t in _tabs:
+                try:
+                    _counts[_t] = int(con.execute(f'SELECT COUNT(*) FROM "{_t}"').fetchone()[0])
+                except Exception:
+                    _counts[_t] = 0
+        finally:
+            con.close()
+        _precious = {k: v for k, v in _counts.items() if k not in _rebuildable and v > 0}
+        _precious_rows = sum(_precious.values())
+
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("Forward tests", f"{_counts.get('forward_tests', 0):,}")
+        pc2.metric("Irreplaceable rows", f"{_precious_rows:,}")
+        pc3.metric("Candles (re-syncable)", f"{_counts.get('candles', 0):,}")
+
+        if _precious_rows == 0:
+            st.error(
+                "🔴 There is currently NO irreplaceable data in this database. If you expected "
+                "forward tests here, they were lost in a reboot — use RESTORE LEARNING DATA below "
+                "if a backup exists."
+            )
+        elif not _github_configured():
+            st.error(
+                f"🔴 {_precious_rows:,} irreplaceable rows are held ONLY on this container's disk. "
+                "Streamlit Cloud wipes that disk on every redeploy, reboot and idle timeout. "
+                "Add GITHUB_TOKEN and GITHUB_REPO to Streamlit Secrets now, then press "
+                "BACK UP LEARNING DATA."
+            )
+        with st.expander("Row counts by table"):
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Table": k, "Rows": v,
+                      "Backed up": "no — re-syncable" if k in _rebuildable else "yes"}
+                     for k, v in sorted(_counts.items()) if v > 0]
+                ),
+                width='stretch', hide_index=True
+            )
+    except Exception as ex:
+        st.warning(f"Could not read table row counts: {ex}")
+
+    lb1, lb2 = st.columns(2)
+    if lb1.button("💾 BACK UP LEARNING DATA", type="primary", key="learning_backup_now"):
+        _fn = _engine("backup_learning_to_github")
+        if _fn is None:
+            st.error("This build of core.py has no learning backup yet — reboot the app from 'Manage app'.")
+        else:
+            with st.spinner("Exporting the irreplaceable tables and pushing to GitHub..."):
+                ok, reason = _fn(return_reason=True)
+            if ok:
+                st.success(f"✅ {reason}")
+            else:
+                st.error(f"❌ {reason}")
+
+    if lb2.button("♻️ RESTORE LEARNING DATA", key="learning_restore_now"):
+        _fn = _engine("restore_learning_from_github")
+        if _fn is None:
+            st.error("This build of core.py has no learning restore yet — reboot the app from 'Manage app'.")
+        else:
+            with st.spinner("Downloading the learning backup and merging it in..."):
+                ok, reason = _fn(return_reason=True)
+            if ok:
+                st.success(f"✅ {reason}")
+                st.rerun()
+            else:
+                st.error(f"❌ {reason}")
+    st.caption(
+        "Restore only ever ADDS rows (INSERT OR IGNORE): an existing row always wins over a "
+        "backed-up one, so restoring can bring history back but can never overwrite it."
+    )
 
     # ---- Explicit, read-only Dhan health check --------------------------------
     st.markdown("### 🔌 Dhan Connection Test")
@@ -1607,8 +1707,9 @@ with tabs[8]:
                     max_workers=5
                 )
             st.success("Sync completed. Existing local candles were reused; only missing ranges were requested from Dhan.")
-            if _DHAN_LAST_DATA_ERRORS:
-                st.warning("Recent Dhan data errors: "+" | ".join(_DHAN_LAST_DATA_ERRORS[:8]))
+            _errs=_engine("_DHAN_LAST_DATA_ERRORS",[])
+            if _errs:
+                st.warning("Recent Dhan data errors: "+" | ".join(_errs[:8]))
 
             # One-line freshness log: did this sync actually pull a NEW
             # most-recent trading day's candle for at least one symbol?
@@ -1656,20 +1757,21 @@ with tabs[8]:
         "Existing candles are reused and only missing historical ranges are downloaded."
     )
 
-    if _DHAN_LAST_DATA_ERRORS:
+    _data_errors=_engine("_DHAN_LAST_DATA_ERRORS",[])
+    if _data_errors:
         st.markdown("### ⚠️ Recent Dhan data-build errors")
         st.caption(
             "Real API failures only. A symbol whose history simply starts later than the "
             "requested range (Dhan DH-907) is no longer listed here — see the panel below."
         )
         st.dataframe(
-            pd.DataFrame({"Error":_DHAN_LAST_DATA_ERRORS}),
+            pd.DataFrame({"Error":_data_errors}),
             width='stretch',
             hide_index=True
         )
 
     try:
-        floor_df=dhan_history_floor_table()
+        floor_df=_engine("dhan_history_floor_table",lambda:pd.DataFrame())()
     except Exception:
         floor_df=pd.DataFrame()
     if not floor_df.empty:
@@ -1692,10 +1794,11 @@ with tabs[8]:
                 width='stretch',
                 hide_index=True
             )
-    if _DHAN_LAST_NO_DATA:
-        with st.expander(f"🔎 DH-907 windows seen in this session ({len(_DHAN_LAST_NO_DATA):,})"):
+    _no_data=_engine("_DHAN_LAST_NO_DATA",[])
+    if _no_data:
+        with st.expander(f"🔎 DH-907 windows seen in this session ({len(_no_data):,})"):
             st.dataframe(
-                pd.DataFrame({"Detail":_DHAN_LAST_NO_DATA}),
+                pd.DataFrame({"Detail":_no_data}),
                 width='stretch',
                 hide_index=True
             )

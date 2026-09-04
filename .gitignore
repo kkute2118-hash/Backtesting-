@@ -1,0 +1,19 @@
+# The live SQLite database. This MUST never be committed: DATA_DB points at
+# this exact path, so a copy of it in the repository is checked out over the
+# running app's database on every Streamlit Cloud deploy, destroying all
+# accumulated candles, forward tests and learning data. It also defeats
+# restore_db_from_github(), which skips the restore when a local file exists.
+market_data.sqlite3
+*.sqlite3
+*.sqlite
+*.db
+
+# Backups produced by backup_db_to_github() live under backups/ on a dedicated
+# backup branch, never on a code branch.
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.DS_Store

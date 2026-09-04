@@ -30,6 +30,7 @@ import math
 import bisect
 import os
 import base64
+import tempfile
 import anthropic
 
 
@@ -200,16 +201,47 @@ def _github_headers():
         "Accept": "application/vnd.github+json",
     }
 
+def db_row_count(path=None):
+    """Total rows across every table in a SQLite file, or -1 if unreadable.
+
+    File SIZE is not evidence that a database holds anything. A freshly created
+    DATA_DB is ~170 KB of empty schema the moment _db() runs, because _db()
+    creates two dozen tables. Anything that decides "we already have data" from
+    os.path.getsize() therefore says yes to a database with zero rows in it.
+    """
+    target = path or DATA_DB
+    if not os.path.exists(target):
+        return 0
+    try:
+        con = sqlite3.connect(target, timeout=10)
+        try:
+            tables = [r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            total = 0
+            for t in tables:
+                total += int(con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0])
+            return total
+        finally:
+            con.close()
+    except Exception:
+        return -1
+
+
 def restore_db_from_github():
     """Call once at app startup, before any _db() call. If the local DB file
-    is missing or empty, pulls the last backup from GitHub so learning data
-    survives a Streamlit Cloud reboot. Never raises - a failed restore just
+    is missing or holds no rows, pulls the last backup from GitHub so learning
+    data survives a Streamlit Cloud reboot. Never raises - a failed restore just
     means the app starts fresh, same as today's behavior without this patch."""
     global _GITHUB_LAST_ERROR
     if not _github_configured():
         return False
-    if os.path.exists(DATA_DB) and os.path.getsize(DATA_DB) > 0:
-        return False  # local file already present this container session
+    # Restore whenever the local file carries no actual rows, not merely when it
+    # is absent or zero bytes. An empty-but-schema-full database - which is what
+    # a stray committed market_data.sqlite3, an interrupted first run, or a
+    # corrupt file all look like - used to be mistaken for live data and
+    # silently suppressed the restore on every single reboot.
+    if os.path.exists(DATA_DB) and db_row_count(DATA_DB) > 0:
+        return False  # local file already holds data this container session
     try:
         repo = _github_setting("GITHUB_REPO")
         url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
@@ -395,20 +427,246 @@ def github_backup_diagnostic():
         say(f"Last backup error was: {_GITHUB_LAST_ERROR}")
     return result
 
+# ---- Learning-data backup ----------------------------------------------------
+#
+# backup_db_to_github() commits the WHOLE database, candle cache included. With
+# 500 stocks x ~1900 days that file is tens of megabytes, so it is far too slow
+# and far too repo-hostile to run automatically every few minutes - which is
+# exactly why, in practice, no automatic backup ever ran and a reboot took
+# everything with it.
+#
+# The split below is the fix. Candles are freely re-downloadable from Dhan in
+# one sync; forward tests, resolved results and accumulated learning are NOT
+# reproducible from anywhere. Backing up only the irreplaceable tables produces
+# a file measured in kilobytes, which can safely be pushed on a short interval.
+LEARNING_BACKUP_PATH = "backups/learning_data.sqlite3"
+
+# Anything NOT listed here is treated as irreplaceable and gets backed up, so a
+# learning table added later is protected automatically rather than being
+# forgotten until the next time data is lost.
+REBUILDABLE_TABLES = {
+    "candles",            # re-syncable from Dhan
+    "fundamentals_cache", # re-fetchable
+    "news_cache",         # re-fetchable
+    "live_ticks",         # intraday only
+    "live_latest",        # intraday only
+    "dhan_token_cache",   # expires in 24h anyway, and is a credential
+    "dhan_history_floor", # re-probed automatically
+}
+
+
+def export_learning_db(dest_path):
+    """Copy every irreplaceable table into a fresh, small SQLite file.
+
+    Returns {table: rows}. Indexes are deliberately not copied: this is a
+    transport format, and _db() rebuilds every index on restore.
+    """
+    if os.path.exists(dest_path):
+        os.remove(dest_path)
+    parent = os.path.dirname(dest_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    src = sqlite3.connect(DATA_DB, timeout=60)
+    dst = sqlite3.connect(dest_path, timeout=60)
+    try:
+        tables = src.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL").fetchall()
+        copied = {}
+        for name, sql in tables:
+            if name in REBUILDABLE_TABLES:
+                continue
+            dst.execute(sql)
+            cur = src.execute(f'SELECT * FROM "{name}"')
+            placeholders = ",".join("?" * len(cur.description))
+            n = 0
+            while True:
+                batch = cur.fetchmany(2000)
+                if not batch:
+                    break
+                dst.executemany(f'INSERT INTO "{name}" VALUES({placeholders})', batch)
+                n += len(batch)
+            copied[name] = n
+        dst.commit()
+        return copied
+    finally:
+        src.close()
+        dst.close()
+
+
+def import_learning_db(src_path):
+    """Merge a learning backup into the live database.
+
+    Rows are matched column-by-NAME, so a backup taken before a migration added
+    a column still restores. INSERT OR IGNORE means an existing row always wins
+    over a backed-up one: restoring can add history back, never destroy it.
+    """
+    if not os.path.exists(src_path):
+        return {}
+    con = _db()  # guarantees the live schema exists before merging into it
+    try:
+        src = sqlite3.connect(src_path, timeout=60)
+        try:
+            tables = [r[0] for r in src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            src_cols = {t: [r[1] for r in src.execute(f'PRAGMA table_info("{t}")')] for t in tables}
+        finally:
+            src.close()
+        con.execute("ATTACH DATABASE ? AS bak", (src_path,))
+        restored = {}
+        try:
+            for t in tables:
+                if t in REBUILDABLE_TABLES:
+                    continue
+                live_cols = [r[1] for r in con.execute(f'PRAGMA table_info("{t}")')]
+                if not live_cols:
+                    continue
+                shared = [c for c in src_cols[t] if c in live_cols]
+                if not shared:
+                    continue
+                cols = ",".join(f'"{c}"' for c in shared)
+                before = int(con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0])
+                con.execute(f'INSERT OR IGNORE INTO "{t}" ({cols}) SELECT {cols} FROM bak."{t}"')
+                after = int(con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0])
+                if after != before:
+                    restored[t] = after - before
+            con.commit()
+        finally:
+            con.execute("DETACH DATABASE bak")
+        return restored
+    finally:
+        con.close()
+
+
+def _github_put_file(path_in_repo, local_path, message):
+    """Create-or-update one file in the backup repo. Returns (ok, reason)."""
+    repo = _github_setting("GITHUB_REPO")
+    branch = _github_backup_branch()
+    if branch:
+        ok, msg = _github_ensure_branch(repo, branch)
+        if not ok:
+            return False, msg
+    url = f"https://api.github.com/repos/{repo}/contents/{path_in_repo}"
+    with open(local_path, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode()
+    sha = None
+    r = requests.get(url, headers=_github_headers(), timeout=30,
+                     params={"ref": branch} if branch else None)
+    if r.status_code == 200:
+        sha = r.json().get("sha")
+    elif r.status_code in (401, 403):
+        return False, _github_error_hint(r.status_code, r.text)
+    payload = {"message": message, "content": content_b64}
+    if sha:
+        payload["sha"] = sha
+    if branch:
+        payload["branch"] = branch
+    put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=120)
+    if put_r.status_code in (200, 201):
+        return True, ""
+    return False, _github_error_hint(put_r.status_code, put_r.text)
+
+
+def backup_learning_to_github(return_reason=False):
+    """Push only the irreplaceable tables. Small, fast, safe to call often."""
+    global _GITHUB_LAST_ERROR
+
+    def done(ok, reason=""):
+        global _GITHUB_LAST_ERROR
+        _GITHUB_LAST_ERROR = "" if ok else reason
+        return (ok, reason) if return_reason else ok
+
+    if not _github_configured():
+        missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
+        return done(False, "Not configured — missing " + " and ".join(missing) + ".")
+    if not os.path.exists(DATA_DB):
+        return done(False, f"No local database at {DATA_DB} — nothing to back up yet.")
+    tmp = os.path.join(tempfile.gettempdir(), "learning_backup.sqlite3")
+    try:
+        copied = export_learning_db(tmp)
+        rows = sum(copied.values())
+        if rows <= 0:
+            # Never overwrite a good backup with an empty one. This is the exact
+            # failure that loses everything: a reboot starts an empty database,
+            # an automatic backup fires, and the only surviving copy is erased.
+            return done(False, "Local learning tables are empty — refusing to overwrite the "
+                               "remote backup with an empty file.")
+        ok, reason = _github_put_file(
+            LEARNING_BACKUP_PATH, tmp,
+            f"Learning-data backup {datetime.now().isoformat(timespec='seconds')} ({rows} rows)")
+        kb = os.path.getsize(tmp) / 1024
+        return done(ok, reason if not ok else
+                    f"Backed up {rows:,} rows ({kb:.0f} KB) to {LEARNING_BACKUP_PATH}.")
+    except Exception as exc:
+        return done(False, f"{type(exc).__name__}: {exc}")
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def restore_learning_from_github(return_reason=False):
+    """Pull the learning backup and merge it into the live database."""
+    global _GITHUB_LAST_ERROR
+
+    def done(ok, reason=""):
+        global _GITHUB_LAST_ERROR
+        _GITHUB_LAST_ERROR = "" if ok else reason
+        return (ok, reason) if return_reason else ok
+
+    if not _github_configured():
+        return done(False, "Not configured — set GITHUB_TOKEN and GITHUB_REPO.")
+    repo = _github_setting("GITHUB_REPO")
+    branch = _github_backup_branch()
+    tmp = os.path.join(tempfile.gettempdir(), "learning_restore.sqlite3")
+    try:
+        url = f"https://api.github.com/repos/{repo}/contents/{LEARNING_BACKUP_PATH}"
+        r = requests.get(url, headers=_github_headers(), timeout=60,
+                         params={"ref": branch} if branch else None)
+        if r.status_code != 200:
+            return done(False, _github_error_hint(r.status_code, r.text))
+        with open(tmp, "wb") as f:
+            f.write(base64.b64decode(r.json().get("content", "")))
+        restored = import_learning_db(tmp)
+        total = sum(restored.values())
+        if total <= 0:
+            return done(True, "Backup found, but it added no new rows (already up to date).")
+        detail = ", ".join(f"{k} +{v:,}" for k, v in sorted(restored.items()))
+        return done(True, f"Restored {total:,} rows — {detail}.")
+    except Exception as exc:
+        return done(False, f"{type(exc).__name__}: {exc}")
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+_LAST_LEARNING_BACKUP_TS = None
+
+
 def maybe_backup_db(min_interval_minutes=15):
     """Rate-limited backup trigger - call after any write worth protecting
     (a learning trade recorded, a forward test closed, a candidate added).
-    Only actually uploads if enough time has passed since the last backup
-    this session, so routine activity doesn't spam GitHub commits."""
-    key = "_last_db_backup_ts"
-    last = st.session_state.get(key)
+
+    Backs up the LEARNING tables only. The previous version pushed the entire
+    database including the candle cache, which is tens of megabytes: too slow
+    to run inline and too large to commit repeatedly, so in practice it never
+    protected anything. The interval state lives in a module global rather than
+    st.session_state so the same call works from daily_job.py, where there is
+    no Streamlit session at all.
+    """
+    global _LAST_LEARNING_BACKUP_TS
     now = datetime.now()
+    last = _LAST_LEARNING_BACKUP_TS
     if last is not None and (now - last).total_seconds() < min_interval_minutes * 60:
         return False
-    ok = backup_db_to_github()
+    ok = backup_learning_to_github()
     if ok:
-        st.session_state[key] = now
+        _LAST_LEARNING_BACKUP_TS = now
     return ok
+
 
 restore_db_from_github()
 
@@ -671,6 +929,34 @@ def _db():
     con.commit(); return con
 
 @st.cache_data(ttl=86400,show_spinner=False)
+def _startup_restore_learning():
+    """Bring forward tests and learning history back after a container reboot.
+
+    restore_db_from_github() only fires when the whole-database backup exists.
+    The learning backup is the one that actually gets written on a short
+    interval, so it is the one that usually holds the most recent history. This
+    runs once per process, never raises, and can only ADD rows.
+    """
+    try:
+        if not _github_configured():
+            return False
+        con = _db()
+        try:
+            have = int(con.execute("SELECT COUNT(*) FROM forward_tests").fetchone()[0])
+            have += int(con.execute("SELECT COUNT(*) FROM learning_observations").fetchone()[0]) \
+                if con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='learning_observations'").fetchone() else 0
+        finally:
+            con.close()
+        if have > 0:
+            return False
+        return bool(restore_learning_from_github())
+    except Exception:
+        return False
+
+
+_startup_restore_learning()
+
+
 def dhan_master():
     urls=["https://images.dhan.co/api-data/api-scrip-master.csv",
           "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"]
