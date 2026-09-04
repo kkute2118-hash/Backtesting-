@@ -5,6 +5,8 @@ All engine logic lives in core.py; this file is the UI on top of it. Run with:
 """
 
 import streamlit as st
+import os
+import shutil
 
 st.set_page_config(page_title="Adaptive Trading Intelligence Lab — Professional Final",
                    page_icon="🧠", layout="wide")
@@ -929,7 +931,14 @@ with tabs[3]:
     with rf1:
         _do_refresh = st.button("🔄 REFRESH / RESOLVE POSITIONS", key="fwd_resolve_now")
     with rf2:
-        _last_resolve = _metric_get("forward_last_resolved_at")
+        try:
+            _last_resolve = _metric_get("forward_last_resolved_at")
+        except Exception as _db_exc:
+            # Every tab body runs on every rerun, so an unreadable database here
+            # used to take the whole page down with a redacted traceback rather
+            # than reporting itself in the one tab that needs it.
+            st.error(f"Database unavailable: {_db_exc}")
+            st.stop()
         st.caption(
             f"Checks every open position against the stored daily candles and closes any that hit "
             f"their stop or target. Last run: **{_last_resolve or 'never in this database'}**."
@@ -1508,6 +1517,31 @@ with tabs[8]:
         else:
             st.error(f"❌ Backup failed — {reason}")
             st.caption("Run TEST GITHUB BACKUP for a step-by-step breakdown.")
+
+    # ---- Where the database actually lives -----------------------------------
+    st.markdown("#### 📁 Database location and disk")
+    _db_path = _engine("DATA_DB", "market_data.sqlite3")
+    _in_checkout = os.path.abspath(_db_path).startswith(os.path.abspath(os.getcwd()) + os.sep) \
+        or os.path.dirname(os.path.abspath(_db_path)) == os.path.abspath(os.getcwd())
+    sc1, sc2, sc3 = st.columns(3)
+    try:
+        sc1.metric("Database size", f"{os.path.getsize(_db_path)/1_048_576:.1f} MB"
+                   if os.path.exists(_db_path) else "—")
+    except OSError:
+        sc1.metric("Database size", "—")
+    try:
+        _usage = shutil.disk_usage(os.path.dirname(_db_path) or ".")
+        sc2.metric("Free disk", f"{_usage.free/1_048_576:,.0f} MB")
+    except Exception:
+        sc2.metric("Free disk", "—")
+    sc3.metric("Writable", "yes" if os.access(os.path.dirname(_db_path) or ".", os.W_OK) else "NO")
+    st.caption(f"`{_db_path}`")
+    if _in_checkout:
+        st.error(
+            "🔴 The database is inside the deployed source tree. A deploy can overwrite or "
+            "delete it, and that directory is not dependably writable. Set GTF_DATA_DIR in "
+            "Streamlit Secrets to a writable path."
+        )
 
     # ---- What is actually at risk right now ---------------------------------
     st.markdown("#### 🧬 Irreplaceable data currently held")

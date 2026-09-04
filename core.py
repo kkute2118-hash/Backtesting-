@@ -31,6 +31,7 @@ import bisect
 import os
 import base64
 import tempfile
+import shutil
 import anthropic
 
 
@@ -57,7 +58,48 @@ def index_universe(name):
 
 # ========================= DHAN PERSISTENT DATA ENGINE =========================
 DHAN_BASE_URL="https://api.dhan.co/v2"
-DATA_DB="market_data.sqlite3"
+DATA_DB_FILENAME = "market_data.sqlite3"
+
+
+def _writable_data_dir():
+    """First writable directory OUTSIDE the git checkout, for the database.
+
+    DATA_DB used to be the bare relative filename, which put the live database
+    inside /mount/src/<repo> - the git working tree Streamlit Cloud deploys
+    into. That is the wrong side of the fence in two ways, and both have now
+    actually happened:
+
+      - git owns that directory. A file committed at the same path is checked
+        out straight over the running database, and `git pull` can delete it.
+      - the deployed source tree is not dependably writable. When it is not,
+        every CREATE TABLE for a table that does not exist yet fails with
+        "attempt to write a readonly database" - which surfaces as an
+        unreadable redacted traceback pointing at whichever table happened to
+        be missing.
+
+    Set GTF_DATA_DIR (or DATA_DB for a full path) to override.
+    """
+    candidates = [
+        os.environ.get("GTF_DATA_DIR"),
+        os.path.join(os.path.expanduser("~"), ".gtf_data"),
+        os.path.join(tempfile.gettempdir(), "gtf_data"),
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        try:
+            os.makedirs(base, exist_ok=True)
+            probe = os.path.join(base, ".write_probe")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
+            return base
+        except Exception:
+            continue
+    return os.getcwd()  # last resort: previous behaviour
+
+
+DATA_DB = os.environ.get("DATA_DB") or os.path.join(_writable_data_dir(), DATA_DB_FILENAME)
 
 # ---- GitHub-based DB backup/restore (Tier 1 fix for Streamlit Cloud's
 # ephemeral filesystem: every reboot/redeploy clones a fresh container from
@@ -668,12 +710,38 @@ def maybe_backup_db(min_interval_minutes=15):
     return ok
 
 
+def _migrate_legacy_db_location():
+    """Move a database left in the git checkout to the new writable location.
+
+    Only ever copies, and only when the legacy file actually holds rows and the
+    new location does not - so it can never overwrite live data, and re-running
+    it is a no-op.
+    """
+    legacy = os.path.abspath(DATA_DB_FILENAME)
+    if os.path.abspath(DATA_DB) == legacy or not os.path.exists(legacy):
+        return False
+    try:
+        if db_row_count(legacy) <= 0:
+            return False
+        if os.path.exists(DATA_DB) and db_row_count(DATA_DB) > 0:
+            return False
+        os.makedirs(os.path.dirname(DATA_DB) or ".", exist_ok=True)
+        shutil.copy2(legacy, DATA_DB)
+        return True
+    except Exception:
+        return False
+
+
+_migrate_legacy_db_location()
 restore_db_from_github()
 
 DHAN_MIN_INTERVAL=0.205  # stay below the documented 5 data-API requests/sec
 _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
 _DHAN_LAST_DATA_ERRORS=[]
+
+# Set when the schema could not be applied at import time (unwritable/full disk).
+_STARTUP_SCHEMA_ERROR=""
 
 # DH-907 ("no data present") is NOT a failure the way a 4xx/5xx is: it is Dhan
 # telling us the requested window simply predates the symbol's listing (or
@@ -825,8 +893,58 @@ def _dhan_headers():
         "Content-Type":"application/json","Accept":"application/json"
     }
 
+class DatabaseUnavailable(sqlite3.OperationalError):
+    """A database fault the user can actually act on.
+
+    Subclasses OperationalError so every existing `except sqlite3.Error` and
+    `except Exception` handler keeps working unchanged; only the message
+    improves.
+    """
+
+
+def _db_error_hint(exc):
+    """Turn a raw SQLite error into something that names the cause and the fix."""
+    msg = str(exc).lower()
+    where = f"Database file: {DATA_DB}"
+    try:
+        usage = shutil.disk_usage(os.path.dirname(DATA_DB) or ".")
+        where += f" (free disk: {usage.free / 1_048_576:.0f} MB)"
+    except Exception:
+        pass
+    if "readonly" in msg or "read-only" in msg:
+        return ("The database is not writable, so tables cannot be created or updated. "
+                "This happens when the database sits inside the deployed source tree, "
+                "which is not dependably writable. Set GTF_DATA_DIR to a writable "
+                f"directory, or reboot the app from 'Manage app'. {where}. Original: {exc}")
+    if "disk is full" in msg or "disk i/o" in msg or "no space" in msg:
+        return ("The disk is full, so the database cannot grow. Free space by reducing the "
+                "synced history range, or reboot the app to start from a clean container. "
+                f"{where}. Original: {exc}")
+    if "unable to open" in msg:
+        return ("The database file could not be opened - its directory is missing or not "
+                f"writable. Set GTF_DATA_DIR to a writable directory. {where}. Original: {exc}")
+    if "locked" in msg:
+        return ("The database is locked by another operation that is still running. Wait for "
+                f"the current sync or scan to finish and try again. {where}. Original: {exc}")
+    return f"{exc}. {where}."
+
+
 def _db():
-    con=sqlite3.connect(DATA_DB,timeout=60,check_same_thread=False)
+    """Open the database, applying the schema. Raises DatabaseUnavailable with a
+    message naming the actual cause when SQLite cannot read or write the file."""
+    try:
+        return _db_open()
+    except DatabaseUnavailable:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseUnavailable(_db_error_hint(exc)) from exc
+
+
+def _db_open():
+    try:
+        con=sqlite3.connect(DATA_DB,timeout=60,check_same_thread=False)
+    except sqlite3.Error as exc:
+        raise DatabaseUnavailable(_db_error_hint(exc)) from exc
     con.execute("""CREATE TABLE IF NOT EXISTS candles(
         symbol TEXT NOT NULL, dt TEXT NOT NULL, open REAL, high REAL, low REAL,
         close REAL, volume REAL, PRIMARY KEY(symbol,dt))""")
@@ -928,7 +1046,6 @@ def _db():
     )""")
     con.commit(); return con
 
-@st.cache_data(ttl=86400,show_spinner=False)
 def _startup_restore_learning():
     """Bring forward tests and learning history back after a container reboot.
 
@@ -957,6 +1074,7 @@ def _startup_restore_learning():
 _startup_restore_learning()
 
 
+@st.cache_data(ttl=86400,show_spinner=False)
 def dhan_master():
     urls=["https://images.dhan.co/api-data/api-scrip-master.csv",
           "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"]
@@ -5146,7 +5264,13 @@ def ensure_engine_tables():
     finally:
         con.close()
 
-ensure_engine_tables()
+try:
+    ensure_engine_tables()
+except sqlite3.Error as _schema_exc:
+    # Surfaced by the UI instead. Letting this escape at import time replaces
+    # every panel - including the one that names the cause - with a bare
+    # ImportError.
+    _STARTUP_SCHEMA_ERROR = str(_schema_exc)
 
 def _metric_set(key, value):
     con = _db()
@@ -6112,7 +6236,13 @@ def _ensure_backtest_tables():
     finally:
         con.close()
 
-_ensure_backtest_tables()
+try:
+    _ensure_backtest_tables()
+except sqlite3.Error as _schema_exc:
+    # Surfaced by the UI instead. Letting this escape at import time replaces
+    # every panel - including the one that names the cause - with a bare
+    # ImportError.
+    _STARTUP_SCHEMA_ERROR = str(_schema_exc)
 
 def _persist_backtest(bt, period, start_date, end_date, threshold, universe_size, elapsed, status="COMPLETED"):
     _ensure_backtest_tables()
