@@ -46,6 +46,19 @@ INDEX_URLS = {
     "Nifty Midcap 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
 }
 
+# The full NSE cash list, offered alongside the four index CSVs. It is resolved
+# from Dhan's scrip master rather than niftyindices.com, so it is the only option
+# that reaches beyond an index's membership.
+FULL_NSE_UNIVERSE = "NSE All Cash (~2000)"
+
+# Single source of truth for every universe picker in the UI and for
+# daily_job.py. Before this existed the same four-item list was copy-pasted into
+# ten separate widgets, which is why nse_liquid_universe() - the ~2000-name list
+# - was reachable from exactly one tab and every other scan silently topped out
+# at Nifty 500.
+UNIVERSE_CHOICES = [FULL_NSE_UNIVERSE] + list(INDEX_URLS.keys())
+
+
 @st.cache_data(ttl=86400)
 def index_universe(name):
     r = requests.get(INDEX_URLS[name], headers={"User-Agent":"Mozilla/5.0"}, timeout=30)
@@ -53,6 +66,33 @@ def index_universe(name):
     df = pd.read_csv(pd.io.common.BytesIO(r.content))
     col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
     return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
+
+
+def resolve_universe(name):
+    """Ticker list for any name in UNIVERSE_CHOICES.
+
+    Use this, never index_universe(), anywhere a user picks a universe:
+    index_universe() only knows the index CSVs and raises KeyError on the
+    full-NSE option.
+    """
+    if str(name).strip() == FULL_NSE_UNIVERSE:
+        if not dhan_configured():
+            raise RuntimeError(
+                f"'{FULL_NSE_UNIVERSE}' is built from Dhan's instrument master, so it needs "
+                "Dhan credentials. Add DHAN_CLIENT_ID plus DHAN_PIN + DHAN_TOTP_SECRET (or "
+                "DHAN_ACCESS_TOKEN) to Streamlit Secrets, or pick one of the Nifty index "
+                "universes instead."
+            )
+        return nse_liquid_universe()
+    return index_universe(name)
+
+
+def resolve_universes(names):
+    """Union of several universe names, de-duplicated and sorted."""
+    out = set()
+    for n in names or []:
+        out.update(resolve_universe(n))
+    return sorted(out)
 
 
 # ========================= DHAN PERSISTENT DATA ENGINE =========================

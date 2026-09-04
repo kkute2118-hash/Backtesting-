@@ -31,7 +31,9 @@ Configuration comes from environment variables (see core._secret):
                DHAN_PIN + DHAN_TOTP_SECRET   (or DHAN_ACCESS_TOKEN)
                GH_BACKUP_TOKEN + GH_REPO     (the database lives there)
     optional   DB_BACKUP_BRANCH  dedicated branch for the backup commits
-               SCAN_UNIVERSE     default "Nifty 500"
+               SCAN_UNIVERSE     default "Nifty 500"; any name in
+                                 core.UNIVERSE_CHOICES, including
+                                 "NSE All Cash (~2000)" for the full list
                SCAN_STRATEGIES   default "1,2,3,4"
                SCAN_MIN_SCORE    default "85"
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
@@ -227,7 +229,7 @@ def run_daily():
                      "syncing and backing up only")
 
     universes = _universes()
-    tickers = sorted({t for u in universes for t in core.index_universe(u)})
+    tickers = core.resolve_universes(universes)
     log("universe", f"{', '.join(universes)} — {len(tickers):,} symbols")
 
     step_sync(tickers, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
