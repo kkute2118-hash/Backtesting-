@@ -1403,6 +1403,46 @@ with tabs[8]:
                     st.success("✅ New access token generated and cached.")
                 except Exception as e:
                     st.error(f"Token renewal failed: {e}")
+
+        # "Invalid TOTP" has exactly two plausible causes and they need
+        # opposite fixes: a wrong/stale DHAN_TOTP_SECRET, or clock skew on this
+        # server (TOTP is time-based, so a server clock more than ~30s off
+        # produces codes Dhan rejects even when the secret is perfect).
+        # Showing the code this server generates right now, next to its clock,
+        # tells the two apart in one glance instead of guessing.
+        with st.expander("🩺 TOTP diagnostic — 'Invalid TOTP' troubleshooting"):
+            try:
+                import pyotp
+                from datetime import timezone as _tz
+                _secret_val = str(_secret("DHAN_TOTP_SECRET") or "").strip()
+                if not _secret_val:
+                    st.warning("DHAN_TOTP_SECRET is not set.")
+                else:
+                    _totp = pyotp.TOTP(_secret_val)
+                    _now_utc = datetime.now(_tz.utc)
+                    _seconds_left = 30 - (int(_now_utc.timestamp()) % 30)
+                    d1, d2 = st.columns(2)
+                    d1.metric("Code this server generates now", _totp.now())
+                    d2.metric("Valid for", f"{_seconds_left}s")
+                    st.caption(
+                        f"Server UTC time: **{_now_utc.strftime('%Y-%m-%d %H:%M:%S')}** · "
+                        f"secret length: **{len(_secret_val)}** chars · "
+                        f"characters outside base32 (A-Z, 2-7): "
+                        f"**{sorted(set(_secret_val.upper()) - set('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567='))}**"
+                    )
+                    st.markdown(
+                        "**Compare the code above with your authenticator app right now:**\n\n"
+                        "- **They match, but Dhan still says Invalid TOTP** → the secret is right; the problem is "
+                        "on Dhan's side (TOTP not fully activated for API login, or reset in their console). "
+                        "Re-run the TOTP setup in Dhan's console and paste the new secret.\n"
+                        "- **They differ** → this server's `DHAN_TOTP_SECRET` is not the secret your authenticator "
+                        "was seeded with (wrong value, a stale one from a previous setup, or stray characters — "
+                        "check the 'characters outside base32' list above; it should be empty).\n"
+                        "- **Server UTC time is visibly wrong** → clock skew; codes will be rejected regardless of "
+                        "the secret."
+                    )
+            except Exception as e:
+                st.error(f"Could not generate a diagnostic code: {e}")
     elif _dhan_manual_token_configured():
         st.warning("Using a manually-pasted DHAN_ACCESS_TOKEN. Dhan tokens expire every 24h — you'll need to regenerate it in Dhan's console and update Streamlit Secrets daily. Add DHAN_PIN and DHAN_TOTP_SECRET to Secrets to switch to automatic renewal.")
     else:
