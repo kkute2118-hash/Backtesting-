@@ -796,6 +796,57 @@ def render_data_freshness_banner(tickers, now=None):
     return status
 
 
+DHAN_RETRY_STATUSES = (429, 500, 502, 503, 504)
+
+
+def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
+    """Single entry point for every Dhan data-API POST.
+
+    Two things every caller needs and only dhan_history() used to do:
+      - the global rate-limit throttle (DHAN_MIN_INTERVAL between requests,
+        shared across threads via _DHAN_RATE_LOCK)
+      - retry with exponential backoff on 429/5xx/DH-904, honouring a
+        Retry-After header when Dhan sends one
+
+    dhan_live_ltp() previously had NEITHER, so it fired an unthrottled request
+    that could trip Dhan's per-second limit on its own - and once tripped, the
+    throttled-but-retrying calls right after it (historical) burned all their
+    retries while still inside the same cooldown. That is exactly the
+    "Authenticated LTP API: FAIL / Authenticated historical API: FAIL" pair
+    the Dhan Connection Test reported, with a 429 on /marketfeed/ltp.
+
+    Returns the successful Response. Raises RuntimeError with the last error
+    text when every attempt fails, or immediately on a non-retryable status.
+    """
+    global _DHAN_LAST_REQUEST
+    last_error = None
+    for attempt in range(attempts):
+        with _DHAN_RATE_LOCK:
+            wait = DHAN_MIN_INTERVAL - (time.monotonic() - _DHAN_LAST_REQUEST)
+            if wait > 0:
+                time.sleep(wait)
+            _DHAN_LAST_REQUEST = time.monotonic()
+        r = requests.post(f"{DHAN_BASE_URL}{path}", headers=_dhan_headers(),
+                          json=payload, timeout=timeout)
+        if r.ok:
+            return r
+        last_error = f"Dhan {label} {r.status_code}: {r.text[:250]}"
+        if r.status_code in DHAN_RETRY_STATUSES or "DH-904" in r.text:
+            backoff = min(8, 2 ** attempt)
+            # Dhan does not always send Retry-After, but when it does it is
+            # authoritative about how long the cooldown actually lasts.
+            try:
+                retry_after = float(r.headers.get("Retry-After", "") or 0)
+                if retry_after > 0:
+                    backoff = max(backoff, min(30.0, retry_after))
+            except (TypeError, ValueError):
+                pass
+            time.sleep(backoff)
+            continue
+        raise RuntimeError(last_error)
+    raise RuntimeError(last_error or f"Dhan {label} request failed")
+
+
 def dhan_history(symbol,start_date,end_date):
     clean=str(symbol).upper().replace(".NS","")
     sid=dhan_map().get(clean)
@@ -804,22 +855,7 @@ def dhan_history(symbol,start_date,end_date):
              "expiryCode":0,"oi":False,
              "fromDate":pd.Timestamp(start_date).strftime("%Y-%m-%d"),
              "toDate":(pd.Timestamp(end_date)+pd.Timedelta(days=1)).strftime("%Y-%m-%d")}
-    global _DHAN_LAST_REQUEST
-    last_error=None
-    for attempt in range(5):
-        with _DHAN_RATE_LOCK:
-            wait=DHAN_MIN_INTERVAL-(time.monotonic()-_DHAN_LAST_REQUEST)
-            if wait>0: time.sleep(wait)
-            _DHAN_LAST_REQUEST=time.monotonic()
-        r=requests.post(f"{DHAN_BASE_URL}/charts/historical",headers=_dhan_headers(),
-                        json=payload,timeout=45)
-        if r.ok: break
-        last_error=f"Dhan historical {r.status_code}: {r.text[:250]}"
-        if r.status_code in (429,500,502,503,504) or "DH-904" in r.text:
-            time.sleep(min(8,2**attempt)); continue
-        raise RuntimeError(last_error)
-    else:
-        raise RuntimeError(last_error or "Dhan historical request failed")
+    r=_dhan_post("/charts/historical",payload,timeout=45,label="historical")
     j=r.json()
     if "close" not in j:raise RuntimeError("Unexpected Dhan historical response")
     d=pd.DataFrame({k:j.get(k,[]) for k in ["open","high","low","close","volume"]})
@@ -974,9 +1010,9 @@ def dhan_live_ltp(symbols):
     pairs=[(mp[s.replace(".NS","").upper()],s.replace(".NS","").upper())
            for s in symbols if s.replace(".NS","").upper() in mp]
     if not pairs:return {}
-    r=requests.post(f"{DHAN_BASE_URL}/marketfeed/ltp",headers=_dhan_headers(),
-                    json={"NSE_EQ":[int(a) for a,b in pairs]},timeout=20)
-    r.raise_for_status()
+    # Throttled + retried like every other Dhan data call - see _dhan_post().
+    r=_dhan_post("/marketfeed/ltp",{"NSE_EQ":[int(a) for a,b in pairs]},
+                 timeout=20,label="LTP")
     raw=r.json().get("data",{}).get("NSE_EQ",{});rev={a:b for a,b in pairs}
     return {rev[str(k)]:float(v["last_price"]) for k,v in raw.items()
             if str(k) in rev and isinstance(v,dict) and v.get("last_price") is not None}
@@ -986,16 +1022,11 @@ DHAN_QUOTE_CHUNK = 1000  # Dhan market-feed accepts up to 1000 instruments per r
 
 def _dhan_quote_raw(security_ids):
     """POST /marketfeed/quote for one chunk of NSE_EQ security IDs, honouring the
-    same global data-API rate limit as dhan_history()."""
-    global _DHAN_LAST_REQUEST
-    with _DHAN_RATE_LOCK:
-        wait = DHAN_MIN_INTERVAL - (time.monotonic() - _DHAN_LAST_REQUEST)
-        if wait > 0:
-            time.sleep(wait)
-        _DHAN_LAST_REQUEST = time.monotonic()
-    r = requests.post(f"{DHAN_BASE_URL}/marketfeed/quote", headers=_dhan_headers(),
-                      json={"NSE_EQ": [int(s) for s in security_ids]}, timeout=30)
-    r.raise_for_status()
+    same global data-API rate limit AND 429 backoff as every other Dhan data
+    call - see _dhan_post(). It used to throttle but not retry, so a single 429
+    aborted the whole quote snapshot instead of waiting out the cooldown."""
+    r = _dhan_post("/marketfeed/quote", {"NSE_EQ": [int(s) for s in security_ids]},
+                   timeout=30, label="quote")
     return r.json().get("data", {}).get("NSE_EQ", {}) or {}
 
 
