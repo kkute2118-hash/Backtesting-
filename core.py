@@ -417,6 +417,29 @@ _DHAN_RATE_LOCK=threading.Lock()
 _DHAN_LAST_REQUEST=0.0
 _DHAN_LAST_DATA_ERRORS=[]
 
+# DH-907 ("no data present") is NOT a failure the way a 4xx/5xx is: it is Dhan
+# telling us the requested window simply predates the symbol's listing (or
+# post-dates its last published session). Recording it in _DHAN_LAST_DATA_ERRORS
+# turned every recently listed Nifty-500 constituent into a permanent red error
+# on every single sync, because the head-gap request below the stock's own
+# listing date can never succeed. These are tracked separately and reported as
+# an expected condition instead.
+_DHAN_LAST_NO_DATA=[]
+_DHAN_NO_DATA_LOCK=threading.Lock()
+
+
+class DhanNoDataError(RuntimeError):
+    """Dhan answered DH-907: no candles exist in the requested date range."""
+
+
+def _note_no_data(symbol,start_date,end_date,scope):
+    """Record one DH-907 window for the Data Manager, newest-last, de-duplicated."""
+    entry=(f"{str(symbol).upper().replace('.NS','')}: no Dhan data for "
+           f"{pd.Timestamp(start_date).date()} to {pd.Timestamp(end_date).date()} ({scope})")
+    global _DHAN_LAST_NO_DATA
+    with _DHAN_NO_DATA_LOCK:
+        _DHAN_LAST_NO_DATA=[e for e in _DHAN_LAST_NO_DATA if e!=entry][-199:]+[entry]
+
 # A WebSocket tick older than this is treated as stale and re-fetched over REST,
 # so a dead/disconnected feed can never masquerade as a current price.
 LIVE_TICK_MAX_AGE_MINUTES = 10
@@ -617,6 +640,13 @@ def _db():
     )""")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_diagnostics(
         symbol TEXT PRIMARY KEY, checked_at TEXT, bar_count INTEGER, reason TEXT)""")
+    # Remembers, per symbol, that Dhan has already told us (DH-907) there is
+    # nothing before our earliest stored candle. Without this the head-gap
+    # request for every recently listed stock is re-sent on every single sync,
+    # burning rate-limited API calls to be told "no data" again.
+    con.execute("""CREATE TABLE IF NOT EXISTS dhan_history_floor(
+        symbol TEXT PRIMARY KEY, earliest_available TEXT, probed_from TEXT,
+        checked_at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_freshness_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, synced_at TEXT,
         most_recent_date_pulled TEXT, symbols_updated INTEGER)""")
@@ -831,6 +861,12 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
         if r.ok:
             return r
         last_error = f"Dhan {label} {r.status_code}: {r.text[:250]}"
+        # DH-907 means "no data present for these parameters". Retrying cannot
+        # change that, and neither can the caller - but it is a legitimate,
+        # expected answer for a window that predates a stock's listing, so it
+        # gets its own type instead of being reported as a build failure.
+        if "DH-907" in r.text:
+            raise DhanNoDataError(last_error)
         if r.status_code in DHAN_RETRY_STATUSES or "DH-904" in r.text:
             backoff = min(8, 2 ** attempt)
             # Dhan does not always send Retry-After, but when it does it is
@@ -921,6 +957,31 @@ def _save(con,s,d):
     con.executemany("INSERT OR REPLACE INTO candles VALUES(?,?,?,?,?,?,?)",rows)
     con.commit();return len(rows)
 
+def _read_history_floor(con,symbol):
+    """Return (earliest_available, probed_from) previously proven empty, or None."""
+    row=con.execute("SELECT earliest_available,probed_from FROM dhan_history_floor WHERE symbol=?",
+                    (symbol,)).fetchone()
+    if not row or not row[0] or not row[1]:
+        return None
+    try:
+        return pd.Timestamp(row[0]).date(),pd.Timestamp(row[1]).date()
+    except Exception:
+        return None
+
+
+def _write_history_floor(con,symbol,earliest_available,probed_from):
+    con.execute("""INSERT INTO dhan_history_floor(symbol,earliest_available,probed_from,checked_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(symbol) DO UPDATE SET
+                       earliest_available=excluded.earliest_available,
+                       probed_from=excluded.probed_from,
+                       checked_at=excluded.checked_at""",
+                (symbol,pd.Timestamp(earliest_available).strftime("%Y-%m-%d"),
+                 pd.Timestamp(probed_from).strftime("%Y-%m-%d"),
+                 datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+
+
 def update_dhan_symbol(symbol,start_date,end_date,refresh_tail_days=0):
     """Fill only the missing head/tail ranges for one symbol.
 
@@ -930,20 +991,53 @@ def update_dhan_symbol(symbol,start_date,end_date,refresh_tail_days=0):
     later revised/adjusted by the exchange) stayed wrong forever - MAX(dt) had
     already advanced past it, and the "end_date > mx" branch below could never
     reach back to correct it. INSERT OR REPLACE makes the re-request idempotent.
+
+    Every request is wrapped for DhanNoDataError (DH-907). The sync asks for
+    ~1900 calendar days of history, which predates the listing date of every
+    recently listed constituent (AFCONS, ATHERENERG, BAJAJHFL, BELRISE,
+    BHARTIHEXA, ANANDRATHI ...). For those the head-gap request can only ever
+    return "no data present", so treating it as an error made them fail loudly
+    on every sync forever. It is recorded as an expected condition instead, and
+    the proven floor is remembered so the futile request is not repeated.
     """
     s=str(symbol).upper().replace(".NS","");con=_db()
     try:
         mn,mx=_bounds(con,s)
-        if not mn:return _save(con,s,dhan_history(s,start_date,end_date))
+        if not mn:
+            try:
+                return _save(con,s,dhan_history(s,start_date,end_date))
+            except DhanNoDataError:
+                _note_no_data(s,start_date,end_date,"Dhan has no candles anywhere in the requested range")
+                return 0
         n=0;mn=pd.Timestamp(mn).date();mx=pd.Timestamp(mx).date()
-        if pd.Timestamp(start_date).date()<mn:n+=_save(con,s,dhan_history(s,start_date,mn-timedelta(days=1)))
+        req_start=pd.Timestamp(start_date).date()
+        if req_start<mn:
+            floor=_read_history_floor(con,s)
+            # Skip only when the earlier probe covered at least this far back
+            # AND our earliest stored bar has not moved since; widening the
+            # historical range re-probes rather than trusting a narrower answer.
+            proven_empty=floor is not None and floor[0]==mn and req_start>=floor[1]
+            if not proven_empty:
+                head_end=mn-timedelta(days=1)
+                try:
+                    n+=_save(con,s,dhan_history(s,req_start,head_end))
+                except DhanNoDataError:
+                    _write_history_floor(con,s,mn,req_start)
+                    _note_no_data(s,req_start,head_end,
+                                  f"Dhan history for this symbol starts at {mn} (listed later than the requested start)")
         tail=int(refresh_tail_days or 0)
         if tail>0:
             tail_start=max(mn,mx-timedelta(days=tail))
             if tail_start<=pd.Timestamp(end_date).date():
-                n+=_save(con,s,dhan_history(s,tail_start,end_date))
+                try:
+                    n+=_save(con,s,dhan_history(s,tail_start,end_date))
+                except DhanNoDataError:
+                    _note_no_data(s,tail_start,end_date,"no sessions published by Dhan for the tail range yet")
         elif pd.Timestamp(end_date).date()>mx:
-            n+=_save(con,s,dhan_history(s,mx+timedelta(days=1),end_date))
+            try:
+                n+=_save(con,s,dhan_history(s,mx+timedelta(days=1),end_date))
+            except DhanNoDataError:
+                _note_no_data(s,mx+timedelta(days=1),end_date,"no sessions published by Dhan for the tail range yet")
         return n
     finally:con.close()
 
@@ -5875,7 +5969,26 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
         _log_sync_freshness(newest, advanced)
 
     return {"symbols": len(symbols), "updated": updated, "latest": newest,
-            "errors": errors[:20], "advanced": advanced}
+            "errors": errors[:20], "advanced": advanced,
+            "no_data": len(_DHAN_LAST_NO_DATA)}
+
+
+def dhan_history_floor_table():
+    """Every symbol Dhan has confirmed has no candles before a given date.
+
+    These are recently listed stocks, not broken downloads: the sync asks for
+    ~1900 calendar days and their listing is more recent than that. Surfacing
+    them as information rather than as red build errors is the whole point of
+    the DH-907 handling in update_dhan_symbol().
+    """
+    con = _db()
+    try:
+        df = pd.read_sql_query(
+            """SELECT symbol, earliest_available, probed_from, checked_at
+               FROM dhan_history_floor ORDER BY earliest_available DESC, symbol""", con)
+    finally:
+        con.close()
+    return df
 
 
 def compute_and_store_sync_diagnostics(tickers):
@@ -5925,12 +6038,27 @@ def compute_and_store_sync_diagnostics(tickers):
             sym, msg = e.split(":", 1)
             err_by_symbol[str(sym).strip().upper().replace(".NS", "")] = msg.strip()
 
+    # Symbols Dhan has already confirmed (DH-907) have no history before their
+    # first stored candle. That is a listing date, not a fault, and it is the
+    # single most common reason a Nifty-500 name sits below 260 bars.
+    con = _db()
+    try:
+        floor_rows = con.execute(
+            f"SELECT symbol,earliest_available FROM dhan_history_floor WHERE symbol IN ({qmarks})",
+            symbols).fetchall()
+    finally:
+        con.close()
+    floor_by_symbol = {r[0]: r[1] for r in floor_rows if r[1]}
+
     out = []
     checked_at = datetime.now().isoformat(timespec="seconds")
     for s in below:
         bc = bar_counts[s]
         if mapping is not None and s not in mapping:
             reason = "Not found in Dhan instrument master — likely a symbol mismatch (index reconstitution: addition/removal/rename)"
+        elif s in floor_by_symbol and bc > 0:
+            reason = (f"Dhan history begins {floor_by_symbol[s]} — nothing exists before that "
+                      f"(recently listed); only {bc} bar(s) available, not an API failure")
         elif s in err_by_symbol:
             reason = f"Dhan API error on last sync: {err_by_symbol[s]}"
         elif mapping is None:
