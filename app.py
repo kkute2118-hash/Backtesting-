@@ -78,8 +78,8 @@ with tabs[1]:
     a,b,c = st.columns(3)
     universes = a.multiselect(
         "Trading universes",
-        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
-        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        UNIVERSE_CHOICES,
+        [u for u in UNIVERSE_CHOICES if u != FULL_NSE_UNIVERSE],
         key="scan_universes"
     )
     scan_mode = b.selectbox(
@@ -112,7 +112,7 @@ with tabs[1]:
     try:
         _freshness_universe=set()
         for u in universes:
-            _freshness_universe.update(index_universe(u))
+            _freshness_universe.update(resolve_universe(u))
         scan_freshness_tickers=sorted(_freshness_universe)
     except Exception as ex:
         scan_freshness_tickers=[]
@@ -195,7 +195,7 @@ with tabs[1]:
 
             universe = set()
             for u in universes:
-                universe.update(index_universe(u))
+                universe.update(resolve_universe(u))
             tickers = sorted(universe)
 
             # Scanner is LOCAL-ONLY. Data acquisition belongs exclusively to the
@@ -205,6 +205,19 @@ with tabs[1]:
             with st.spinner(f"Loading local price cache for {len(tickers):,} stocks..."):
                 data = load_scan_dataset(tickers)
             scan_load_seconds = time.perf_counter() - t0
+
+            # The scanner is local-only by design, so a universe is silently
+            # capped by what the Data Manager has actually downloaded. Selecting
+            # 2,000 symbols while the cache holds 500 scans 500 and says nothing
+            # about the other 1,500 unless this is surfaced.
+            if len(data) < len(tickers):
+                st.warning(
+                    f"⚠️ Scanning **{len(data):,} of {len(tickers):,}** selected stocks. "
+                    f"The other {len(tickers) - len(data):,} have no local candles (or fewer "
+                    "than 260 bars) yet. Go to **Dhan Data Manager**, set *Sync universe* to the "
+                    "same universe, and run SYNC ONLY MISSING DATA — the scanner never downloads "
+                    "on its own."
+                )
 
             if not data:
                 st.error("Local dataset is empty/incomplete. Use Data Manager → SYNC ONLY MISSING DATA once, then scan again. Scanner itself never downloads historical data.")
@@ -656,12 +669,12 @@ with tabs[2]:
     c1,c2,c3=st.columns(3)
     period=c1.selectbox("Time Span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="bt_period_final")
     threshold=c2.number_input("Score threshold",0,100,85,1,key="bt_threshold_final")
-    universes=c3.multiselect("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],default=["Nifty 500"],key="bt_universes_final")
+    universes=c3.multiselect("Universe",UNIVERSE_CHOICES,default=["Nifty 500"],key="bt_universes_final")
     start_date,end_date=_bt_period(period);data_start=_bt_required_data_start(start_date)
     tickers=[]
     if universes:
         try:
-            tickers=sorted(set(sum([index_universe(u) for u in universes],[])))
+            tickers=sorted(set(sum([resolve_universe(u) for u in universes],[])))
         except Exception as e:
             st.error(f"Could not load index universe constituents (network/data issue): {e}")
     st.info(f"{period} | Signal window {start_date} → {end_date} | Warm-up {data_start} → {start_date} | {len(tickers):,} stocks | S1–S4 | local SQLite only | forward gate ≥{threshold}")
@@ -1234,7 +1247,7 @@ with tabs[5]:
         )
         fc1, fc2, fc3 = st.columns([2, 1, 1])
         fund_universes = fc1.multiselect(
-            "Universe", ["Nifty 500", "Nifty Smallcap 100", "Nifty Smallcap 250", "Nifty Midcap 150"],
+            "Universe", UNIVERSE_CHOICES,
             default=["Nifty 500"], key="fund_screen_universe"
         )
         fund_run_a = fc2.checkbox("Screen A", value=True, key="fund_run_a")
@@ -1682,7 +1695,8 @@ with tabs[8]:
     )
     sync_universe=st.selectbox(
         "Sync universe",
-        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        UNIVERSE_CHOICES,
+        index=UNIVERSE_CHOICES.index("Nifty 500"),
         key="dm_sync_universe"
     )
     sync_days=st.selectbox(
@@ -1694,7 +1708,7 @@ with tabs[8]:
     )
     if st.button(f"⚡ FAST TOP-UP (last {LATEST_SYNC_TAIL_DAYS} days only)",key="dm_sync_tail"):
         try:
-            tail_tickers=index_universe(sync_universe)
+            tail_tickers=resolve_universe(sync_universe)
             tailbar=st.progress(0.0)
             with st.spinner(f"Topping up the latest sessions for {len(tail_tickers):,} stocks..."):
                 tail_summary=sync_latest_sessions(
@@ -1723,7 +1737,7 @@ with tabs[8]:
 
     if st.button("🔄 SYNC ONLY MISSING DATA",type="primary",key="dm_sync_missing"):
         try:
-            sync_tickers=index_universe(sync_universe)
+            sync_tickers=resolve_universe(sync_universe)
             sync_symbols=[str(t).upper().replace(".NS","") for t in sync_tickers]
             con=_db()
             try:
@@ -1845,13 +1859,13 @@ with tabs[8]:
         )
         diag_universes=st.multiselect(
             "Universe(s) to diagnose",
-            ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+            UNIVERSE_CHOICES,
             default=[sync_universe],
             key="dm_diag_universes"
         )
         if diag_universes:
             try:
-                diag_tickers=sorted(set(sum([index_universe(u) for u in diag_universes],[])))
+                diag_tickers=sorted(set(sum([resolve_universe(u) for u in diag_universes],[])))
                 diag_df=compute_and_store_sync_diagnostics(diag_tickers)
                 if diag_df.empty:
                     st.success(f"✅ All {len(diag_tickers):,} stocks in the selected universe(s) have ≥260 local bars.")
@@ -1906,6 +1920,11 @@ with tabs[9]:
         "(scan_s4_sepa) → optional fundamental Screen C."
     )
 
+    sepa_universe = st.selectbox(
+        "Universe", UNIVERSE_CHOICES,
+        index=UNIVERSE_CHOICES.index(FULL_NSE_UNIVERSE),
+        key="sepa_universe"
+    )
     sepa_c1, sepa_c2, sepa_c3 = st.columns(3)
     sepa_min_score = sepa_c1.slider("Minimum SEPA quality score", 0, 100, 60, 5, key="sepa_min_score")
     sepa_max_stocks = sepa_c2.number_input("Max stocks to scan (0 = all)", 0, 5000, 0, 100, key="sepa_max_stocks")
@@ -1919,7 +1938,7 @@ with tabs[9]:
     if st.button("🎯 Scan S4 SEPA", type="primary", key="sepa_scan_run"):
         try:
             with st.spinner("Loading the NSE liquid universe..."):
-                sepa_tickers = nse_liquid_universe()
+                sepa_tickers = resolve_universe(sepa_universe)
                 sepa_data = load_scan_dataset(sepa_tickers)
             if not sepa_data:
                 st.error(
@@ -1969,11 +1988,11 @@ with tabs[9]:
         "instead of an assumption. Exact S4 itself is never changed by this."
     )
     ec1,ec2=st.columns(2)
-    ext_universe=ec1.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="s4ext_universe")
+    ext_universe=ec1.selectbox("Universe",UNIVERSE_CHOICES,index=UNIVERSE_CHOICES.index("Nifty 500"), key="s4ext_universe")
     ext_period=ec2.selectbox("Backtest span",["1 Year","2 Years","3 Years"],index=1,key="s4ext_period")
     if st.button("📐 Run EMA20 Extension Calibration",type="primary",key="s4ext_run"):
         try:
-            tickers=index_universe(ext_universe)
+            tickers=resolve_universe(ext_universe)
         except Exception as e:
             st.error(f"Could not load index universe constituents (network/data issue): {e}")
             tickers=[]
@@ -2099,7 +2118,7 @@ with tabs[10]:
     st.caption("Reuses the same local candle cache, fast features, and O(1) regime/safety lookups as the Daily Scanner and Backtest tabs. Makes zero Dhan/API calls.")
     cc1,cc2,cc3,cc4=st.columns(4)
     custom_universes=cc1.multiselect(
-        "Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        "Universe",UNIVERSE_CHOICES,
         default=["Nifty 500"],key="custom_universe"
     )
     custom_period=cc2.selectbox("Backtest span",["6 Months","1 Year","2 Years","3 Years"],index=0,key="custom_period")
@@ -2116,7 +2135,7 @@ with tabs[10]:
             st.warning("Select at least one universe.")
         else:
             try:
-                tickers=sorted(set(sum([index_universe(u) for u in custom_universes],[])))
+                tickers=sorted(set(sum([resolve_universe(u) for u in custom_universes],[])))
             except Exception as e:
                 st.error(f"Could not load index universe constituents (network/data issue): {e}")
                 tickers=[]
@@ -2214,11 +2233,11 @@ with tabs[11]:
     c1,c2,c3=st.columns(3)
     study_years=c1.selectbox("Study period",["6 Months","1 Year","2 Years","3 Years"],index=2,key="s4_walk_years")
     study_threshold=c2.slider("Recovery score",50,95,70,key="s4_walk_score")
-    study_universe=c3.selectbox("Study universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="s4_walk_universe")
+    study_universe=c3.selectbox("Study universe",UNIVERSE_CHOICES,index=UNIVERSE_CHOICES.index("Nifty 500"), key="s4_walk_universe")
     if st.button("🔬 RUN S4 RECOVERY WALK-FORWARD STUDY",type="primary",key="s4_walk_run"):
         try:
             with st.spinner("Running S4 recovery walk-forward study..."):
-                sd,ed=_bt_period(study_years); ticks=index_universe(study_universe)
+                sd,ed=_bt_period(study_years); ticks=resolve_universe(study_universe)
                 data=load_local_market_dataset(tuple(ticks),sd-timedelta(days=1000),ed,160)
                 study=study_s4_recovery_walkforward(data,sd,ed,study_threshold)
             st.session_state["s4_recovery_bt_final"]=study
@@ -2483,7 +2502,7 @@ with tabs[14]:
     ra, rb, rc = st.columns(3)
     radar_universes = ra.multiselect(
         "Universes",
-        ["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],
+        UNIVERSE_CHOICES,
         ["Nifty 500"],
         key="radar_universes"
     )
@@ -2511,7 +2530,7 @@ with tabs[14]:
     try:
         _radar_universe=set()
         for u in radar_universes:
-            _radar_universe.update(index_universe(u))
+            _radar_universe.update(resolve_universe(u))
         radar_tickers=sorted(_radar_universe)
     except Exception as ex:
         radar_tickers=[]
