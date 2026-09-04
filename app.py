@@ -19,7 +19,7 @@ globals().update({k: v for k, v in vars(_core).items() if not k.startswith("__")
 # ========================= UI =========================
 
 st.title("🧠 Adaptive Trading Intelligence Lab — Professional Final")
-st.caption("Dhan-first • persistent local data • exact S1–S4 • no-lookahead walk-forward • adaptive learning • S4 recovery research • fundamentals/news enrichment")
+st.caption("Dhan-first • persistent local data • S1–S3 exact • S4 SEPA (Minervini) • no-lookahead walk-forward • adaptive learning • fundamentals/news enrichment")
 
 tabs=st.tabs([
     "🏠 Dashboard",
@@ -31,7 +31,7 @@ tabs=st.tabs([
     "🏢 Small/Micro Safety",
     "⚡ Live Monitor",
     "💾 Dhan Data Manager",
-    "🧪 S4 Recovery Study",
+    "🎯 S4 SEPA Strategy",
     "🧪 Custom Strategy",
     "🧬 Research & Risk Control",
     "🎓 Strategy Coach",
@@ -274,6 +274,23 @@ with tabs[1]:
                     st.caption("Every displayed setup has already passed ALL rules of its own strategy. Score only ranks valid setups.")
 
 
+            gate_audit = stats.get("safety_gate_audit", pd.DataFrame())
+            gate_excluded = stats.get("safety_gate_excluded", 0)
+            with st.expander(
+                f"🛡️ Universe safety/liquidity gate — {gate_excluded:,} stock(s) excluded before any strategy ran",
+                expanded=False,
+            ):
+                st.caption(
+                    "Applied to every selected strategy (S1-S4) before strategy_signal() runs: "
+                    "manipulation/liquidity checks (advanced_small_micro_safety) plus a choppy "
+                    "price-action filter. A stock excluded here cannot appear under ANY strategy "
+                    "this scan, regardless of which one would otherwise have found it."
+                )
+                if gate_audit is None or gate_audit.empty:
+                    st.info("No gate audit available for this scan.")
+                else:
+                    st.dataframe(gate_audit, width='stretch', hide_index=True)
+
             with st.expander("🔧 Advanced Diagnostics — S2/S4 audits", expanded=False):
                 # Strategy 4 condition audit — shown only when S4 is selected.
                 if 4 in selected_strategies and stats["usable"] > 0:
@@ -303,17 +320,22 @@ with tabs[1]:
                             "Daily EMA volume30 >=50000": bool(pd.notna(z.vol30) and z.vol30 >= 50000),
                             "Daily close >=20": bool(z.close >= 20),
                             "Monthly cross count >=1 OR reclaim": bool((pd.notna(monthly_cross_count) and monthly_cross_count >= 1) or reclaim),
-                            "Daily close <=1.03 EMA20": bool(pd.notna(z.ema20) and z.close <= 1.03*z.ema20)
                         }
                         s4_audit_rows.append({
                             "Ticker": ticker.replace(".NS",""),
                             **conditions,
-                            "S4 EXACT": all(conditions.values())
+                            "S4 SEPA WATCHLIST": all(conditions.values())
                         })
 
                     if s4_audit_rows:
                         s4df = pd.DataFrame(s4_audit_rows)
-                        st.subheader("🧪 Strategy 4 Condition Audit")
+                        st.subheader("🧪 Strategy 4 (SEPA Watchlist) Condition Audit")
+                        st.caption(
+                            "Live S4 now uses the SEPA watchlist gate below, not the old fixed "
+                            "'close <= 1.03x EMA20' proximity rule. The tighter VCP/VCC entry-timing "
+                            "layer (strategy4_sepa_signal) is separate and shown on the S4 SEPA "
+                            "Strategy tab, not here."
+                        )
                         s4counts = pd.DataFrame({
                             "Condition": list(s4df.columns[1:-1]),
                             "Passing stocks": [int(s4df[c].sum()) for c in s4df.columns[1:-1]]
@@ -1653,69 +1675,72 @@ with tabs[8]:
         st.success("Dhan WebSocket stop requested.")
 
 with tabs[9]:
-    st.subheader("🧪 Strategy 4 Recovery Study + Entry Timing")
-    st.markdown("### 🎯 Higher-quality S4 retracement entry")
-    st.info("Research rule: do not buy merely because price reaches a retracement zone. Prefer trend + controlled pullback + reclaim/confirmation + sufficient reward-to-risk. The 38.2–61.8% zone is a heuristic, not a proven probability edge.")
-    s4a,s4b,s4c,s4d=st.columns(4)
-    s4a.metric("Preferred retracement","38.2–61.8%")
-    s4b.metric("Minimum target","≥ 3R")
-    s4c.metric("Confirmation","Reclaim + higher high")
-    s4d.metric("Risk stop","Below pullback low")
-    st.caption("The engine should label setups WAIT / WATCH / BUY-TRIGGER, rather than force a purchase.")
+    st.subheader("🎯 Strategy 4 — SEPA (Specific Entry Point Analysis)")
+    st.caption(
+        "Live S4 now uses the Minervini SEPA methodology (fundamental template, trend template, "
+        "monthly/weekly/daily VCP-VCC entry timing) in place of the old literal-formula rule. This "
+        "replaces the previous 'S4 Recovery Study' research tab - that pattern-study hypothesis is "
+        "fully superseded by SEPA and has been removed."
+    )
+    st.info(
+        "Pipeline: NSE universe (nse_liquid_universe) → safety/liquidity/price-action gate "
+        "(clean_liquid_universe, shared with S1-S3) → SEPA watchlist + VCP/VCC entry timing "
+        "(scan_s4_sepa) → optional fundamental Screen C."
+    )
 
-    st.caption("Research layer only — exact S4 remains unchanged. This study searches for big-move → consolidation/retracement → reclaim → higher-high structures that the strict daily EMA20-close condition can miss.")
-    c1,c2,c3,c4=st.columns(4)
-    s4_min_score=c1.slider("Study score",50,95,70,1,key="s4study_score")
-    impulse_min=c2.slider("Minimum prior impulse",10,60,20,1,key="s4study_impulse")/100
-    base_max=c3.slider("Maximum base range",8,30,18,1,key="s4study_base")/100
-    retr_max=c4.slider("Maximum retracement",30,80,65,1,key="s4study_retr")/100
-    st.info("We are NOT replacing S4. We are creating a separate research hypothesis and measuring whether it has positive expectancy out-of-sample before considering any rule change.")
-    study_universe=st.selectbox("Universe",["Nifty 500","Nifty Smallcap 100","Nifty Smallcap 250","Nifty Midcap 150"],key="s4study_universe")
-    if st.button("🔬 Study S4 Recovery Pattern",type="primary",key="s4study_run"):
+    sepa_c1, sepa_c2, sepa_c3 = st.columns(3)
+    sepa_min_score = sepa_c1.slider("Minimum SEPA quality score", 0, 100, 60, 5, key="sepa_min_score")
+    sepa_max_stocks = sepa_c2.number_input("Max stocks to scan (0 = all)", 0, 5000, 0, 100, key="sepa_max_stocks")
+    sepa_fund_screen = sepa_c3.checkbox("Apply fundamental Screen C", value=False, key="sepa_fund_screen")
+    st.caption(
+        "Screen C's 'Sales QoQ growth' point always reports Unverifiable - Twelve Data's quarterly "
+        "revenue coverage for Indian small/microcaps has never been confirmed. Treat it as a real "
+        "data gap, not a pass."
+    )
+
+    if st.button("🎯 Scan S4 SEPA", type="primary", key="sepa_scan_run"):
         try:
-            with st.spinner("Scanning for S4 recovery candidates..."):
-                tickers=index_universe(study_universe)
-                data=load_local_market_dataset(tuple(tickers),date.today()-timedelta(days=1000),date.today(),160)
-                # Use custom impulse/base settings while retaining the research-only definition.
-                rows=[]
-                for ticker,d in data.items():
-                    if len(d)<160: continue
-                    sig=strategy4_recovery_signal(d,min_impulse=impulse_min,max_base_range=base_max,max_retracement=retr_max).iloc[-1]
-                    score,parts=_s4_recovery_quality(d)
-                    if bool(sig) and score>=s4_min_score:
-                        rows.append({"Ticker":str(ticker).replace(".NS",""),"Study Score":score,"Signal":"RECOVERY → HIGHER HIGH",**parts})
-            res=pd.DataFrame(rows)
-            if res.empty:
-                st.warning("No recovery candidates found with the current research thresholds.")
+            with st.spinner("Loading the NSE liquid universe..."):
+                sepa_tickers = nse_liquid_universe()
+                sepa_data = load_scan_dataset(sepa_tickers)
+            if not sepa_data:
+                st.error(
+                    "Local dataset is empty/incomplete for this universe. Use Data Manager → "
+                    "SYNC ONLY MISSING DATA once, then scan again."
+                )
             else:
-                res=res.sort_values(["Study Score","RelVol"],ascending=[False,False])
-                st.success(f"Found {len(res)} research candidates. These are NOT S4 exact signals.")
-                st.dataframe(res,width='stretch',hide_index=True)
-                st.download_button("⬇️ Download S4 study candidates",res.to_csv(index=False),"s4_recovery_candidates.csv","text/csv")
+                with st.spinner(f"Running the SEPA pipeline across {len(sepa_data):,} stocks..."):
+                    sepa_result, sepa_audit = scan_s4_sepa(
+                        sepa_data,
+                        min_score=sepa_min_score,
+                        max_stocks=(sepa_max_stocks or None),
+                        apply_fundamental_screen=sepa_fund_screen,
+                    )
+                st.session_state["sepa_scan_result"] = sepa_result
+                st.session_state["sepa_scan_audit"] = sepa_audit
         except Exception as ex:
-            st.error(f"S4 recovery study error: {ex}")
+            st.error(f"S4 SEPA scan error: {ex}")
 
-    st.markdown("### What we will learn from this study")
-    st.markdown("""
-- **Impulse quality:** how large the preceding move was before consolidation.
-- **Base quality:** whether volatility and range contracted instead of chaotic distribution.
-- **Retracement depth:** shallow/healthy versus deep breakdown.
-- **Volume behaviour:** contraction during the base and expansion on confirmation.
-- **Reclaim:** EMA20/base-high recovery without requiring the exact S4 daily-close condition.
-- **Higher-high confirmation:** evidence that the recovery is actually resuming, not merely bouncing.
-- **Out-of-sample expectancy:** the pattern only becomes a candidate for a future rule change if it survives walk-forward testing.
-""")
-    st.subheader("🎯 S4 Entry Timing — preferred retracement workflow")
-    st.markdown("""
-**WAIT:** trend/structure is not ready.
-
-**WATCH:** price reaches roughly the 38.2–61.8% pullback zone while the broader trend remains intact.
-
-**BUY-TRIGGER:** only after confirmation such as EMA20 reclaim or a higher high, volume confirmation, and at least ~2.5R to the prior swing high. Stop goes below the pullback low. Prefer a 3R planning target when the structure supports it.
-
-These thresholds are research heuristics—not guaranteed probabilities. The system should rank and label the setup rather than force a purchase.
-""")
-    st.warning("Important: the Study Score and BUY-TRIGGER are decision aids, not a probability of profit. Exact S4 remains unchanged.")
+    sepa_result = st.session_state.get("sepa_scan_result", pd.DataFrame())
+    sepa_audit = st.session_state.get("sepa_scan_audit", pd.DataFrame())
+    if sepa_result.empty:
+        st.info("Run the scan to see SEPA watchlist + entry-timing candidates.")
+    else:
+        st.success(f"Found {len(sepa_result)} SEPA candidate(s).")
+        st.dataframe(sepa_result, width='stretch', hide_index=True)
+        st.download_button(
+            "⬇️ Download SEPA candidates", sepa_result.to_csv(index=False),
+            "s4_sepa_candidates.csv", "text/csv",
+        )
+    if not sepa_audit.empty:
+        passed = int(sepa_audit["Passed"].sum()) if "Passed" in sepa_audit.columns else 0
+        with st.expander(f"🛡️ Universe safety audit ({passed}/{len(sepa_audit)} passed)", expanded=False):
+            st.caption(
+                "Every ticker considered for this scan, and why it was kept or excluded "
+                "(manipulation risk, illiquidity, or choppy price action). Bad names being "
+                "excluded is meant to be visible here, not silent."
+            )
+            st.dataframe(sepa_audit, width='stretch', hide_index=True)
 
     st.divider()
     st.subheader("📐 EMA20 Extension Calibration — is 3% actually the best cutoff?")
