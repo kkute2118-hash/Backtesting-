@@ -8,6 +8,7 @@ import pandas as pd
 
 from app.core.errors import ApiError
 from app.engine import core
+from app.services import bootstrap
 from app.services.serialization import clean_mapping, clean_value, frame_to_records
 
 
@@ -85,6 +86,8 @@ def refresh() -> dict[str, Any]:
     checked, closed = core.refresh_forward_positions()
     core._metric_set("forward_last_resolved_at",
                      pd.Timestamp.now().isoformat(timespec="seconds"))
+    if closed:
+        bootstrap.protect_learning_data()
     return {"checked": int(checked), "closed": int(closed)}
 
 
@@ -102,6 +105,10 @@ def add_candidates(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if missing:
         raise ApiError(f"Candidate rows are missing required fields: {', '.join(sorted(missing))}")
     added = core.add_forward_candidates(frame)
+    if added:
+        # Rate-limited inside the engine, and only the tables that cannot be
+        # rebuilt from any provider.
+        bootstrap.protect_learning_data()
     return {"added": int(added), "submitted": len(frame)}
 
 

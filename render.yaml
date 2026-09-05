@@ -1,36 +1,39 @@
 # Render blueprint for the FastAPI backend.
 #
-# The engine keeps everything in one SQLite file, and the irreplaceable half of
-# it — forward tests, resolved outcomes, accumulated learning — cannot be
-# rebuilt from any provider. So this asks for a persistent disk and points
-# DATA_DB at it, rather than letting the database live on an ephemeral
-# filesystem that a redeploy wipes.
+# Configured for the FREE plan, which has no persistent disk: the filesystem is
+# discarded whenever the service sleeps. The database is therefore protected by
+# the GitHub backup instead — the API restores it on every cold start and pushes
+# it again after a sync (see app/services/bootstrap.py). That makes the three
+# GH_* variables below load-bearing rather than optional: without them, every
+# sleep loses your candles, forward tests and accumulated learning.
 #
-# The frontend is NOT deployed here; it goes to Vercel. See docs/DEPLOYMENT.md.
+# To run without that dependency, switch `plan` to `starter` and uncomment the
+# `disk` block: a real disk is simpler and removes the 15-minute sleep, at a
+# monthly cost.
+#
+# See docs/DEPLOYMENT.md for the full walkthrough.
 
 services:
   - type: web
     name: ati-lab-api
     runtime: python
-    # A persistent disk requires a paid instance. On the free tier the disk is
-    # dropped and the service sleeps, which means re-syncing candles on every
-    # wake — workable only if the GitHub backup is configured.
-    plan: starter
+    plan: free
     region: singapore          # closest to the NSE data you are pulling
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
 
-    disk:
-      name: ati-lab-data
-      mountPath: /var/lib/ati-lab
-      sizeGB: 5
+    # Uncomment together with `plan: starter` above for a real disk.
+    # disk:
+    #   name: ati-lab-data
+    #   mountPath: /var/lib/ati-lab
+    #   sizeGB: 5
 
     envVars:
-      # Keep the database on the persistent disk, never in the checkout.
-      - key: DATA_DB
-        value: /var/lib/ati-lab/market_data.sqlite3
+      # With a disk, point this at its mount path instead.
+      # - key: DATA_DB
+      #   value: /var/lib/ati-lab/market_data.sqlite3
       - key: PYTHON_VERSION
         value: "3.11.9"
 
@@ -58,7 +61,8 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
 
-      # Database backup. Strongly recommended even with a persistent disk.
+      # Database backup. REQUIRED on the free plan — it is the only thing
+      # standing between a container restart and losing everything.
       - key: GH_BACKUP_TOKEN
         sync: false
       - key: GH_REPO
