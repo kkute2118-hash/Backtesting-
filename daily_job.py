@@ -56,6 +56,7 @@ from pathlib import Path
 # unchanged by putting backend/ on the path rather than moving the script.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "backend"))
 from app.engine import core  # noqa: E402
+from app.services import bootstrap  # noqa: E402
 
 
 def log(step, message):
@@ -107,34 +108,58 @@ def _universes():
 # ----------------------------------------------------------------- steps ----
 
 def step_restore():
-    """Pull the last database backup. The runner's filesystem starts empty on
-    every job, so without this the run would build a brand-new database and the
-    backup at the end would overwrite the real one with it."""
+    """Pull the last database backup before anything else touches the store.
+
+    The runner's filesystem starts empty on every job, so without this the run
+    would build a brand-new database and the backup at the end would overwrite
+    the real one with it.
+
+    This defers to the same cold-start path the API server uses, and for the
+    same reason: importing ``core`` runs its learning restore, which leaves the
+    database holding rows, and ``restore_db_from_github()`` then refuses to
+    overwrite it. Calling that function directly here therefore looked like
+    "local database already present, keeping it" on a machine that had just been
+    created — and the backup at the end of the run would have pushed that
+    learning-only database over the real one, destroying the candle history.
+    """
     if not core._github_configured():
         raise RuntimeError(
             "The GitHub backup is not configured (GH_BACKUP_TOKEN / GH_REPO). The database "
             "cannot be restored, and continuing would push an empty database over your saved "
             "forward tests."
         )
-    restored = core.restore_db_from_github()
-    if restored:
+
+    outcome = bootstrap.restore_on_cold_start()
+    if outcome["restored_full"]:
         size = os.path.getsize(core.DATA_DB)
-        log("restore", f"pulled backup from GitHub ({size:,} bytes)")
-    elif os.path.exists(core.DATA_DB) and os.path.getsize(core.DATA_DB) > 0:
-        log("restore", "local database already present, keeping it")
-    else:
-        # First ever run: no backup exists yet. Safe — there is nothing to lose.
-        # Anything else (bad token, wrong repo, missing branch) is recorded by
-        # the engine, and is NOT safe to ignore: continuing would back an empty
-        # database up over the real one.
-        why = core._GITHUB_LAST_ERROR
-        if why:
-            raise RuntimeError(
-                f"Could not restore the database backup: {why} — refusing to continue, because "
-                "backing up now would overwrite your saved forward tests with an empty database."
-            )
-        log("restore", "no backup found on GitHub; starting a new database")
-    return restored
+        log("restore", f"pulled backup from GitHub ({size:,} bytes, "
+                       f"{outcome['candles_after']:,} candles)")
+        return True
+    if outcome["candles_before"] > 0:
+        # Only reachable outside Actions, where the file survives between runs.
+        log("restore", f"local store already holds {outcome['candles_before']:,} candles; "
+                       "keeping it")
+        return False
+
+    # Nothing came back. Exactly one explanation is safe to continue from: no
+    # backup has ever been taken, so there is nothing to lose. Every other one
+    # (bad token, wrong repo, unreadable branch) means a backup may well exist,
+    # and finishing the run would replace it with this empty database. The
+    # engine's own diagnostic is what separates the two — a bare 404 from the
+    # contents API cannot, since a missing file and an invisible repository
+    # return the same status.
+    diag = core.github_backup_diagnostic()
+    if diag["repo_visible"] and diag["can_write"] and not diag["backup_exists"]:
+        log("restore", "no backup exists on GitHub yet; starting a new database")
+        if outcome["restored_learning"]:
+            log("restore", "  (forward tests and learning were restored from the small backup)")
+        return False
+
+    raise RuntimeError(
+        "Could not restore the database backup, and it is not safe to continue: backing up at "
+        "the end of this run would overwrite whatever is stored there. GitHub said — "
+        + " ".join(str(d) for d in diag["details"][-3:])
+    )
 
 
 def step_token(force=False):

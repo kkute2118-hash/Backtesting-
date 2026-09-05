@@ -64,7 +64,11 @@ jobs:
           # contents:write permission above, so no PAT is needed here.
           GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
           GH_REPO: ${{ github.repository }}
-          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH }}
+          # Defaults to a dedicated branch rather than the repository's default
+          # one: each backup commits the whole SQLite file, so leaving it unset
+          # would add a multi-megabyte binary blob to main's history every run.
+          # Set a DB_BACKUP_BRANCH repository variable to override.
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
           SCAN_UNIVERSE: ${{ inputs.universe }}
           BOOTSTRAP_YEARS: ${{ inputs.years }}
         run: python daily_job.py bootstrap
