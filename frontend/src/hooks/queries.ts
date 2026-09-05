@@ -7,7 +7,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import type {
   AppConfig, BackupStatus, ConditionMatrix, DataStore, DatasetStatus,
   FilteredResults, ForwardPositions, Freshness, History, Indicators, Job,
@@ -61,18 +61,56 @@ export const useFreshness = (universes: string[]) =>
 // --------------------------------------------------------------------------- //
 // jobs
 // --------------------------------------------------------------------------- //
+/** What the UI shows when a job disappears mid-run. */
+const LOST_JOB_MESSAGE =
+  "The server restarted while this was running, so the run was lost. On a small " +
+  "instance that usually means it ran out of memory — try a smaller universe, or " +
+  "let the scheduled job do the work.";
+
 /**
  * Follow one job to completion.
  *
  * Polling stops the moment the job reaches a terminal state — a finished scan
  * must not keep a timer alive for as long as the tab is open.
+ *
+ * A vanished job is reported as a failure rather than left to spin. The job
+ * registry lives in the server's memory, so a restart takes every in-flight job
+ * with it and the endpoint starts answering 404. React Query keeps the last
+ * successful payload on error, so its status stays "running" forever and the
+ * poll never stops — the UI sat there silently while the request 404'd once a
+ * second. Synthesising a failed job here means every caller's existing
+ * failure handling covers this too.
  */
 export function useJob(jobId: string | null) {
   return useQuery({
     queryKey: ["job", jobId],
-    queryFn: () => api.get<Job>(`/jobs/${jobId}`),
+    queryFn: async (): Promise<Job> => {
+      try {
+        return await api.get<Job>(`/jobs/${jobId}`);
+      } catch (error) {
+        if (error instanceof ApiError && error.isNotFound) {
+          return {
+            id: jobId ?? "",
+            kind: "unknown",
+            label: "Run",
+            status: "failed",
+            progress: 0,
+            message: "Lost",
+            created_at: new Date().toISOString(),
+            started_at: null,
+            finished_at: new Date().toISOString(),
+            error: LOST_JOB_MESSAGE,
+            request: {},
+          };
+        }
+        throw error;
+      }
+    },
     enabled: Boolean(jobId),
     refetchInterval: (query) => {
+      // Stop on an error too: without this the last good payload keeps the
+      // status at "running" and the timer never clears.
+      if (query.state.status === "error") return false;
       const status = query.state.data?.status;
       return status === "queued" || status === "running" ? REFRESH.job : false;
     },

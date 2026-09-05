@@ -69,17 +69,20 @@ def restore_on_cold_start() -> dict[str, object]:
         result["reason"] = ("No GitHub backup configured, so nothing can be restored. "
                             "On a host without a persistent disk this means the database "
                             "starts empty after every restart.")
+        log.warning("Cold-start restore: %s", result["reason"])
         return result
 
     before = _candle_count()
     result["candles_before"] = before
 
     if before > 0:
-        result["reason"] = "The candle store already holds data; nothing to restore."
+        result["reason"] = f"The candle store already holds {before:,} rows; nothing to restore."
         result["candles_after"] = before
+        log.info("Cold-start restore: %s", result["reason"])
         return result
     if before < 0:
         result["reason"] = "The database could not be read; leaving it alone."
+        log.warning("Cold-start restore: %s", result["reason"])
         return result
 
     result["attempted"] = True
