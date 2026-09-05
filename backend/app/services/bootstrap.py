@@ -111,6 +111,17 @@ def restore_on_cold_start() -> dict[str, object]:
     elif result["restored_learning"]:
         result["reason"] = ("No whole-database backup found, so the candle store is empty and "
                             "needs a sync. Forward tests and learning were restored.")
+    elif "404" in str(core._GITHUB_LAST_ERROR):
+        # Distinguish the two things a 404 means. Before the first backup there
+        # is simply no file to fetch, which is normal and not worth alarming
+        # anyone about; after one has been taken, a 404 really is a token or
+        # repository problem.
+        result["reason"] = (
+            f"No backup found at {core.GITHUB_BACKUP_PATH} on branch "
+            f"{core._github_backup_branch() or 'the default branch'}. That is expected "
+            "until your first backup runs. If you have already taken one, the token "
+            "cannot see the repository — use Data Manager → Test the backup path."
+        )
     else:
         result["reason"] = (core._GITHUB_LAST_ERROR
                             or "Nothing was restored — no backup exists yet.")
