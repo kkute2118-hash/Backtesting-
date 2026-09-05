@@ -188,6 +188,17 @@ the forward test is driven by GitHub Actions instead.
 | `daily_job.py` | headless runner |
 | `.github/workflows/dhan-token-renewal.yml` | 02:30 UTC daily (08:00 IST) |
 | `.github/workflows/daily-forward-test.yml` | 11:20 and 13:30 UTC on weekdays (16:50 / 19:00 IST) |
+| `.github/workflows/build-history.yml` | run once, by hand — builds the candle history from nothing |
+
+**Start with `build-history.yml`.** The daily job only tops up the newest
+sessions and refuses to scan a store with no history, so something has to
+download that history first, and a free-tier web host cannot: it has a fraction
+of a CPU and restarts under load, and every restart both kills the download and
+wipes the database. Run *Actions → Build candle history → Run workflow*, pick a
+universe and a number of years, and it downloads on a GitHub runner — real
+cores, 16 GB, no restarts — and pushes the result to the backup branch, which is
+where the app and the daily job both read it from. It is idempotent: a run that
+hits the timeout resumes rather than starting over.
 
 The daily run, in order: restore the database from GitHub → renew the Dhan token
 → top up the newest candles → resolve open positions that hit stop or target →
@@ -211,11 +222,11 @@ really existed.
 Setup — repository **Settings → Secrets and variables → Actions**:
 
 ```text
-Secrets   DHAN_CLIENT_ID, DHAN_PIN, DHAN_TOTP_SECRET
+Secrets   DHAN_CLIENT_ID, DHAN_PIN, DHAN_TOTP_SECRET   REQUIRED
           (or DHAN_ACCESS_TOKEN if you are not using PIN+TOTP)
           GH_BACKUP_TOKEN   optional; defaults to the built-in Actions token
 
-Variables DB_BACKUP_BRANCH  strongly recommended, e.g. db-backup
+Variables DB_BACKUP_BRANCH  optional; the workflows default to "db-backup"
           SCAN_UNIVERSE     default "Nifty 500"; join with | for several
           SCAN_STRATEGIES   default "1,2,3,4"
           SCAN_MIN_SCORE    default "85"
@@ -231,10 +242,13 @@ non-reserved aliases, tried in this order:
 | repository | `GITHUB_REPO`, `GH_REPO`, `DB_BACKUP_REPO` |
 | backup branch | `GITHUB_BACKUP_BRANCH`, `GH_BACKUP_BRANCH`, `DB_BACKUP_BRANCH` |
 
-Set a dedicated backup branch before enabling the schedule. Each backup commits
-the entire SQLite file, so a daily job pointed at your code branch would add one
-binary blob per day to its history forever. The branch is created automatically
-on the first backup if it does not exist.
+The workflows default the backup branch to `db-backup` rather than leaving it
+unset. Each backup commits the entire SQLite file, so a job pointed at your code
+branch would add one binary blob per day to its history forever. The branch is
+created automatically on the first backup if it does not exist. Set the
+`DB_BACKUP_BRANCH` variable only to override that name — and set the same value
+in the API server's environment, or the app will look for the backup on a
+different branch than the jobs write it to.
 
 ---
 

@@ -182,7 +182,21 @@ not touch either host and keeps working through any hosting change.
 It reads **GitHub Actions secrets**, which are a different store from your
 hosting provider's environment variables. Setting one does not set the other —
 this is the single most common reason the backup works in the app but not in the
-scheduled job, or the reverse.
+scheduled job, or the reverse. In particular the jobs need their own
+`DHAN_CLIENT_ID`, `DHAN_PIN` and `DHAN_TOTP_SECRET` (or `DHAN_ACCESS_TOKEN`)
+under *Settings → Secrets and variables → Actions*; without them every run stops
+at the token step.
+
+### Build the history there, not on the web host
+
+On a free tier the candle history cannot be downloaded by the app itself: a
+fraction of a CPU, a restart under load, and each restart wipes the database.
+Run **Actions → Build candle history → Run workflow** once instead. It downloads
+on a GitHub runner and pushes the result to the backup branch, which is where
+both the app and the daily job read it from. The workflows default that branch
+to `db-backup`; if you override it with a `DB_BACKUP_BRANCH` repository
+variable, set the same value on the API service or the app will look in the
+wrong place.
 
 ---
 
@@ -193,6 +207,8 @@ scheduled job, or the reverse.
 - [ ] Frontend deployed, `NEXT_PUBLIC_API_URL` set to the backend URL
 - [ ] `CORS_ORIGINS` on the backend set to the frontend URL
 - [ ] Dhan credentials set; **Settings** shows Dhan as configured
-- [ ] History synced once from Data Manager
+- [ ] History built once — Data Manager on a paid host, or the
+      **Build candle history** workflow on a free one
 - [ ] `GH_BACKUP_TOKEN` + `GH_REPO` + `DB_BACKUP_BRANCH` set, and a backup verified
 - [ ] The same secrets added to GitHub Actions for the scheduled jobs
+      (Dhan credentials included — the jobs cannot read the host's environment)
