@@ -1,0 +1,67 @@
+# Render blueprint for the FastAPI backend.
+#
+# The engine keeps everything in one SQLite file, and the irreplaceable half of
+# it — forward tests, resolved outcomes, accumulated learning — cannot be
+# rebuilt from any provider. So this asks for a persistent disk and points
+# DATA_DB at it, rather than letting the database live on an ephemeral
+# filesystem that a redeploy wipes.
+#
+# The frontend is NOT deployed here; it goes to Vercel. See docs/DEPLOYMENT.md.
+
+services:
+  - type: web
+    name: ati-lab-api
+    runtime: python
+    # A persistent disk requires a paid instance. On the free tier the disk is
+    # dropped and the service sleeps, which means re-syncing candles on every
+    # wake — workable only if the GitHub backup is configured.
+    plan: starter
+    region: singapore          # closest to the NSE data you are pulling
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+
+    disk:
+      name: ati-lab-data
+      mountPath: /var/lib/ati-lab
+      sizeGB: 5
+
+    envVars:
+      # Keep the database on the persistent disk, never in the checkout.
+      - key: DATA_DB
+        value: /var/lib/ati-lab/market_data.sqlite3
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      # Set this to your Vercel URL once the frontend is deployed. A browser
+      # treats a different origin as a different site, so the API refuses it
+      # until it is listed here.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Credentials. sync:false means Render prompts for them in the dashboard
+      # and never stores them in this file.
+      - key: DHAN_CLIENT_ID
+        sync: false
+      - key: DHAN_PIN
+        sync: false
+      - key: DHAN_TOTP_SECRET
+        sync: false
+      - key: DHAN_ACCESS_TOKEN
+        sync: false
+
+      # Optional providers. The scanner, backtests and forward tests all work
+      # without these.
+      - key: TWELVEDATA_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # Database backup. Strongly recommended even with a persistent disk.
+      - key: GH_BACKUP_TOKEN
+        sync: false
+      - key: GH_REPO
+        sync: false
+      - key: DB_BACKUP_BRANCH
+        value: db-backup
