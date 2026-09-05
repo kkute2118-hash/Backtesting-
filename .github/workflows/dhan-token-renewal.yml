@@ -2,7 +2,7 @@
 #
 # Dhan invalidates access tokens every 24 hours. This mints a fresh one via
 # PIN + TOTP each morning before the market opens and stores it in the
-# database, which is then pushed back to GitHub — so the Streamlit app picks
+# database, which is then pushed back to GitHub — so the app picks
 # up a valid token whenever you next open it, with nothing to paste by hand.
 name: Dhan token renewal
 
@@ -35,7 +35,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r backend/requirements.txt
 
       - name: Renew Dhan access token
         env:

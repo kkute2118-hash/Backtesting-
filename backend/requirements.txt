@@ -1,0 +1,16 @@
+# API
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+python-multipart>=0.0.9,<1
+
+# Engine. Unchanged from before the web migration, minus streamlit.
+pandas>=2.0,<3
+numpy>=1.24,<3
+requests>=2.31,<3
+dhanhq>=2.2.0,<3
+ccxt>=4,<5
+scikit-learn>=1.3,<2
+pyotp>=2.9,<3
+anthropic>=0.40,<1

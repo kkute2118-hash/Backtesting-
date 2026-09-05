@@ -17,3 +17,10 @@ __pycache__/
 venv/
 .env
 .DS_Store
+
+# Pickled per-symbol frames written by the backtest cache (core.BT_CACHE_DIR).
+backtest_cache/
+
+# Frontend
+node_modules/
+.next/
