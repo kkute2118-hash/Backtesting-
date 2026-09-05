@@ -1,0 +1,38 @@
+   ▲ Next.js 15.5.25
+   - Local:        http://localhost:3000
+   - Network:      http://192.0.2.2:3000
+
+ ✓ Starting...
+ ✓ Ready in 1752ms
+ ○ Compiling / ...
+ ✓ Compiled / in 10s (1882 modules)
+ GET / 200 in 10995ms
+ GET / 200 in 231ms
+ GET / 200 in 115ms
+ ○ Compiling /scanner ...
+ ✓ Compiled /scanner in 1660ms (1920 modules)
+ GET /scanner 200 in 2092ms
+ ○ Compiling /watchlist ...
+ ✓ Compiled /watchlist in 513ms (1920 modules)
+ GET /watchlist 200 in 760ms
+ ○ Compiling /forward ...
+ ✓ Compiled /forward in 721ms (1944 modules)
+ GET /forward 200 in 988ms
+ ○ Compiling /radar ...
+ ✓ Compiled /radar in 504ms (1954 modules)
+ GET /radar 200 in 777ms
+ ○ Compiling /learning ...
+ ✓ Compiled /learning in 3s (1966 modules)
+ GET /learning 200 in 3370ms
+ ○ Compiling /backtest ...
+ ✓ Compiled /backtest in 709ms (1982 modules)
+ GET /backtest 200 in 1184ms
+ ○ Compiling /data ...
+ ✓ Compiled /data in 630ms (2000 modules)
+ GET /data 200 in 910ms
+ ○ Compiling /research ...
+ ✓ Compiled /research in 637ms (2018 modules)
+ GET /research 200 in 920ms
+ ○ Compiling /settings ...
+ ✓ Compiled /settings in 696ms (2032 modules)
+ GET /settings 200 in 966ms
