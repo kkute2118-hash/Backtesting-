@@ -42,8 +42,10 @@ def resolve(names: list[str]) -> list[str]:
         raise NotConfigured(str(exc)) from exc
     except Exception as exc:
         raise ApiError(
-            "Could not build the universe list. The index CSVs come from "
-            f"niftyindices.com, which did not respond: {exc}"
+            "Could not load the index constituents. The universe lists come from "
+            "niftyindices.com, which this server could not reach — check its "
+            "network access and try again.",
+            detail=str(exc),
         ) from exc
     if not tickers:
         raise ApiError("That universe resolved to zero stocks.")

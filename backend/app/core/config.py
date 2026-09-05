@@ -21,8 +21,10 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     debug: bool = False
 
-    # Browser origins allowed to call this API.
-    cors_origins: str = "http://localhost:3000"
+    # Browser origins allowed to call this API. Both spellings of the dev host
+    # are allowed by default because a browser treats them as different origins
+    # and developers use them interchangeably.
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # How many scans / backtests may run at once. These are CPU-bound pandas
     # workloads over the whole NSE universe; more workers than cores just makes

@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * A financial-terminal palette. Only five hues carry meaning — accent for
+ * anything interactive, up/down for direction, amber for a warning — and
+ * everything else is a neutral. Colour is information here, not decoration:
+ * a chart series and a table cell showing the same +2.4% must be the same green.
+ *
+ * Dark is the default because that is how this product is read: long sessions,
+ * dense numbers, often beside a broker terminal. Light is a first-class
+ * alternative, not an afterthought — it redefines the same variables.
+ */
+@layer base {
+  :root {
+    --canvas: 222 20% 8%;
+    --surface: 222 18% 11%;
+    --elevated: 222 16% 14%;
+    --line: 222 14% 20%;
+    --strong-line: 222 12% 28%;
+
+    --ink: 210 20% 96%;
+    --muted: 214 12% 65%;
+    --faint: 214 10% 46%;
+
+    --accent: 213 90% 62%;
+    --accent-soft: 213 80% 20%;
+
+    --up: 152 62% 46%;
+    --up-soft: 152 45% 16%;
+    --down: 3 78% 60%;
+    --down-soft: 3 50% 18%;
+    --warn: 38 92% 55%;
+    --warn-soft: 38 60% 16%;
+
+    --shadow: 222 40% 2%;
+
+    --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+  }
+
+  .light {
+    --canvas: 210 20% 98%;
+    --surface: 0 0% 100%;
+    --elevated: 210 20% 97%;
+    --line: 214 20% 89%;
+    --strong-line: 214 16% 78%;
+
+    --ink: 222 32% 12%;
+    --muted: 220 10% 40%;
+    --faint: 220 9% 55%;
+
+    --accent: 213 88% 46%;
+    --accent-soft: 213 90% 94%;
+
+    --up: 152 58% 32%;
+    --up-soft: 152 55% 93%;
+    --down: 3 72% 47%;
+    --down-soft: 3 80% 95%;
+    --warn: 33 90% 40%;
+    --warn-soft: 38 92% 92%;
+
+    --shadow: 222 30% 40%;
+  }
+
+  * {
+    border-color: hsl(var(--line));
+  }
+
+  html {
+    color-scheme: dark;
+  }
+  html.light {
+    color-scheme: light;
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Financial figures must line up column to column. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: hsl(var(--accent) / 0.28);
+  }
+
+  /* Focus is never removed, only restyled — this app is fully keyboard-driven. */
+  :focus-visible {
+    outline: 2px solid hsl(var(--accent));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--strong-line)) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--strong-line));
+    border-radius: 999px;
+  }
+  .scroll-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
