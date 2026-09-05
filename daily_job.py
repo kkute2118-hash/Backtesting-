@@ -5,8 +5,9 @@ The web app only runs the engine while its API server is up and somebody asks
 it to. This script drives the same engine (backend/app/engine/core.py) from
 GitHub Actions instead, on a cron schedule, with nothing else running.
 
-    python daily_job.py token     # renew the Dhan access token only
-    python daily_job.py daily     # full post-close run
+    python daily_job.py token      # renew the Dhan access token only
+    python daily_job.py daily      # full post-close run
+    python daily_job.py bootstrap  # build the candle history from scratch, once
     python daily_job.py --help
 
 The full run, in order:
@@ -79,9 +80,27 @@ def _selected_strategies():
 
 
 def _universes():
+    """Universe names from SCAN_UNIVERSE, validated against the engine's own list.
+
+    This used to check against a hand-copied set of the four index names, which
+    silently dropped "NSE All Cash (~2000)" — the one option this file's own
+    docstring tells you to use for the full list. Validating against
+    core.UNIVERSE_CHOICES is the whole point of that constant existing.
+
+    An unrecognised name is logged rather than dropped in silence: a typo that
+    quietly scans a different universe than the one you configured is worse
+    than one that says so.
+    """
     raw = os.environ.get("SCAN_UNIVERSE", "Nifty 500")
-    valid = {"Nifty 500", "Nifty Smallcap 100", "Nifty Smallcap 250", "Nifty Midcap 150"}
-    out = [u.strip() for u in str(raw).split("|") if u.strip() in valid]
+    requested = [u.strip() for u in str(raw).split("|") if u.strip()]
+    out, unknown = [], []
+    for name in requested:
+        (out if name in core.UNIVERSE_CHOICES else unknown).append(name)
+    for name in unknown:
+        log("universe", f"ignoring unknown SCAN_UNIVERSE entry {name!r}; "
+                        f"valid names are: {', '.join(core.UNIVERSE_CHOICES)}")
+    if not out:
+        log("universe", "no usable SCAN_UNIVERSE value; falling back to Nifty 500")
     return out or ["Nifty 500"]
 
 
@@ -265,16 +284,63 @@ def run_daily():
     return summary
 
 
+def run_bootstrap():
+    """Build the candle history from nothing. Run once, by hand.
+
+    The daily job only tops up the newest sessions, and refuses to scan a store
+    with no history — correctly, since scanning nothing would record nothing.
+    But that leaves no way to get the first history in place on a host too small
+    to download it, which is every free tier. This does that job here, where
+    there are real cores and no restarts.
+
+    Idempotent: download_prices() fetches only the range each symbol is missing,
+    so running it again after a partial run resumes rather than restarting.
+    """
+    years = _env_int("BOOTSTRAP_YEARS", 3)
+    summary = {"years": years}
+
+    step_restore()
+    step_token(force=True)
+
+    universes = _universes()
+    tickers = core.resolve_universes(universes)
+    summary["universes"] = universes
+    summary["symbols"] = len(tickers)
+    log("universe", f"{', '.join(universes)} — {len(tickers):,} symbols")
+
+    end = core.last_expected_nse_session()
+    start = end - timedelta(days=365 * years)
+    log("build", f"downloading {start} → {end}. Rate-limited to ~5 requests/second, "
+                 f"so expect roughly {len(tickers) * 0.25 / 60:.0f}+ minutes.")
+
+    data = core.sync_missing_backtest_data(tickers, start, end)
+    summary["symbols_with_data"] = len(data or {})
+    log("build", f"{summary['symbols_with_data']:,}/{len(tickers):,} symbols have history")
+
+    for err in (core._DHAN_LAST_DATA_ERRORS or [])[:5]:
+        log("build", f"  Dhan error — {err}")
+
+    status = core.data_freshness_status(tickers)
+    summary["latest_session"] = str(status["latest"])
+    log("build", f"stored candles end {status['latest']}")
+
+    # Everything above cost real Dhan rate limit; it must not die with the runner.
+    step_backup()
+    return summary
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("job", choices=["token", "daily"],
-                        help="token = renew the Dhan token only; daily = the full post-close run")
+    parser.add_argument("job", choices=["token", "daily", "bootstrap"],
+                        help="token = renew the Dhan token only; daily = the full post-close "
+                             "run; bootstrap = build the candle history from scratch, once")
     args = parser.parse_args(argv)
 
     log("start", f"job={args.job}")
+    jobs = {"token": run_token_only, "daily": run_daily, "bootstrap": run_bootstrap}
     try:
-        summary = run_token_only() if args.job == "token" else run_daily()
+        summary = jobs[args.job]()
     except Exception:
         log("FAILED", "the job did not complete:")
         traceback.print_exc()

@@ -23,11 +23,17 @@ def health() -> dict[str, Any]:
         con.close()
     except Exception as exc:
         database_ok, database_error = False, str(exc)
+    from app.main import BOOT_RESTORE
+
     return {
         "status": "ok" if database_ok else "degraded",
         "engine_version": core.ENGINE_VERSION,
         "app_version": core.APP_VERSION,
         "database": {"ok": database_ok, "path": core.DATA_DB, "error": database_error},
+        # What this container recovered when it woke up. On a host with a
+        # persistent disk this is a no-op; on a free tier it is the difference
+        # between an empty app and a working one.
+        "boot_restore": dict(BOOT_RESTORE),
     }
 
 

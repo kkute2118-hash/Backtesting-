@@ -73,6 +73,49 @@ job = (ROOT / "daily_job.py").read_text()
 check("daily_job resolves through core.resolve_universes",
       "core.resolve_universes(" in job and "core.index_universe(" not in job)
 
+# Resolving through the engine is not enough on its own: _universes() validates
+# SCAN_UNIVERSE before it ever reaches resolve_universes(), and that allowlist
+# used to be a hand-copied set of the four index names. It silently dropped the
+# full-NSE option that this file's own docstring tells you to use, and the check
+# above passed the whole time. Exercise the function, not the source.
+sys.path.insert(0, str(ROOT))
+import daily_job  # noqa: E402
+
+_saved_scan_universe = os.environ.get("SCAN_UNIVERSE")
+try:
+    os.environ["SCAN_UNIVERSE"] = core.FULL_NSE_UNIVERSE
+    check("SCAN_UNIVERSE accepts the full-NSE option",
+          daily_job._universes() == [core.FULL_NSE_UNIVERSE], str(daily_job._universes()))
+
+    os.environ["SCAN_UNIVERSE"] = "Nifty 500|Nifty Midcap 150"
+    check("SCAN_UNIVERSE accepts several names joined with |",
+          daily_job._universes() == ["Nifty 500", "Nifty Midcap 150"], str(daily_job._universes()))
+
+    os.environ["SCAN_UNIVERSE"] = "Nifty 5000"
+    check("an unknown name falls back to Nifty 500",
+          daily_job._universes() == ["Nifty 500"], str(daily_job._universes()))
+
+    for _name in core.UNIVERSE_CHOICES:
+        os.environ["SCAN_UNIVERSE"] = _name
+        check(f"SCAN_UNIVERSE accepts {_name!r}",
+              daily_job._universes() == [_name], str(daily_job._universes()))
+finally:
+    if _saved_scan_universe is None:
+        os.environ.pop("SCAN_UNIVERSE", None)
+    else:
+        os.environ["SCAN_UNIVERSE"] = _saved_scan_universe
+
+# The bootstrap job is the only way to build history on a host that cannot do
+# it itself, so the workflow and the CLI have to stay in step.
+check("daily_job exposes a bootstrap job", '"bootstrap"' in job and "def run_bootstrap" in job)
+_workflow = (ROOT / ".github" / "workflows" / "build-history.yml")
+check("the build-history workflow exists", _workflow.exists())
+if _workflow.exists():
+    _wf = _workflow.read_text()
+    check("it runs the bootstrap job", "daily_job.py bootstrap" in _wf)
+    check("its universe dropdown offers every engine universe",
+          all(n in _wf for n in core.UNIVERSE_CHOICES))
+
 # The UI no longer has ten copy-pasted pickers to audit: every picker in the web
 # app renders whatever GET /universes returns, and that endpoint is built from
 # UNIVERSE_CHOICES. Assert the single source of truth instead of the widgets.

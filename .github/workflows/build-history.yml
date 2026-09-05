@@ -1,0 +1,70 @@
+# Build the candle history from scratch. Run once, by hand.
+#
+# The daily job only tops up the newest sessions and refuses to scan a store
+# with no history, so something has to download that history first. A free-tier
+# web host cannot: it has a fraction of a CPU and restarts under load, and every
+# restart both kills the download and wipes the database. A GitHub runner has
+# real cores, 16 GB and no restarts, so it does the job here and pushes the
+# result to the backup branch — which is where the app and the daily job both
+# read it from.
+name: Build candle history
+
+on:
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: 'Universe to build (must match a name the engine knows)'
+        required: true
+        default: 'Nifty 500'
+        type: choice
+        options:
+          - 'Nifty 500'
+          - 'Nifty Midcap 150'
+          - 'Nifty Smallcap 100'
+          - 'Nifty Smallcap 250'
+          - 'NSE All Cash (~2000)'
+      years:
+        description: 'Years of history (3 is enough for every strategy)'
+        required: true
+        default: '3'
+        type: string
+
+concurrency:
+  # Never let this and the daily job write the backup at the same time.
+  group: dhan-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Dhan is rate-limited to ~5 requests/second, so a large universe is slow.
+    # 350 minutes stays inside GitHub's 6-hour ceiling with room to spare.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Build history
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN: ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # The workflow's own token can commit to this repository given the
+          # contents:write permission above, so no PAT is needed here.
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH }}
+          SCAN_UNIVERSE: ${{ inputs.universe }}
+          BOOTSTRAP_YEARS: ${{ inputs.years }}
+        run: python daily_job.py bootstrap

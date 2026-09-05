@@ -98,10 +98,16 @@ latest sessions* daily thereafter.
 Two processes, so two hosts — or one machine running both. Streamlit Cloud
 cannot serve this; it only runs `streamlit run`.
 
-The recommended path is **Render** for the backend (with a persistent disk for
-the SQLite file) and **Vercel** for the frontend. `render.yaml` and
-`frontend/vercel.json` are in the repository, so both are connect-and-deploy.
-There is also a `docker-compose.yml` for putting both on a single VPS.
+`render.yaml` and `frontend/vercel.json` are in the repository, so both are
+connect-and-deploy; `docker-compose.yml` covers a single VPS.
+
+`render.yaml` targets Render's **free** plan, which has no persistent disk and
+sleeps when idle. The app handles that by treating the GitHub backup as its
+disk: it restores the whole database on every cold start and pushes it back
+after a sync. That makes `GH_BACKUP_TOKEN`, `GH_REPO` and `DB_BACKUP_BRANCH`
+**mandatory** there — without them, every sleep loses your candles, forward
+tests and accumulated learning. A paid instance with a real disk removes both
+the dependency and the sleep.
 
 **Step-by-step, including the order the two URLs have to be wired together:
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).**

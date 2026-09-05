@@ -29,12 +29,26 @@ log = logging.getLogger("ati.api")
 
 settings = get_settings()
 
+# Set by the startup hook so /health can report what happened on this boot.
+BOOT_RESTORE: dict[str, object] = {}
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     from app.db import app_store
     from app.engine import core
+    from app.services import bootstrap
 
     log.info("Engine %s — database %s", core.ENGINE_VERSION, core.DATA_DB)
+
+    # Before anything reads the database: on a host with no persistent disk
+    # this container starts with an empty one, and the GitHub backup is the
+    # only thing that can put the candles and the learning history back.
+    try:
+        BOOT_RESTORE.update(bootstrap.restore_on_cold_start())
+    except Exception:
+        log.exception("Cold-start restore failed")
+
     try:
         app_store.ensure_app_tables()
     except Exception:

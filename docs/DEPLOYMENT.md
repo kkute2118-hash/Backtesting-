@@ -40,10 +40,10 @@ needs the frontend's URL.
 4. Deploy. When it goes green, open `https://<your-service>.onrender.com/docs`
    — the interactive API documentation. **This is not the app**, it is the API.
 
-> **On the free tier** there is no persistent disk and the service sleeps when
-> idle, so the database is wiped between wakes. That is only workable with the
-> GitHub backup configured, and it re-syncs candles on every cold start. The
-> `starter` plan in `render.yaml` avoids both problems.
+> `render.yaml` is configured for the **free** plan, which has no persistent
+> disk. Read *Running on the free plan* below before relying on it — the GitHub
+> backup is mandatory there. Switching to `starter` and uncommenting the `disk`
+> block removes that dependency and the 15-minute sleep, at a monthly cost.
 
 ### 2. Frontend on Vercel
 
@@ -88,6 +88,69 @@ Open your Vercel URL. The candle store starts empty, so:
    names the exact reason.
 3. Thereafter, **Top up latest sessions** daily — or leave it to the scheduled
    GitHub Actions job, which does it for you.
+
+---
+
+## Running on the free plan
+
+The free plan has **no persistent disk** and **sleeps after ~15 minutes idle**.
+The filesystem — and therefore the whole SQLite database — is discarded on
+every sleep. That is survivable, but only because the app treats the GitHub
+backup as its disk:
+
+```text
+cold start  →  restore_on_cold_start()   pulls the whole database back
+               (candles + forward tests + learning)
+after a sync →  the candle store is pushed back up
+after a
+forward-test →  the small learning backup is pushed (rate-limited)
+write
+```
+
+`app/services/bootstrap.py` does this, and it exists because of an ordering
+trap worth knowing about: `core` restores the *small* learning backup at import
+time, which makes the database non-empty, and `restore_db_from_github()`
+refuses to overwrite a non-empty database. So a naive startup hook silently
+skips the whole-database restore and leaves you with learning history but no
+candles — an app that looks configured and can scan nothing. The bootstrap
+checks the `candles` table specifically, and merges the learning backup back on
+top afterwards.
+
+**This makes the three `GH_*` variables mandatory on the free plan**, not
+optional. Without them every sleep costs you everything the app has
+accumulated.
+
+### Setting it up
+
+1. Create a GitHub token with write access to this repository:
+   <https://github.com/settings/personal-access-tokens/new> → *Repository
+   access* → **Only select repositories** → this repo → *Repository permissions*
+   → **Contents: Read and write**.
+2. On the API service, set:
+
+   ```text
+   GH_BACKUP_TOKEN    the token from step 1
+   GH_REPO            owner/repo          (not a URL)
+   DB_BACKUP_BRANCH   db-backup
+   ```
+
+3. Sync some history, then check **Data Manager → Back up now**. A
+   `backups/market_data.sqlite3` file should appear on the `db-backup` branch.
+   The branch is created automatically on the first backup.
+4. Confirm recovery works: `GET /api/v1/health` reports a `boot_restore`
+   object saying what the last cold start recovered.
+
+### What free still costs you
+
+- **First request after a sleep takes ~50 seconds**, plus the restore.
+- **A very large candle store gets slow to move.** The whole-database backup
+  goes through GitHub's Contents API, which caps a file at 100 MB. Nifty 500
+  over a few years is comfortably inside that; the full ~2000-name NSE universe
+  over many years eventually is not. If you get there, switch to a disk.
+- **Nothing runs while the service sleeps.** Scheduled work is unaffected —
+  the GitHub Actions jobs run on GitHub's runners against `daily_job.py` and
+  never touch the web host at all. On the free plan they are doing the real
+  daily work, and the web app is the viewer.
 
 ---
 
