@@ -58,31 +58,56 @@ jobs:
       # than in the middle of a log, because this is the one thing a first-time
       # run gets wrong: Actions secrets are a separate store from the web host's
       # environment variables, so credentials set on the host are not here.
+      # Fails in two seconds with a message on the run's summary page rather
+      # than in the middle of a log, because this is the one thing a first-time
+      # run gets wrong: Actions secrets are a separate store from the web host's
+      # environment variables, so credentials set on the host are not here.
+      #
+      # It reports each name individually — and whether the same name exists on
+      # the Variables tab, which is the usual near-miss — because "I added the
+      # secrets" and "this run received them" are different claims. Only
+      # presence is ever printed; no value is echoed, and a credential must
+      # never live in vars, which is plaintext and unmasked.
+      #
+      # Listing every name with toJSON(secrets) would say more, and cannot be
+      # used: GitHub refuses to start a run whose workflow reflects the whole
+      # secrets context at all, ending it instantly as action_required with no
+      # jobs and no log to read.
       - name: Check the Dhan credentials are present
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_PIN: ${{ secrets.DHAN_PIN }}
           DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
-          # Names only. The runner masks every secret value in the log, and this
-          # never echoes the JSON itself — only the keys matched out of it. It is
-          # here because "I added the secrets" and "this run can see them" are
-          # different claims, and nothing else distinguishes a missing secret
-          # from one added as a variable, to an Environment, or to another repo.
-          ALL_SECRET_NAMES: ${{ toJSON(secrets) }}
-          ALL_VARIABLE_NAMES: ${{ toJSON(vars) }}
+          VAR_DHAN_CLIENT_ID: ${{ vars.DHAN_CLIENT_ID }}
+          VAR_DHAN_PIN: ${{ vars.DHAN_PIN }}
+          VAR_DHAN_TOTP_SECRET: ${{ vars.DHAN_TOTP_SECRET }}
+          VAR_DHAN_ACCESS_TOKEN: ${{ vars.DHAN_ACCESS_TOKEN }}
         run: |
           if [ -n "$DHAN_CLIENT_ID" ] && [ -n "$DHAN_PIN" ] && [ -n "$DHAN_TOTP_SECRET" ]; then
             echo "Using PIN + TOTP; the job will mint its own 24-hour token."
           elif [ -n "$DHAN_ACCESS_TOKEN" ]; then
             echo "Using the manual DHAN_ACCESS_TOKEN."
           else
-            names() { printf '%s' "$1" | grep -oE '"[A-Za-z0-9_]+"[[:space:]]*:' | tr -d '":' | sort | sed 's/^/    - /'; }
-            echo "Repository SECRETS this run can see:"
-            names "$ALL_SECRET_NAMES"
-            echo "Repository VARIABLES this run can see:"
-            names "$ALL_VARIABLE_NAMES"
-            echo "::error title=Dhan credentials missing::Add DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) under Settings -> Secrets and variables -> Actions, on the SECRETS tab, as Repository secrets. The lists above show what this run actually received. Credentials set on your web host are a different store and are not visible here."
+            wrong_tab=0
+            echo "What this run actually received:"
+            for name in DHAN_CLIENT_ID DHAN_PIN DHAN_TOTP_SECRET DHAN_ACCESS_TOKEN; do
+              eval "as_secret=\$$name"
+              eval "as_var=\$VAR_$name"
+              if [ -n "$as_secret" ]; then
+                echo "  $name  present, as a repository Secret"
+              elif [ -n "$as_var" ]; then
+                wrong_tab=1
+                echo "  $name  WRONG TAB — it is a repository Variable, not a Secret"
+              else
+                echo "  $name  missing"
+              fi
+            done
+            if [ "$wrong_tab" = "1" ]; then
+              echo "::error title=Credentials are on the Variables tab::Delete them there and re-add them under Settings -> Secrets and variables -> Actions -> Secrets -> New repository secret. Variables are stored in plain text and are shown in logs; credentials must be Secrets."
+            else
+              echo "::error title=Dhan credentials missing::Add DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) at Settings -> Secrets and variables -> Actions -> Secrets tab -> New repository secret. They must be Repository secrets, not Environment secrets, and on this repository. Credentials set on your web host are a different store and are not visible here."
+            fi
             exit 1
           fi
 
