@@ -64,13 +64,25 @@ jobs:
           DHAN_PIN: ${{ secrets.DHAN_PIN }}
           DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # Names only. The runner masks every secret value in the log, and this
+          # never echoes the JSON itself — only the keys matched out of it. It is
+          # here because "I added the secrets" and "this run can see them" are
+          # different claims, and nothing else distinguishes a missing secret
+          # from one added as a variable, to an Environment, or to another repo.
+          ALL_SECRET_NAMES: ${{ toJSON(secrets) }}
+          ALL_VARIABLE_NAMES: ${{ toJSON(vars) }}
         run: |
           if [ -n "$DHAN_CLIENT_ID" ] && [ -n "$DHAN_PIN" ] && [ -n "$DHAN_TOTP_SECRET" ]; then
             echo "Using PIN + TOTP; the job will mint its own 24-hour token."
           elif [ -n "$DHAN_ACCESS_TOKEN" ]; then
             echo "Using the manual DHAN_ACCESS_TOKEN."
           else
-            echo "::error title=Dhan credentials missing::Add DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) under Settings -> Secrets and variables -> Actions. Credentials set on your web host are a different store and are not visible here."
+            names() { printf '%s' "$1" | grep -oE '"[A-Za-z0-9_]+"[[:space:]]*:' | tr -d '":' | sort | sed 's/^/    - /'; }
+            echo "Repository SECRETS this run can see:"
+            names "$ALL_SECRET_NAMES"
+            echo "Repository VARIABLES this run can see:"
+            names "$ALL_VARIABLE_NAMES"
+            echo "::error title=Dhan credentials missing::Add DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) under Settings -> Secrets and variables -> Actions, on the SECRETS tab, as Repository secrets. The lists above show what this run actually received. Credentials set on your web host are a different store and are not visible here."
             exit 1
           fi
 
