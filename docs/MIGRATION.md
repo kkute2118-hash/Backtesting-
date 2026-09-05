@@ -200,48 +200,95 @@ lightweight-charts (candles), lucide-react, next-themes, sonner.
 
 ## 9. Migration checklist
 
+Verified against the running application. Every row was exercised in a browser
+against a seeded database.
+
 | Streamlit feature | New location | Status |
 | --- | --- | --- |
-| Dashboard metrics | `/` + `GET /api/v1/market/overview` | Complete |
-| Data freshness banner | `/` and `/scanner` freshness card + `GET /api/v1/market/freshness` | Complete |
-| Universe pickers | `GET /api/v1/universes` | Complete |
-| Daily Scanner run | `POST /api/v1/scanner/runs` (job) | Complete |
+| Dashboard metrics | `/` ← `GET /market/overview` | Complete |
+| Data freshness banner | `/`, `/scanner`, `/data` ← `GET /market/freshness` | Complete |
+| Universe pickers | every picker ← `GET /universes` | Complete |
+| Daily Scanner run | `/scanner` → `POST /scanner/runs` (job) | Complete |
 | Live intraday overlay toggle | `use_live_prices` on the scan request | Complete |
-| Top-up latest sessions | `POST /api/v1/data/sync/latest` (job) | Complete |
-| Best setups / all setups / per-strategy | `/scanner/runs/[id]` table + strategy facets | Complete |
-| Scanner diagnostics + coverage | run `stats` payload → Diagnostics panel | Complete |
-| Multi-strategy confluence | Results table "Confluence" facet | Complete |
-| Forward-test queue (score ≥ gate) | Results → "Send to forward test" action | Complete |
-| Strategy condition audit (S2 / S4) | `/stocks/[symbol]` → Condition matrix | Complete |
-| ML win probability | `Win Probability %` column | Complete |
-| Early Warning Radar | `/radar` + `POST /api/v1/radar/runs` | Complete |
-| Forward positions + live P/L | `/forward` + `GET /api/v1/forward/positions` | Complete |
-| Forward scorecard | `/forward` scorecard + `GET /api/v1/forward/summary` | Complete |
-| Persisted scanner signals | `GET /api/v1/scanner/signals` | Complete |
-| Refresh/resolve forward positions | `POST /api/v1/forward/refresh` | Complete |
-| Market learning tables | `/learning` + `GET /api/v1/learning/*` | Complete |
-| Adaptive score edge | `GET /api/v1/learning/edge` | Complete |
-| Walk-forward backtest | `/backtest` + `POST /api/v1/backtest/runs` (job) | Complete |
-| Backtest history | `GET /api/v1/backtest/latest` | Complete |
-| Raw strategy learning | `POST /api/v1/backtest/raw-signals` (job) | Complete |
-| Stop-loss calibration study | `POST /api/v1/backtest/sl-calibration` (job) | Complete |
-| S4 SEPA scan | `POST /api/v1/scanner/sepa` (job) | Complete |
-| S4 EMA20 extension calibration | `POST /api/v1/backtest/s4-extension` (job) | Complete |
-| Stock DNA | `GET /api/v1/stocks/{symbol}/dna` | Complete |
-| Custom Strategy DSL + backtest | `/scanner` → Custom DSL panel, `POST /api/v1/scanner/custom` | Complete |
-| Long-term fundamentals Screen A/B | `POST /api/v1/fundamentals/screens` (job) | Complete |
-| Manual symbol fundamentals lookup | `GET /api/v1/stocks/{symbol}/fundamentals` | Complete |
-| Small/micro safety engine | `GET /api/v1/stocks/{symbol}/safety` | Complete |
-| Live monitor / WebSocket feed | `/forward` live panel + `POST /api/v1/live/start|stop`, `GET /api/v1/live/prices` | Complete |
-| Dhan Data Manager | `/data` + `GET/POST /api/v1/data/*` | Complete |
-| GitHub backup / restore / diagnostic | `/data` → Backup panel | Complete |
-| Dhan connection + smoke test | `/data` → Diagnostics panel | Complete |
-| Strategy Coach (statistical) | `GET /api/v1/learning/coach` | Complete |
-| AI System Coach (LLM) | `POST /api/v1/ai/coach` | Complete |
-| AI Trade Debate Panel | `POST /api/v1/ai/debate` | Complete |
-| System Learning Panel (5 agents) | `POST /api/v1/ai/learning-panel` | Complete |
-| Forex/Crypto SMC scan | `POST /api/v1/smc/scan` | Complete |
-| Research & risk control | `/backtest` → Portfolio simulation panel | Complete |
-| Watchlists | **new** `/watchlist` + `GET/POST/DELETE /api/v1/watchlists` | Complete |
-| Scanner presets | **new** `GET/POST/PATCH/DELETE /api/v1/presets` | Complete |
-| Dark / light theme | **new** persisted preference | Complete |
+| Top-up latest sessions | `/scanner` freshness action and `/data` → `POST /data/sync/latest` | Complete |
+| Best setups / all setups / per-strategy | `/scanner/runs/[id]` table + strategy filter | Complete |
+| Scanner diagnostics + strategy coverage | Results → Scanner diagnostics | Complete |
+| Multi-strategy confluence | Results → Confluence panel | Complete |
+| Forward-test queue (score ≥ gate) | Results → select rows → *Forward test* | Complete |
+| Strategy condition audit (S2 / S4) | `/stocks/[symbol]` → Strategy conditions, all four strategies | Complete |
+| ML win probability | `Win probability` column, with an honest "not trained yet" note | Complete |
+| Early Warning Radar | `/radar` → `POST /radar/runs` | Complete |
+| Radar blocking-rule summary | `/radar` → *What is blocking the market* | Complete |
+| Forward positions + live P/L | `/forward` → Open ← `GET /forward/positions` | Complete |
+| Forward strategy scorecard | `/forward` → Strategy scorecard | Complete |
+| Persisted scanner signals | `/forward` → Signal log ← `GET /scanner/signals` | Complete |
+| Resolve open positions | `/forward` → *Resolve positions* → `POST /forward/refresh` | Complete |
+| Market learning tables | `/learning` ← `GET /learning/*` | Complete |
+| Adaptive score edge | `/learning` → Score-band edge | Complete |
+| Component weight learning | `/learning` → Component weights | Complete |
+| Learning database stats | `/learning` → Learning database | Complete |
+| Walk-forward backtest | `/backtest` → `POST /backtest/runs` (job) | Complete |
+| Backtest history | `/backtest` opens on `GET /backtest/latest` | Complete |
+| Score-band learning chart | `/backtest` → *Does the score predict the outcome?* | Complete |
+| Capital / ROI simulation | `/backtest` → Capital simulation ← `POST /backtest/portfolio` | Complete |
+| Raw strategy learning | `/backtest` → Research studies → Raw strategy learning | Complete |
+| Stop-loss calibration study | `/backtest` → Research studies → Stop-loss calibration | Complete |
+| S4 EMA20 extension calibration | `/backtest` → Research studies → S4 EMA20 extension | Complete |
+| S4 recovery study | `/backtest` → Research studies → S4 recovery | Complete |
+| S4 SEPA scan | `/research` → S4 SEPA → `POST /scanner/sepa` | Complete |
+| Stock DNA | `/stocks/[symbol]` → Stock DNA | Complete |
+| SEPA trailing stop / quality parts | `GET /stocks/{symbol}/sepa` | API only — not surfaced |
+| Custom Strategy DSL + backtest | `/research` → Custom rules, with live validation | Complete |
+| Long-term fundamentals Screen A/B | `/research` → Fundamentals → `POST /fundamentals/screens` | Complete |
+| Manual symbol fundamentals lookup | `/stocks/[symbol]` → Fundamentals | Complete |
+| Small/micro safety engine | `/stocks/[symbol]` → Risk assessment | Complete |
+| Live monitor / persistent WebSocket | `/forward` → Live monitor ← `POST /live/start\|stop` | Complete |
+| Dhan Data Manager (sync, diagnostics) | `/data` | Complete |
+| GitHub backup / restore / diagnostic | `/data` → Database backup | Complete |
+| Learning-only backup / restore | `POST /data/backup/learning[/restore]` | API only — not surfaced |
+| Dhan connection test | `/data` → *Test Dhan connection* | Complete |
+| Dhan historical smoke test | `/data` → *Historical smoke test* | Complete |
+| Dhan token renewal | `/data` → *Renew Dhan token* | Complete |
+| Strategy Coach (statistical) | `/learning` → Strategy coach | Complete |
+| AI System Coach (LLM) | `/research` → AI panels → System coach | Complete |
+| AI Trade Debate Panel | `/scanner/runs/[id]` → AI trade debate panel | Complete |
+| System Learning Panel (5 agents) | `/research` → AI panels → System learning panel | Complete |
+| Forex/Crypto SMC scan | `/research` → Forex / Crypto SMC | Complete |
+| Crypto learning summary | `GET /smc/learning` | API only — not surfaced |
+| Watchlists | **new** `/watchlist` | Complete |
+| Scanner presets | **new** `/scanner` → Presets | Complete |
+| Saved scan runs, addressable by URL | **new** `/scanner/runs/[id]` | Complete |
+| Symbol search (`/` from anywhere) | **new** header search | Complete |
+| Dark / light theme | **new** `/settings` → Appearance | Complete |
+| Scan defaults | **new** `/settings` → Scan defaults | Complete |
+
+Three engine capabilities have endpoints but no UI of their own. Each is a
+narrow slice of something already on screen, and shipping a button for it
+without a place for the result to live would have been worse than leaving the
+endpoint documented:
+
+* `GET /stocks/{symbol}/sepa` — the SEPA watchlist gate, entry signal and
+  trailing stop. The S4 SEPA scan surfaces the same numbers for a whole universe.
+* `POST /data/backup/learning` and its restore — the small learning-only backup.
+  The whole-database backup on `/data` covers the same tables.
+* `GET /smc/learning` — persisted crypto research events, which only accumulate
+  once the SMC engine has been run against a configured Twelve Data account.
+
+---
+
+## 10. What was removed
+
+* `app.py` — the 2,682-line Streamlit interface. Its behaviour is reproduced by
+  the API plus `frontend/`; the file itself remains in git history.
+* the root `requirements.txt`, which existed to install Streamlit.
+* `multi_strategy_backtester.zip` — a 9 KB archive of an older `app.py`,
+  superseded and recoverable from history.
+* `Dhan test` — an empty file.
+* `core.render_data_freshness_banner()` — the engine's one presentational
+  function. Freshness is now reported from `data_freshness_status()` by the API.
+
+The five root-level regression scripts moved to `backend/tests/regression/` and
+are run under pytest by `tests/test_regression_scripts.py`. `test_universe.py`
+had half its assertions rewritten: it used to grep `app.py` for copy-pasted
+widget definitions, and now asserts the same invariant at its source — that no
+caller reaches past `UNIVERSE_CHOICES`.

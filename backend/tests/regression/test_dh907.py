@@ -1,8 +1,19 @@
 """Synthetic-data checks for Dhan DH-907 ("no data present") handling.
 
-Run directly:  python3 test_dh907.py
+Run directly:  python3 backend/tests/regression/test_dh907.py
 Nothing here touches the network: requests.post is monkeypatched.
 """
+# Run from the repository root:  python -m pytest backend/tests
+# or directly:                    python backend/tests/regression/<name>.py
+#
+# These predate the web migration and are kept script-shaped on purpose: each
+# one reproduces a specific incident, and rewriting them into pytest idiom would
+# risk losing the exact conditions that caught it. test_regression_scripts.py
+# runs them all under pytest.
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import os, sys, tempfile, json
 
 os.environ.setdefault("DHAN_CLIENT_ID", "test")
@@ -11,7 +22,7 @@ _tmpdb = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
 os.environ["DATA_DB"] = _tmpdb
 
 import pandas as pd
-import core
+from app.engine import core
 
 # Route the engine at a throwaway database and remove the request throttle so
 # the test runs instantly.

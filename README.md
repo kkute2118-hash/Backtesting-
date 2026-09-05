@@ -1,47 +1,170 @@
-🧠 Adaptive Trading Intelligence Lab
-A Dhan-first, persistent-data trading research and decision-support system for Indian equities, with separate research engines for crypto and forex.
-The system is designed around:
-Exact strategy rules → candidate detection → quality scoring → risk/safety → forward testing → learning → improved candidate ranking
-It is a research and decision-support system. It does not guarantee profits or automatically place real-money orders.
----
-🚀 Core Architecture
-Indian Equity Data
-Primary market-data source:
-Dhan API
-Dhan instrument master
-Dhan historical OHLCV
-Dhan live market feed / WebSocket
-Historical data is stored locally so the application does not repeatedly download the same data.
-The intended workflow is:
+# 🧠 Adaptive Trading Intelligence Lab
+
+A Dhan-first research and decision-support system for Indian equities, with
+separate research engines for crypto and forex.
+
 ```text
-Dhan
-  ↓
-Persistent Local Data Store
-  ↓
-Precomputed Indicators
-  ↓
-Fast Scanner / Backtester
-  ↓
-Strategies 1–4
-  ↓
-Scoring + Safety
-  ↓
-Forward Testing
-  ↓
-Learning Engine
+Exact strategy rules → candidate detection → quality scoring → risk/safety
+      → forward testing → learning → improved candidate ranking
 ```
+
+It is a research platform. **It places no orders and holds no broker write
+permissions.** A setup score ranks quality; it is not a probability of profit.
+
 ---
-🤖 Running Daily Without Opening the App
-Streamlit Cloud only executes the app while somebody has the page open, so
-nothing inside `app.py` can keep the forward test running on its own. The engine
-therefore lives in `core.py`, which imports with no UI, and `daily_job.py` drives
-it from GitHub Actions on a schedule.
+
+## 🏗️ Architecture
+
+```text
+                    ┌──────────────────────────────┐
+  browser  ────────▶│  frontend/  Next.js + TS     │
+                    │  Tailwind, TanStack Query    │
+                    └──────────────┬───────────────┘
+                                   │  REST /api/v1
+                    ┌──────────────▼───────────────┐
+                    │  backend/   FastAPI          │
+                    │  routers → services → engine │
+                    └──────────────┬───────────────┘
+                       ┌───────────┴───────────┐
+              ┌────────▼────────┐    ┌─────────▼─────────┐
+              │ app/engine/core │    │ app/db/app_store  │
+              │ strategies, MTF │    │ watchlists, presets│
+              │ scoring, safety │    │ preferences, runs  │
+              └────────┬────────┘    └─────────┬─────────┘
+                       └───────────┬───────────┘
+                          ┌────────▼────────┐
+                          │ market_data     │
+                          │ .sqlite3        │
+                          └─────────────────┘
+                                   ▲
+                     Dhan · Twelve Data · Anthropic · GitHub
+```
+
+| Path | Role |
+| --- | --- |
+| `backend/app/engine/core.py` | the engine — data, features, strategies S1–S4, scoring, safety, backtests, forward tests, learning. No UI, no HTTP. |
+| `backend/app/services/` | typed, JSON-safe wrappers around the engine, one module per domain |
+| `backend/app/api/v1/` | the REST surface |
+| `backend/app/db/app_store.py` | watchlists, scanner presets, preferences and run history |
+| `frontend/src/features/` | one directory per product area, each owning its page |
+| `daily_job.py` | headless runner for the scheduled GitHub Actions jobs |
+
+**Business logic never lives in the frontend.** The browser renders what the API
+returns; every calculation, every provider call and every credential stays on
+the server.
+
+`core.py` is deliberately kept as one module and was moved into the backend
+unchanged during the web migration — the strategy, scoring and safety maths is
+the product, and rewriting it while replacing the UI is how a scanner quietly
+starts returning different stocks. See `docs/MIGRATION.md`.
+
+---
+
+## ▶️ Running it
+
+Two processes. Python 3.11+ and Node 20+.
+
+**Backend**
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # fill in your credentials
+uvicorn app.main:app --reload --port 8000
+```
+
+The interactive API docs are then at <http://localhost:8000/docs>.
+
+**Frontend**
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local    # NEXT_PUBLIC_API_URL, nothing secret
+npm run dev
+```
+
+Open <http://localhost:3000>.
+
+**First run:** the app opens on an empty candle store. Go to **Data Manager**,
+pick a universe and use *Sync missing history* once to build it, then *Top up
+latest sessions* daily thereafter.
+
+---
+
+## 🔑 Configuration
+
+Every credential is read from the backend's environment (see
+`backend/.env.example`). Nothing is ever sent to the browser — the frontend
+receives only a boolean saying whether each provider is configured.
+
+| Variable | Needed for |
+| --- | --- |
+| `DHAN_CLIENT_ID` + `DHAN_PIN` + `DHAN_TOTP_SECRET` | Indian equity data, with automatic 24-hour token renewal (**preferred**) |
+| `DHAN_CLIENT_ID` + `DHAN_ACCESS_TOKEN` | the same, with a token you paste by hand each day |
+| `TWELVEDATA_API_KEY` | fundamentals, news/event risk, forex & crypto SMC (optional) |
+| `ANTHROPIC_API_KEY` | the AI coach, trade debate panel and learning panel (optional) |
+| `GH_BACKUP_TOKEN` + `GH_REPO` + `DB_BACKUP_BRANCH` | database backup (optional, strongly recommended) |
+| `DATA_DB` | where the SQLite file lives; defaults to a writable directory outside the checkout |
+| `CORS_ORIGINS` | browser origins allowed to call the API |
+
+`DHAN_TOTP_SECRET` is the base32 secret shown once when enabling TOTP-based API
+login in Dhan's console — not a 6-digit code. If both PIN+TOTP and a manual
+access token are present, PIN+TOTP renewal wins and the manual token remains a
+fallback.
+
+**Never commit credentials.** An existing `.streamlit/secrets.toml` is still
+read if present, so a deployment moving off Streamlit keeps working before the
+values are moved into the environment.
+
+---
+
+## 🧪 Tests
+
+```bash
+cd backend && python -m pytest        # 51 tests
+cd frontend && npm run typecheck && npm run build
+```
+
+The suite pins the things a migration can silently break:
+
+* indicator maths against hand-computed values, and `features_fast()` determinism
+* that ANDing a strategy's condition matrix reproduces `strategy_signal()` bar
+  for bar — the property the Early Warning Radar is built on
+* a full scan end to end over a seeded fixture universe, with no network access
+* that no NaN reaches the browser, a missing credential answers 503 naming the
+  key, and an unknown symbol answers 404 with advice
+* five script-shaped regression tests, each reproducing a specific past
+  incident (lost learning data, DH-907 handling, database location, the S4 SEPA
+  migration, universe coverage), run under pytest by
+  `tests/test_regression_scripts.py`
+
+### Two engine behaviours the tests document rather than fix
+
+Both change which stocks the scanner returns, so correcting either is an
+engine decision and not something a UI migration should do quietly:
+
+1. **`rsi()` returns NaN when there is no average loss.** It divides by
+   `dn.replace(0, NaN)`, so a window of unbroken up days yields NaN instead of
+   100 — every "RSI ≥ 50" gate reads False for the strongest momentum there is.
+2. **Monthly features use the whole calendar month.** `features_fast()`
+   aggregates each month in one pass and maps the result onto every daily row in
+   it. Correct for the current month, so the **live scanner is sound**; but a
+   *historical* bar carries that month's eventual close and high, which it could
+   not have known. Backtests and learning rows that lean on a monthly gate
+   inherit that and read optimistically.
+
+---
+
+## 🤖 Running daily without the app open
+
+The API server only runs the engine while it is up and something asks it to, so
+the forward test is driven by GitHub Actions instead.
 
 | File | Role |
 | --- | --- |
-| `core.py` | the engine — data, strategies, scoring, forward tests, learning. No UI. |
-| `app.py` | the Streamlit interface, importing `core` |
-| `daily_job.py` | headless runner for the scheduled jobs |
+| `daily_job.py` | headless runner |
 | `.github/workflows/dhan-token-renewal.yml` | 02:30 UTC daily (08:00 IST) |
 | `.github/workflows/daily-forward-test.yml` | 11:20 and 13:30 UTC on weekdays (16:50 / 19:00 IST) |
 
@@ -54,10 +177,9 @@ Two guards make it safe to leave running unattended:
 
 - **Stale candles skip the scan.** If Dhan has not published the latest session
   yet, the job resolves positions and stops. It never records a candidate from
-  out-of-date prices, which is the late-entry problem the whole change set
-  exists to fix.
-- **No backup config, no run.** If `GITHUB_TOKEN`/`GITHUB_REPO` are missing the
-  job aborts immediately, so it can never push an empty database over your saved
+  out-of-date prices.
+- **No backup config, no run.** If the backup token/repo are missing the job
+  aborts immediately, so it can never push an empty database over your saved
   forward tests.
 
 The scan runs **after the close**, on the finished daily candle, on purpose. An
@@ -88,38 +210,37 @@ non-reserved aliases, tried in this order:
 | repository | `GITHUB_REPO`, `GH_REPO`, `DB_BACKUP_REPO` |
 | backup branch | `GITHUB_BACKUP_BRANCH`, `GH_BACKUP_BRANCH`, `DB_BACKUP_BRANCH` |
 
-The `GITHUB_*` names still work in Streamlit Secrets, which has no such rule.
-
 Set a dedicated backup branch before enabling the schedule. Each backup commits
 the entire SQLite file, so a daily job pointed at your code branch would add one
 binary blob per day to its history forever. The branch is created automatically
 on the first backup if it does not exist.
 
 ---
-🩺 When the GitHub Backup Will Not Work
-**Data Manager → TEST GITHUB BACKUP** checks the whole path without writing a
+
+## 🩺 When the GitHub backup will not work
+
+**Data Manager → Test the backup path** checks the whole path without writing a
 commit: configuration present, repository name well-formed, token authenticates,
 repository actually visible to that token, write permission held, backup branch
 present, existing backup found. It names the exact failure.
 
 The usual causes, in order of how often they bite:
 
-1. **Two separate secret stores.** The Streamlit app reads **Streamlit Secrets**;
-   the scheduled jobs read **GitHub Actions secrets**. Configuring one does not
-   configure the other — if the app shows red, add the values in *Streamlit*
-   Secrets (Manage app → Settings → Secrets), not in the repository.
+1. **Two separate secret stores.** The API server reads its own environment; the
+   scheduled jobs read GitHub Actions secrets. Configuring one does not
+   configure the other.
 2. **A reserved name.** See the table above; a variable called
    `GITHUB_BACKUP_BRANCH` cannot be created in Actions at all.
 3. **Fine-grained token missing the repository.** A fine-grained PAT returns 404
    for a repository it was not explicitly granted, which looks identical to a
    typo. It needs *Repository access* → this repo, and *Repository permissions →
    Contents: Read and write*.
-4. **`GITHUB_REPO` set to a URL.** It must be `owner/repo`.
+4. **`GH_REPO` set to a URL.** It must be `owner/repo`.
 
-Failures are no longer swallowed: `backup_db_to_github()` returns the real
-reason, the Data Manager prints it, and `daily_job.py` logs it. A restore that
-fails for any reason other than "no backup exists yet" aborts the scheduled run
-rather than backing an empty database up over your saved forward tests.
+Failures are not swallowed: `backup_db_to_github()` returns the real reason, the
+Data Manager prints it, and `daily_job.py` logs it. A restore that fails for any
+reason other than "no backup exists yet" aborts the scheduled run rather than
+backing an empty database up over your saved forward tests.
 
 Two further operational notes: GitHub disables scheduled workflows in a
 repository with no activity for 60 days, and cron runs can be delayed under load
@@ -127,23 +248,23 @@ repository with no activity for 60 days, and cron runs can be delayed under load
 workflows also have a **Run workflow** button in the Actions tab.
 
 ---
-🕒 Data Freshness & Live Intraday Prices
+
+## 🕒 Data freshness & live intraday prices
+
 Stored daily candles can never be newer than the last completed NSE session, so
-a scan run during market hours was always evaluating yesterday's close. Two
-layers fix that.
+a scan run during market hours would otherwise be evaluating yesterday's close.
+Two layers fix that.
 
 **1. Fast top-up.** `sync_latest_sessions()` requests only the last
 `LATEST_SYNC_TAIL_DAYS` (10) calendar days per symbol instead of walking the
 full 1000-day window, and it re-requests the newest already-stored bars. Without
 that re-request a candle first written while its session was still open could
-never be corrected: `MAX(dt)` had already moved past it, so the "download the
-missing range" branch could not reach back. It is exposed as a button in both
-the Daily Scanner and the Data Manager.
+never be corrected: `MAX(dt)` had already moved past it. It is a button in both
+the Data Manager and the Scanner.
 
 **2. Live intraday overlay.** While the cash session is open, the Scanner and
 the Early Warning Radar can pull today's still-forming candle from Dhan's bulk
-quote feed (`dhan_quote_snapshot`, one request per 1000 instruments) and merge
-it into the daily history **in memory only**:
+quote feed and merge it into the daily history **in memory only**:
 
 ```text
 stored daily candles (closed sessions)
@@ -160,7 +281,9 @@ Keying on the date alone silently reused stale features whenever a candle was
 revised, or whenever today's forming bar moved.
 
 ---
-📈 Live Forward-Test P/L
+
+## 📈 Live forward-test P/L
+
 The persistent forward-test tracker shows a real current price and what the
 position is actually doing:
 
@@ -178,15 +301,18 @@ live price touching a level raises an alert in this table; it does not close the
 record.
 
 ---
-🚨 Early Warning Radar
-The Daily Scanner is binary: a stock is invisible until the day it passes every
-rule of a strategy, which is usually the day the move has already started. The
-radar answers the other question — which stocks are *about* to trigger.
+
+## 🚨 Early Warning Radar
+
+The scanner is binary: a stock is invisible until the day it passes every rule
+of a strategy, which is usually the day the move has already started. The radar
+answers the other question — which stocks are *about* to trigger.
 
 `strategy_condition_matrix()` decomposes each strategy into its individual
-conditions; ANDing them reproduces `strategy_signal()` exactly (verified across
-43,200 bar/strategy evaluations). That decomposition is what lets the radar
-report "7 of 9 rules pass, the blocker is Monthly RSI ≥ 50 and it is 3.6% away".
+conditions; ANDing them reproduces `strategy_signal()` exactly (asserted bar by
+bar in `backend/tests/test_strategies.py`). That decomposition is what lets the
+radar report "7 of 9 rules pass, the blocker is Monthly RSI ≥ 50 and it is 3.6%
+away".
 
 Alongside proximity it measures volatility compression, because expansion moves
 follow contraction: range percentile against the stock's own 120-day
@@ -198,28 +324,31 @@ Readiness = 55% proximity-to-trigger + 35% compression + regime adjustment
 ```
 
 The radar changes nothing about S1–S4 qualification. It builds a watchlist.
-Setting "how close" to 0 rules reproduces the normal scanner's qualified list
+Setting "rules allowed to fail" to 0 reproduces the scanner's qualified list
 exactly.
 
 ---
-⚡ Persistent Data & Fast Scanning
+
+## ⚡ Persistent data & fast scanning
+
 The application maintains a local historical-data cache.
-When data already exists locally:
+
 ```text
 Existing data → reuse
 Missing data  → download only missing range
 New data      → append/update cache
 ```
-This prevents unnecessary repeated downloads from Dhan.
-The architecture is designed to separate:
-data acquisition
-data storage
-feature calculation
-strategy evaluation
-scoring
-learning
-so that expensive calculations do not need to be repeated unnecessarily.
+
+No scan, backtest or page load downloads anything: acquisition is always an
+explicit Data Manager action. That keeps a study's inputs fixed while it runs
+and keeps the rate-limited Dhan budget under your control.
+
+The architecture separates data acquisition, data storage, feature calculation,
+strategy evaluation, scoring and learning, so expensive calculations are not
+repeated unnecessarily.
+
 ---
+
 📊 Strategies
 The system currently evaluates four primary strategies:
 Strategy 1
@@ -486,43 +615,6 @@ taxation
 regulatory requirements
 strategy performance
 before making real investment decisions.
----
-▶️ Installation
-Install the required Python packages:
-```bash
-pip install -r requirements.txt
-```
-Run the Streamlit application:
-```bash
-streamlit run app.py
-```
----
-🔑 Streamlit Secrets
-Dhan credentials should be stored in Streamlit Secrets rather than hard-coded in Python.
-Dhan access tokens expire every 24 hours (SEBI/exchange requirement) with no refresh-token
-flow for a bare access token. Two ways to configure Dhan:
-
-Manual (token must be regenerated in Dhan's console and pasted here daily):
-```toml
-DHAN_CLIENT_ID = "YOUR_DHAN_CLIENT_ID"
-DHAN_ACCESS_TOKEN = "YOUR_DHAN_ACCESS_TOKEN"
-```
-Automatic renewal (recommended — the app mints a fresh token itself via headless
-PIN+TOTP login once the cached one is ~23h old):
-```toml
-DHAN_CLIENT_ID = "YOUR_DHAN_CLIENT_ID"
-DHAN_PIN = "YOUR_DHAN_TRADING_PIN"
-DHAN_TOTP_SECRET = "YOUR_DHAN_TOTP_BASE32_SECRET"
-```
-`DHAN_TOTP_SECRET` is the base32 secret shown once when enabling TOTP-based API login in
-Dhan's console (the same kind of secret an authenticator app would be seeded with) — not a
-6-digit code. If both PIN+TOTP and a manual access token are present, PIN+TOTP auto-renewal
-takes priority; the manual token remains a fallback if PIN+TOTP secrets are ever removed.
-For Twelve Data features:
-```toml
-TWELVEDATA_API_KEY = "YOUR_TWELVE_DATA_API_KEY"
-```
-Never commit API keys or access tokens to GitHub.
 ---
 💾 Persistent Data
 Do not unnecessarily delete the application's local market-data or forward-testing databases.

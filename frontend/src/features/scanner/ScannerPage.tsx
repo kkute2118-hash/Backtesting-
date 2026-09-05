@@ -1,6 +1,6 @@
 "use client";
 
-import { History, Play, Target, Zap } from "lucide-react";
+import { Download, History, Play, Target, Zap } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -15,7 +15,7 @@ import { Note } from "@/components/ui/Misc";
 import { ErrorState, Skeleton } from "@/components/ui/States";
 import { FreshnessBanner } from "@/features/dashboard/FreshnessCard";
 import {
-  useFreshness, useJob, useScanRuns, useStartScan, useUniverses,
+  useFreshness, useJob, useScanRuns, useStartScan, useSyncLatest, useUniverses,
 } from "@/hooks/queries";
 import { errorMessage } from "@/lib/api";
 import { int, relativeTime } from "@/lib/format";
@@ -41,18 +41,30 @@ export function ScannerPage() {
   const { data: freshness, error: freshnessError } = useFreshness(form.universes);
   const { data: runs } = useScanRuns(8);
   const startScan = useStartScan();
+  const syncLatest = useSyncLatest();
   const { data: job } = useJob(jobId);
 
   // A finished scan takes the user straight to its results, which is where the
   // work continues — there is nothing more to do on this page once it is done.
   useEffect(() => {
-    if (job?.status === "succeeded") {
+    // Only a scan has results to open; a top-up job finishes in place.
+    if (job?.status === "succeeded" && job.kind === "scan") {
       router.push(`/scanner/runs/${job.id}`);
     }
-  }, [job?.status, job?.id, router]);
+  }, [job?.status, job?.id, job?.kind, router]);
 
   function set<K extends keyof ScanFormState>(key: K, value: ScanFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  async function topUp() {
+    try {
+      const started = await syncLatest.mutateAsync({ universes: form.universes });
+      setJobId(started.id);
+      toast.success("Fetching the newest sessions");
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
   }
 
   async function run() {
@@ -82,7 +94,23 @@ export function ScannerPage() {
           ranks the survivors, it never promotes a stock past a failing rule."
       />
 
-      <FreshnessBanner freshness={freshness} error={freshnessError} />
+      <FreshnessBanner
+        freshness={freshness}
+        error={freshnessError}
+        action={
+          freshness && freshness.severity === "error" ? (
+            <Button
+              size="sm"
+              variant="primary"
+              loading={syncLatest.isPending}
+              onClick={topUp}
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden />
+              Top up now
+            </Button>
+          ) : undefined
+        }
+      />
 
       {job ? <JobProgress job={job} onDismiss={() => setJobId(null)} /> : null}
 

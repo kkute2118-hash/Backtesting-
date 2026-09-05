@@ -13,8 +13,8 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Change, Note, ScoreBar, Stat } from "@/components/ui/Misc";
 import { EmptyState, ErrorState, Skeleton, SkeletonCards } from "@/components/ui/States";
 import {
-  useAddToWatchlist, useConditions, useHistory, useIndicators, useQuote, useSafety,
-  useStockSignals, useWatchlists,
+  useAddToWatchlist, useConditions, useConfig, useHistory, useIndicators, useQuote,
+  useSafety, useStockSignals, useWatchlists,
 } from "@/hooks/queries";
 import { errorMessage } from "@/lib/api";
 import { compact, date, inr, inrCompact, int, num, relativeTime, signed } from "@/lib/format";
@@ -23,6 +23,7 @@ import type { Row } from "@/types/api";
 
 import { ConditionMatrix } from "./ConditionMatrix";
 import { IndicatorPanel } from "./IndicatorPanel";
+import { FundamentalsCard, StockDnaCard } from "./StockExtras";
 
 const TIMEFRAMES = ["3M", "6M", "1Y", "2Y", "5Y", "MAX"] as const;
 const OVERLAY_OPTIONS = ["ema20", "ema50", "ema200"] as const;
@@ -46,6 +47,7 @@ export function StockPage({ symbol }: { symbol: string }) {
   const conditions = useConditions(symbol);
   const signals = useStockSignals(symbol);
   const safety = useSafety(symbol);
+  const config = useConfig();
 
   if (quote.isLoading) {
     return (
@@ -306,6 +308,12 @@ export function StockPage({ symbol }: { symbol: string }) {
             </CardBody>
           ) : null}
         </Card>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <StockDnaCard symbol={symbol} />
+        <FundamentalsCard symbol={symbol}
+          available={config.data?.providers.twelvedata.configured ?? false} />
       </div>
 
       {(signals.data?.forward_tests ?? []).length > 0 ? (

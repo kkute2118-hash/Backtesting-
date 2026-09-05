@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  ArrowLeft, BadgeCheck, Layers, Send, ShieldAlert, Sparkles, TriangleAlert,
+  ArrowLeft, BadgeCheck, Bot, Layers, Send, ShieldAlert, Sparkles, TriangleAlert,
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
@@ -15,8 +15,10 @@ import { DataTable, type Column } from "@/components/ui/DataTable";
 import { SearchInput, useDebounced } from "@/components/ui/Inputs";
 import { Change, Note, ScoreBar, Stat, SymbolLink } from "@/components/ui/Misc";
 import { EmptyState, ErrorState, Progress, SkeletonTable } from "@/components/ui/States";
+import { JobProgress } from "./JobProgress";
 import {
-  useAddForwardCandidates, useFilteredResults, useJob, useRun, type ResultFilters,
+  useAddForwardCandidates, useConfig, useDebatePanel, useFilteredResults, useJob, useRun,
+  type ResultFilters,
 } from "@/hooks/queries";
 import { errorMessage } from "@/lib/api";
 import { inr, int, num, pct, ratio } from "@/lib/format";
@@ -465,12 +467,77 @@ export function ResultsPage({ runId }: { runId: string }) {
             </Card>
           ) : null}
 
+          <DebatePanel rows={rows} />
+
           <Diagnostics stats={stats} />
         </div>
       </div>
     </Page>
   );
 }
+
+/**
+ * The five-agent trade debate.
+ *
+ * It argues over candidates the scanner already produced; it cannot create,
+ * modify or approve a signal. The judge's ranking is an opinion on a shortlist,
+ * not a decision, and it never overrides a failing rule.
+ */
+function DebatePanel({ rows }: { rows: Row[] }) {
+  const { data: config } = useConfig();
+  const [jobId, setJobId] = useState<string | null>(null);
+  const debate = useDebatePanel();
+  const { data: job } = useJob(jobId);
+  const run = useRun(jobId, job?.status === "succeeded");
+
+  const configured = config?.providers.anthropic.configured ?? false;
+  const panel = (run.data as unknown as { panel?: Record<string, unknown> } | undefined)?.panel;
+
+  return (
+    <Card>
+      <CardHeader
+        title="AI trade debate panel"
+        description="Five agents — technical, statistical sceptic, risk/capital, devil's
+          advocate, judge — argue over the top candidates in this result."
+        icon={<Bot className="h-3.5 w-3.5 text-accent" />}
+        action={
+          <Button
+            size="sm"
+            disabled={!configured || rows.length === 0}
+            title={configured ? undefined : "Needs ANTHROPIC_API_KEY"}
+            loading={debate.isPending || job?.status === "running"}
+            onClick={async () => {
+              try {
+                const started = await debate.mutateAsync({ rows, target_count: 5 });
+                setJobId(started.id);
+              } catch (error) {
+                toast.error(errorMessage(error));
+              }
+            }}
+          >
+            Run the panel
+          </Button>
+        }
+      />
+      <CardBody className="space-y-3">
+        {!configured ? (
+          <Note>
+            The debate panel needs ANTHROPIC_API_KEY in the backend environment. Everything
+            else on this page works without it.
+          </Note>
+        ) : null}
+        {job ? <JobProgress job={job} onDismiss={() => setJobId(null)} /> : null}
+        {panel ? (
+          <pre className="max-h-96 overflow-auto scroll-thin rounded-md border border-line
+            bg-elevated p-3 text-2xs leading-relaxed text-muted">
+            {JSON.stringify(panel, null, 2)}
+          </pre>
+        ) : null}
+      </CardBody>
+    </Card>
+  );
+}
+
 
 function Diagnostics({ stats }: { stats: Record<string, unknown> }) {
   const perStrategy = (stats.per_strategy ?? []) as Array<{

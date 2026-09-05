@@ -14,13 +14,24 @@ Covers:
 Run from a scratch copy of app.py + core.py (never against the real repo's
 market_data.sqlite3).
 """
+# Run from the repository root:  python -m pytest backend/tests
+# or directly:                    python backend/tests/regression/<name>.py
+#
+# These predate the web migration and are kept script-shaped on purpose: each
+# one reproduces a specific incident, and rewriting them into pytest idiom would
+# risk losing the exact conditions that caught it. test_regression_scripts.py
+# runs them all under pytest.
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import os
 import sys
 import sqlite3
 import numpy as np
 import pandas as pd
 
-import core
+from app.engine import core
 
 FAILURES = []
 

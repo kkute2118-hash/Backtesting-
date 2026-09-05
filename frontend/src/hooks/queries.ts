@@ -532,6 +532,59 @@ export const useRenewToken = () => {
 // --------------------------------------------------------------------------- //
 // preferences
 // --------------------------------------------------------------------------- //
+// --------------------------------------------------------------------------- //
+// stock extras, live feed, AI debate
+// --------------------------------------------------------------------------- //
+export const useStockDna = (symbol: string) =>
+  useQuery({
+    queryKey: ["stock-dna", symbol],
+    queryFn: () => api.get<Record<string, unknown>>(`/stocks/${symbol}/dna`),
+  });
+
+export const useFundamentals = (symbol: string, enabled: boolean) =>
+  useQuery({
+    queryKey: ["fundamentals", symbol],
+    queryFn: () => api.get<{
+      symbol: string; available: boolean; message?: string;
+      profile: Record<string, unknown>; flags: string[];
+      piotroski: unknown; screens: Record<string, unknown>;
+    }>(`/stocks/${symbol}/fundamentals`),
+    enabled,
+  });
+
+export const useLiveForward = (enabled: boolean) =>
+  useQuery({
+    queryKey: ["live-forward"],
+    queryFn: () => api.get<{ rows: Row[] }>("/live/forward"),
+    enabled,
+    refetchInterval: enabled ? REFRESH.live : false,
+  });
+
+export const useStartLiveFeed = () => {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (symbols: string[]) =>
+      api.post<{ ok: boolean; symbols: string[]; count: number }>("/live/start", { symbols }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["live-forward"] }),
+  });
+};
+
+export const useStopLiveFeed = () =>
+  useMutation({ mutationFn: () => api.post<{ ok: boolean }>("/live/stop") });
+
+export const useSmokeTest = () =>
+  useMutation({
+    mutationFn: (symbol: string) =>
+      api.post<{ symbol: string; days: number; result: unknown }>(
+        "/data/smoke-test", undefined, { symbol, days: 30 }),
+  });
+
+export const useDebatePanel = () =>
+  useMutation({
+    mutationFn: (payload: { rows: Row[]; target_count: number }) =>
+      api.post<Job>("/ai/debate", payload),
+  });
+
 export const usePreferences = () =>
   useQuery({
     queryKey: ["preferences"],

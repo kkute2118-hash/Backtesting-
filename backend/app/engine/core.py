@@ -112,7 +112,7 @@ def _writable_data_dir():
     """First writable directory OUTSIDE the git checkout, for the database.
 
     DATA_DB used to be the bare relative filename, which put the live database
-    inside /mount/src/<repo> - the git working tree Streamlit Cloud deploys
+    inside the git working tree a deploy checks out
     into. That is the wrong side of the fence in two ways, and both have now
     actually happened:
 
@@ -148,7 +148,7 @@ def _writable_data_dir():
 
 DATA_DB = os.environ.get("DATA_DB") or os.path.join(_writable_data_dir(), DATA_DB_FILENAME)
 
-# ---- GitHub-based DB backup/restore (Tier 1 fix for Streamlit Cloud's
+# ---- GitHub-based DB backup/restore (the fix for an ephemeral container's
 # ephemeral filesystem: every reboot/redeploy clones a fresh container from
 # GitHub, and DATA_DB is not committed to git, so accumulated learning data
 # would otherwise vanish on any restart). This is a stopgap, not a permanent
@@ -319,7 +319,7 @@ def db_row_count(path=None):
 def restore_db_from_github():
     """Call once at app startup, before any _db() call. If the local DB file
     is missing or holds no rows, pulls the last backup from GitHub so learning
-    data survives a Streamlit Cloud reboot. Never raises - a failed restore just
+    data survives a container reboot. Never raises - a failed restore just
     means the app starts fresh, same as today's behavior without this patch."""
     global _GITHUB_LAST_ERROR
     if not _github_configured():
@@ -744,7 +744,7 @@ def maybe_backup_db(min_interval_minutes=15):
     to run inline and too large to commit repeatedly, so in practice it never
     protected anything. The interval state lives in a module global rather than
     st.session_state so the same call works from daily_job.py, where there is
-    no Streamlit session at all.
+    no web session at all.
     """
     global _LAST_LEARNING_BACKUP_TS
     now = datetime.now()
@@ -1824,7 +1824,7 @@ def _ensure_ws_tables():
 class DhanLiveManager:
     """
     One persistent market-hours WebSocket for the active forward-test list.
-    It runs outside the Streamlit UI thread, reconnects automatically, and
+    It runs outside any request thread, reconnects automatically, and
     stores the latest tick in SQLite. The UI reads the stored latest prices.
     """
     def __init__(self):
@@ -7352,7 +7352,7 @@ def run_trade_debate_panel(scan_result_df, capital=None, max_slots=None, risk_pc
 #   (b) the winners-vs-losers/marking-read data (_feature_gap_table/RAW_SIGNAL_NUMERIC_FEATURES/
 #       RAW_SIGNAL_SCORE_COMPONENTS), computed here from a raw_signal_result DataFrame the
 #       caller passes in (the UI passes st.session_state.get("raw_signal_result") - kept out
-#       of this function's signature so it stays plain-Python testable without a Streamlit
+#       of this function's signature so it stays plain-Python testable without a web
 #       context). Absent/too-small data is reported in the payload, never treated as failure.
 #   (c) Part A's sl_calibration_results table, queried directly here.
 

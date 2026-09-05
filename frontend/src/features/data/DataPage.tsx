@@ -18,7 +18,7 @@ import { JobProgress } from "@/features/scanner/JobProgress";
 import {
   useBackupDiagnostic, useBackupStatus, useConfig, useConnectionTest, useDataStore,
   useFreshness, useJob, useRenewToken, useRestoreBackup, useRunBackup, useRunDiagnostics,
-  useStoredDiagnostics, useSyncFull, useSyncLatest, useUniverses,
+  useSmokeTest, useStoredDiagnostics, useSyncFull, useSyncLatest, useUniverses,
 } from "@/hooks/queries";
 import { errorMessage } from "@/lib/api";
 import { compact, date, int, relativeTime } from "@/lib/format";
@@ -46,6 +46,7 @@ export function DataPage() {
   const restoreNow = useRestoreBackup();
   const backupDiagnostic = useBackupDiagnostic();
   const renewToken = useRenewToken();
+  const smokeTest = useSmokeTest();
 
   const dhanConfigured = config?.providers.dhan.configured ?? false;
 
@@ -246,6 +247,16 @@ export function DataPage() {
                 <Radio className="h-3.5 w-3.5" aria-hidden />
                 Test Dhan connection
               </Button>
+              <Button size="sm" variant="ghost" loading={smokeTest.isPending}
+                disabled={!dhanConfigured}
+                title="Downloads 30 days of RELIANCE and reports exactly what came back"
+                onClick={() => smokeTest.mutate("RELIANCE", {
+                  onSuccess: () => toast.success("Smoke test complete — see the report below"),
+                  onError: (error) => toast.error(errorMessage(error)),
+                })}>
+                <Stethoscope className="h-3.5 w-3.5" aria-hidden />
+                Historical smoke test
+              </Button>
               <Button size="sm" variant="ghost" loading={renewToken.isPending}
                 disabled={!config?.providers.dhan.auto_renew}
                 title={config?.providers.dhan.auto_renew
@@ -264,6 +275,13 @@ export function DataPage() {
               <pre className="max-h-64 overflow-auto scroll-thin rounded-md border border-line
                 bg-elevated p-3 text-2xs leading-relaxed text-muted">
                 {JSON.stringify(backupDiagnostic.data.result, null, 2)}
+              </pre>
+            ) : null}
+
+            {smokeTest.data ? (
+              <pre className="max-h-64 overflow-auto scroll-thin rounded-md border border-line
+                bg-elevated p-3 text-2xs leading-relaxed text-muted">
+                {JSON.stringify(smokeTest.data.result, null, 2)}
               </pre>
             ) : null}
 

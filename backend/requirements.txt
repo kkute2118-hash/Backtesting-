@@ -5,7 +5,7 @@ pydantic>=2.7,<3
 pydantic-settings>=2.3,<3
 python-multipart>=0.0.9,<1
 
-# Engine (unchanged from the Streamlit build)
+# Engine. Unchanged from before the web migration, minus streamlit.
 pandas>=2.0,<3
 numpy>=1.24,<3
 requests>=2.31,<3

@@ -1,14 +1,25 @@
 """The database must live outside the git checkout, and must fail loudly.
 
-Run directly:  python3 test_db_location.py
+Run directly:  python3 backend/tests/regression/test_db_location.py
 """
+# Run from the repository root:  python -m pytest backend/tests
+# or directly:                    python backend/tests/regression/<name>.py
+#
+# These predate the web migration and are kept script-shaped on purpose: each
+# one reproduces a specific incident, and rewriting them into pytest idiom would
+# risk losing the exact conditions that caught it. test_regression_scripts.py
+# runs them all under pytest.
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import os, sys, sqlite3, tempfile, subprocess, textwrap
 
 os.environ.setdefault("DHAN_CLIENT_ID", "x")
 _scratch = tempfile.mkdtemp()
 os.environ["GTF_DATA_DIR"] = _scratch
 
-import core
+from app.engine import core
 
 FAILS = []
 
@@ -49,8 +60,8 @@ with open(helper, "w") as f:
         import os, sys
         os.environ["DATA_DB"] = {ro_db!r}
         os.environ.setdefault("DHAN_CLIENT_ID", "x")
-        sys.path.insert(0, {os.path.dirname(os.path.abspath(core.__file__))!r})
-        import core
+        sys.path.insert(0, {str(pathlib.Path(core.__file__).resolve().parents[2])!r})
+        from app.engine import core
         try:
             core._db().close()
             print("NO_ERROR")
@@ -59,8 +70,12 @@ with open(helper, "w") as f:
     """))
 os.chmod(helper, 0o755)
 os.chmod(ro_dir, 0o555)
-proc = subprocess.run(["su", "nobody", "-s", "/bin/sh", "-c", f"python3 {helper}"],
-                      capture_output=True, text=True)
+# sys.executable, not "python3": the engine's dependencies may live in a
+# virtualenv the system interpreter cannot see, and a ModuleNotFoundError from
+# the child would be misread as the database error this test is checking for.
+proc = subprocess.run(
+    ["su", "nobody", "-s", "/bin/sh", "-c", f"{sys.executable} {helper}"],
+    capture_output=True, text=True)
 combined = proc.stdout + proc.stderr
 check("a read-only database raises DatabaseUnavailable",
       "DatabaseUnavailable" in combined, combined[-300:])

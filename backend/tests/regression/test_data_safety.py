@@ -1,14 +1,25 @@
 """Checks that accumulated learning data cannot be silently lost.
 
-Run directly:  python3 test_data_safety.py
+Run directly:  python3 backend/tests/regression/test_data_safety.py
 No network: the GitHub calls are exercised through export/import only.
 """
+# Run from the repository root:  python -m pytest backend/tests
+# or directly:                    python backend/tests/regression/<name>.py
+#
+# These predate the web migration and are kept script-shaped on purpose: each
+# one reproduces a specific incident, and rewriting them into pytest idiom would
+# risk losing the exact conditions that caught it. test_regression_scripts.py
+# runs them all under pytest.
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import os, sys, sqlite3, tempfile
 
 _tmpdb = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
 os.environ.setdefault("DHAN_CLIENT_ID", "test")
 
-import core
+from app.engine import core
 
 core.DATA_DB = _tmpdb
 

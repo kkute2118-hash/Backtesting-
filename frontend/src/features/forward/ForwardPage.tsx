@@ -13,8 +13,8 @@ import { Toggle } from "@/components/ui/Inputs";
 import { Change, Note, ScoreBar, Stat, SymbolLink } from "@/components/ui/Misc";
 import { EmptyState, ErrorState, SkeletonCards, SkeletonTable } from "@/components/ui/States";
 import {
-  useForwardPositions, useForwardResults, useForwardSummary, useRefreshForward,
-  useScannerSignals,
+  useConfig, useForwardPositions, useForwardResults, useForwardSummary, useLiveForward,
+  useRefreshForward, useScannerSignals, useStartLiveFeed, useStopLiveFeed,
 } from "@/hooks/queries";
 import { errorMessage } from "@/lib/api";
 import { date, inr, int, num, pct, relativeTime, signed } from "@/lib/format";
@@ -30,7 +30,7 @@ function s(row: Row, key: string): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
-type Tab = "open" | "closed" | "signals";
+type Tab = "open" | "closed" | "signals" | "live";
 
 export function ForwardPage() {
   const [tab, setTab] = useState<Tab>("open");
@@ -254,6 +254,7 @@ export function ForwardPage() {
             ["open", `Open (${openRows.length})`],
             ["closed", `Closed (${(results.data?.rows ?? []).length})`],
             ["signals", "Signal log"],
+            ["live", "Live monitor"],
           ] as const).map(([key, label]) => (
             <button
               key={key}
@@ -327,6 +328,8 @@ export function ForwardPage() {
                 or its target."
             />
           )
+        ) : tab === "live" ? (
+          <LiveMonitor />
         ) : signals.isLoading ? (
           <SkeletonTable rows={5} cols={7} />
         ) : (
@@ -403,5 +406,95 @@ export function ForwardPage() {
         </Card>
       ) : null}
     </Page>
+  );
+}
+
+
+/**
+ * The persistent Dhan WebSocket.
+ *
+ * It streams only the symbols with an open forward test rather than the whole
+ * market — that is the entire point of the live layer: track the candidates,
+ * re-rank them from ticks, and never rebuild two thousand histories a minute.
+ */
+function LiveMonitor() {
+  const { data: config } = useConfig();
+  const [streaming, setStreaming] = useState(false);
+  const start = useStartLiveFeed();
+  const stop = useStopLiveFeed();
+  const live = useLiveForward(streaming);
+
+  const configured = config?.providers.dhan.configured ?? false;
+
+  const columns: Column<Row>[] = [
+    { key: "symbol", header: "Symbol", sticky: true, width: "7.5rem",
+      render: (row) => <SymbolLink symbol={s(row, "symbol")} />,
+      value: (row) => s(row, "symbol") },
+    { key: "strategy", header: "Strategy",
+      render: (row) => <Badge tone="accent">{s(row, "strategy")}</Badge>,
+      value: (row) => s(row, "strategy") },
+    { key: "ltp", header: "Last tick", align: "right", render: (row) => inr(n(row, "ltp")),
+      value: (row) => n(row, "ltp") },
+    { key: "entry", header: "Entry", align: "right", render: (row) => inr(n(row, "entry")),
+      value: (row) => n(row, "entry") },
+    { key: "sl", header: "Stop", align: "right",
+      render: (row) => <span className="text-down">{inr(n(row, "sl"))}</span>,
+      value: (row) => n(row, "sl") },
+    { key: "target", header: "Target", align: "right",
+      render: (row) => <span className="text-up">{inr(n(row, "target"))}</span>,
+      value: (row) => n(row, "target") },
+    { key: "ts", header: "Tick time", align: "right",
+      render: (row) => <span className="text-2xs text-faint">{relativeTime(s(row, "ts"))}</span>,
+      value: (row) => s(row, "ts") },
+  ];
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line
+        px-3 py-2.5">
+        <p className="text-2xs leading-relaxed text-muted">
+          {configured
+            ? "Streams the open forward-test symbols from Dhan's live feed. A tick raises an " +
+              "alert; it never closes a record — resolution happens on completed daily candles."
+            : "Dhan is not configured, so there is no live feed to start."}
+        </p>
+        <div className="flex items-center gap-2">
+          {streaming ? (
+            <Button size="sm" variant="secondary" loading={stop.isPending}
+              onClick={() => stop.mutate(undefined, {
+                onSuccess: () => { setStreaming(false); toast.success("Live feed stopped"); },
+                onError: (error) => toast.error(errorMessage(error)),
+              })}>
+              Stop feed
+            </Button>
+          ) : (
+            <Button size="sm" variant="primary" disabled={!configured} loading={start.isPending}
+              onClick={() => start.mutate([], {
+                onSuccess: (result) => {
+                  setStreaming(true);
+                  toast.success(`Streaming ${result.count} symbol${result.count === 1 ? "" : "s"}`);
+                },
+                onError: (error) => toast.error(errorMessage(error)),
+              })}>
+              <Radio className="h-3.5 w-3.5" aria-hidden />
+              Start feed
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <DataTable
+        rows={live.data?.rows ?? []}
+        columns={columns}
+        getRowId={(row) => `${s(row, "symbol")}-${s(row, "strategy")}`}
+        emptyTitle={streaming ? "Waiting for ticks" : "Feed not running"}
+        emptyMessage={
+          streaming
+            ? "Connected. Ticks appear as the exchange publishes them; outside session hours " +
+              "there are none."
+            : "Start the feed to stream live prices for your open forward tests."
+        }
+      />
+    </div>
   );
 }
