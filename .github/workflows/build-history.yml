@@ -54,15 +54,41 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
+      # Fails in two seconds with a message on the run's summary page rather
+      # than in the middle of a log, because this is the one thing a first-time
+      # run gets wrong: Actions secrets are a separate store from the web host's
+      # environment variables, so credentials set on the host are not here.
+      - name: Check the Dhan credentials are present
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN: ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$DHAN_CLIENT_ID" ] && [ -n "$DHAN_PIN" ] && [ -n "$DHAN_TOTP_SECRET" ]; then
+            echo "Using PIN + TOTP; the job will mint its own 24-hour token."
+          elif [ -n "$DHAN_ACCESS_TOKEN" ]; then
+            echo "Using the manual DHAN_ACCESS_TOKEN."
+          else
+            echo "::error title=Dhan credentials missing::Add DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) under Settings -> Secrets and variables -> Actions. Credentials set on your web host are a different store and are not visible here."
+            exit 1
+          fi
+
       - name: Build history
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_PIN: ${{ secrets.DHAN_PIN }}
           DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
-          # The workflow's own token can commit to this repository given the
-          # contents:write permission above, so no PAT is needed here.
-          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
+          # The workflow's own token, deliberately, and not secrets.GH_BACKUP_TOKEN.
+          # Both write to this same repository (GH_REPO below is github.repository),
+          # but a personal access token can be read-only — and this one was: the
+          # app's first backup failed with "Resource not accessible by personal
+          # access token" when it tried to create the backup branch. A PAT's
+          # permissions are invisible from here, so preferring it meant a five-hour
+          # history build could finish and then fail to save anything. github.token
+          # is guaranteed write by the contents:write permission above.
+          GH_BACKUP_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           # Defaults to a dedicated branch rather than the repository's default
           # one: each backup commits the whole SQLite file, so leaving it unset

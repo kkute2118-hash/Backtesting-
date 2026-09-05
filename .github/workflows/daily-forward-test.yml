@@ -53,11 +53,15 @@ jobs:
           DHAN_PIN: ${{ secrets.DHAN_PIN }}
           DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
-          # GitHub forbids secret/variable NAMES starting with "GITHUB_", so the
-          # engine accepts these aliases instead. GH_BACKUP_TOKEN is optional —
-          # without it the workflow's own token is used, which is enough to
-          # commit to this repository given the contents:write permission above.
-          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN || github.token }}
+          # The workflow's own token, deliberately, and not secrets.GH_BACKUP_TOKEN.
+          # Both write to this same repository (GH_REPO below is github.repository),
+          # but a personal access token can be read-only — and this one was: the
+          # app's first backup failed with "Resource not accessible by personal
+          # access token" when it tried to create the backup branch. A PAT's
+          # permissions are invisible from here, so preferring it meant a five-hour
+          # history build could finish and then fail to save anything. github.token
+          # is guaranteed write by the contents:write permission above.
+          GH_BACKUP_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           # Defaults to a dedicated branch rather than the repository's default
           # one: each backup commits the whole SQLite file, so leaving it unset

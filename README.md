@@ -224,13 +224,21 @@ Setup — repository **Settings → Secrets and variables → Actions**:
 ```text
 Secrets   DHAN_CLIENT_ID, DHAN_PIN, DHAN_TOTP_SECRET   REQUIRED
           (or DHAN_ACCESS_TOKEN if you are not using PIN+TOTP)
-          GH_BACKUP_TOKEN   optional; defaults to the built-in Actions token
 
 Variables DB_BACKUP_BRANCH  optional; the workflows default to "db-backup"
           SCAN_UNIVERSE     default "Nifty 500"; join with | for several
           SCAN_STRATEGIES   default "1,2,3,4"
           SCAN_MIN_SCORE    default "85"
 ```
+
+The jobs back up with the workflow's own `github.token`, not with a personal
+access token, and there is nothing to configure for it. A PAT's permissions
+cannot be inspected from inside a run, so a read-only one would let a five-hour
+history build finish and then fail to save anything; `github.token` is
+guaranteed write by each workflow's `permissions: contents: write`. The app
+server still needs its own `GH_BACKUP_TOKEN`, and that one **must** hold
+*Contents: Read and write* — with a read-only token it can restore but every
+backup fails with "Resource not accessible by personal access token".
 
 **GitHub refuses to create any secret or variable whose name starts with
 `GITHUB_`** — the prefix is reserved. The backup settings therefore accept
