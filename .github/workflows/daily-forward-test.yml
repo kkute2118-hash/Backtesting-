@@ -1,8 +1,8 @@
 # Runs the forward test every trading day without the app being open.
 #
-# Streamlit Cloud only executes app.py while somebody has the page open, so
-# the forward test could never advance on its own. This drives the same engine
-# (core.py, via daily_job.py) on GitHub's runners after the NSE close:
+# The web UI only runs the engine while its API server is up, so
+# the forward test could not advance on its own. This drives the same engine
+# (backend/app/engine/core.py, via daily_job.py) on GitHub's runners after the NSE close:
 #
 #   restore DB -> renew token -> sync candles -> resolve open positions
 #   -> scan the just-closed session -> record candidates -> back up DB
@@ -45,7 +45,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r backend/requirements.txt
 
       - name: Run daily forward test
         env:

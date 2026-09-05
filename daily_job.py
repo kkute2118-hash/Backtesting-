@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Scheduled, headless runner for the Adaptive Trading Intelligence Lab.
 
-Streamlit Cloud only executes the app while somebody has it open, so nothing in
-app.py can keep the forward test running on its own. This script drives the same
-engine (core.py) from GitHub Actions instead, on a cron schedule, with the app
-closed.
+The web app only runs the engine while its API server is up and somebody asks
+it to. This script drives the same engine (backend/app/engine/core.py) from
+GitHub Actions instead, on a cron schedule, with nothing else running.
 
     python daily_job.py token     # renew the Dhan access token only
     python daily_job.py daily     # full post-close run
@@ -40,7 +39,7 @@ Configuration comes from environment variables (see core._secret):
 
 GitHub refuses to create secrets or variables whose NAME starts with "GITHUB_",
 so the backup settings are read from the non-reserved aliases above (the
-original GITHUB_TOKEN / GITHUB_REPO names still work in Streamlit Secrets).
+original GITHUB_TOKEN / GITHUB_REPO names still work in a local .env).
 """
 
 import argparse
@@ -49,9 +48,13 @@ import os
 import sys
 import traceback
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
-# Import the engine, not the UI. core.py runs no Streamlit commands at import.
-import core
+# Import the engine, not the API. The engine moved into the backend package
+# during the web-app migration; this keeps the workflows' entry point and CLI
+# unchanged by putting backend/ on the path rather than moving the script.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "backend"))
+from app.engine import core  # noqa: E402
 
 
 def log(step, message):

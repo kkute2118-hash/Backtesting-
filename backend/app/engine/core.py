@@ -1,18 +1,25 @@
 """Adaptive Trading Intelligence Lab — engine.
 
-Everything that is NOT the Streamlit UI lives here: data acquisition, the
+Everything that is not presentation lives here: data acquisition, the
 candle store, features, strategies S1-S4, scoring, safety, forward-test
 bookkeeping, learning and research.
 
-Importing this module runs no UI, so the scheduled jobs in
-.github/workflows can drive the same engine headlessly on GitHub's runners
-(see daily_job.py). app.py imports it and adds the Streamlit interface on top.
+Importing this module runs no UI. The FastAPI backend in app/ wraps it in
+typed services, and the scheduled jobs in .github/workflows drive the same
+engine headlessly on GitHub's runners (see daily_job.py).
 
-Credentials are read through _secret(), which falls back from Streamlit
-Secrets to environment variables for exactly that reason.
+It is deliberately kept as one module and moved here unchanged: the strategy,
+scoring and safety maths is the product, and rewriting it during a UI
+migration is how a scanner silently starts returning different stocks. The
+only edit made when it moved out of the Streamlit app was its import line -
+st_compat supplies the caching and configuration lookup it used to get from
+Streamlit.
+
+Credentials are read through _secret(), which falls back to environment
+variables, so one code path serves the API server and the cron jobs.
 """
 
-import streamlit as st
+from app.engine import st_compat as st
 import pandas as pd
 import numpy as np
 import requests
@@ -81,7 +88,7 @@ def resolve_universe(name):
             raise RuntimeError(
                 f"'{FULL_NSE_UNIVERSE}' is built from Dhan's instrument master, so it needs "
                 "Dhan credentials. Add DHAN_CLIENT_ID plus DHAN_PIN + DHAN_TOTP_SECRET (or "
-                "DHAN_ACCESS_TOKEN) to Streamlit Secrets, or pick one of the Nifty index "
+                "DHAN_ACCESS_TOKEN) to the backend environment, or pick one of the Nifty index "
                 "universes instead."
             )
         return nse_liquid_universe()
@@ -226,7 +233,7 @@ def _github_error_hint(status, body):
     """Turn a GitHub API status into something actionable."""
     if status == 401:
         return ("401 Unauthorized — the token is invalid or expired. Generate a new one and "
-                "update it in Streamlit Secrets / Actions secrets.")
+                "update it in the backend environment / Actions secrets.")
     if status == 403:
         return ("403 Forbidden — the token authenticated but is not allowed to write. A "
                 "fine-grained token needs Repository permissions → Contents: Read and write, "
@@ -243,12 +250,12 @@ def _github_error_hint(status, body):
     return f"HTTP {status}: {body[:200]}"
 
 def _secret(name, default=None):
-    """One place to read configuration, from Streamlit Secrets OR the environment.
+    """One place to read configuration, from the environment or a secrets file.
 
-    The scheduled jobs in .github/workflows run this same engine headlessly on
-    GitHub's runners, where there is no secrets.toml and st.secrets raises. Every
-    credential therefore falls back to an environment variable of the same name,
-    so one set of code serves both the Streamlit app and the cron jobs.
+    The API server and the scheduled GitHub Actions jobs run the same engine,
+    so every credential resolves to an environment variable of the same name.
+    st_compat.secrets keeps reading an existing .streamlit/secrets.toml too, so
+    a deployment migrating from Streamlit does not have to move its file first.
     """
     try:
         val = st.secrets.get(name)
@@ -265,8 +272,8 @@ def _secret_required(name):
     val = _secret(name)
     if val in (None, ""):
         raise RuntimeError(
-            f"{name} is not configured. Set it in Streamlit Secrets, or as an "
-            f"environment variable when running headlessly."
+            f"{name} is not configured. Set it as an environment variable for the "
+            f"API server, or as an Actions secret for the scheduled jobs."
         )
     return val
 
@@ -363,8 +370,8 @@ def backup_db_to_github(return_reason=False):
     if not _github_configured():
         missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
         return done(False, "Not configured — missing " + " and ".join(missing) +
-                           ". Set them in Streamlit Secrets (for the app) or Actions secrets "
-                           "(for the scheduled jobs); those two stores are separate.")
+                           ". Set them in the backend environment (for the API server) or Actions "
+                           "secrets (for the scheduled jobs); those two stores are separate.")
     if not os.path.exists(DATA_DB):
         return done(False, f"No local database at {DATA_DB} — nothing to back up yet.")
 
@@ -431,7 +438,7 @@ def github_backup_diagnostic():
     if not token or not repo:
         missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
         say(f"Missing {' and '.join(missing)}.")
-        say("These are two separate stores: the Streamlit app reads Streamlit Secrets, the "
+        say("These are two separate stores: the API server reads its own environment, the "
             "scheduled jobs read GitHub Actions secrets. Setting one does NOT configure the other.")
         say("Aliases accepted: GH_TOKEN / GH_BACKUP_TOKEN for the token, GH_REPO for the repo, "
             "DB_BACKUP_BRANCH for the branch (GitHub forbids names starting with GITHUB_).")
@@ -865,7 +872,7 @@ def _write_cached_dhan_token(token):
 def _dhan_generate_fresh_token():
     """Headless PIN+TOTP login (no browser step). Requires DHAN_PIN and
     DHAN_TOTP_SECRET (the base32 secret shown once when enabling TOTP-based
-    API login in Dhan's console) alongside DHAN_CLIENT_ID in Streamlit Secrets."""
+    API login in Dhan's console) alongside DHAN_CLIENT_ID in the environment."""
     import pyotp
     from dhanhq import DhanLogin
     code = pyotp.TOTP(str(_secret_required("DHAN_TOTP_SECRET"))).now()
@@ -1237,39 +1244,6 @@ def data_freshness_status(tickers, now=None):
     return {"expected": expected, "latest": latest, "current": latest >= expected, "days_behind": int(days_behind)}
 
 
-def render_data_freshness_banner(tickers, now=None):
-    """Prominent freshness indicator for the Scanner/Backtest tabs.
-
-    Read-only: it reports state, it never syncs. The Scanner tab pairs it with
-    an explicit top-up button so a stale cache can be fixed without leaving the
-    tab, which is what previously forced scans to run on old closes.
-    """
-    if not tickers:
-        st.info("Select a universe to check local data freshness.")
-        return None
-    status = data_freshness_status(tickers, now=now)
-    if status["latest"] is None:
-        st.error("⚠️ No local candle data found for this universe yet. Run Data Manager → SYNC ONLY MISSING DATA before scanning.")
-    elif status["current"]:
-        st.success(f"✅ Stored candles current as of {status['latest'].strftime('%d-%b-%Y')} (last completed session).")
-    else:
-        n = status["days_behind"]
-        unit = "session" if n == 1 else "sessions"
-        st.error(
-            f"🛑 STALE DATA — local cache ends {status['latest'].strftime('%d-%b-%Y')}, but "
-            f"{status['expected'].strftime('%d-%b-%Y')} has already closed ({n} {unit} behind). "
-            "Scanning now would rank prices that are out of date and produce late entries. "
-            "Run the top-up button below first."
-        )
-    if nse_market_is_open(now):
-        st.info(
-            "🟢 NSE cash session is OPEN. Stored daily candles can only ever be as new as "
-            "yesterday's close — tick 'Use live intraday price' below to scan against the "
-            "current price instead of the last close."
-        )
-    return status
-
-
 DHAN_RETRY_STATUSES = (429, 500, 502, 503, 504)
 
 
@@ -1503,7 +1477,7 @@ def download_prices(tickers,start,end,max_workers=4,refresh_tail_days=0):
     if not dhan_configured():
         raise RuntimeError(
             "Dhan credentials are not configured. Add DHAN_CLIENT_ID and "
-            "DHAN_ACCESS_TOKEN to Streamlit Secrets."
+            "DHAN_ACCESS_TOKEN to the backend environment."
         )
 
     dhan_map()
@@ -2717,7 +2691,7 @@ def add_fundamental_forward_candidates(results_df):
 def td_history(symbol, interval="1day", start_date=None, end_date=None, outputsize=5000):
     """Historical OHLCV for Forex and Crypto through Twelve Data."""
     if not twelvedata_configured():
-        raise RuntimeError("TWELVEDATA_API_KEY is not configured in Streamlit Secrets.")
+        raise RuntimeError("TWELVEDATA_API_KEY is not configured.")
     params={"symbol":symbol,"interval":interval,"outputsize":int(outputsize)}
     if start_date is not None: params["start_date"]=pd.Timestamp(start_date).strftime("%Y-%m-%d")
     if end_date is not None: params["end_date"]=pd.Timestamp(end_date).strftime("%Y-%m-%d")
@@ -2738,7 +2712,7 @@ def td_history(symbol, interval="1day", start_date=None, end_date=None, outputsi
 @st.cache_data(ttl=30,show_spinner=False)
 def td_price(symbol):
     if not twelvedata_configured():
-        raise RuntimeError("TWELVEDATA_API_KEY is not configured in Streamlit Secrets.")
+        raise RuntimeError("TWELVEDATA_API_KEY is not configured.")
     r=requests.get(f"{TWELVE_BASE}/price",headers=_td_headers(),params={"symbol":symbol},timeout=20)
     if not r.ok: raise RuntimeError(f"Twelve Data price {r.status_code}: {r.text[:250]}")
     j=r.json()
@@ -7019,7 +6993,7 @@ def run_strategy_coach():
     Returns (report_text:str, error:str or None).
     """
     if not _anthropic_configured():
-        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+        return None, "ANTHROPIC_API_KEY is not set."
 
     payload, has_enough = build_coach_payload()
     if not has_enough:
@@ -7187,7 +7161,7 @@ def _call_agent(system_prompt, candidates_payload, max_tokens=2500):
     confidence, flag} objects — one per candidate. Returns (list, error).
     """
     if not _anthropic_configured():
-        return [], "ANTHROPIC_API_KEY not set in Streamlit secrets."
+        return [], "ANTHROPIC_API_KEY is not set."
 
     user_content = (
         "Analyze EVERY candidate below and return a JSON array, one object per "
@@ -7274,7 +7248,7 @@ than inventing one — false negatives here are as costly as missed risks."""
 
 def agent_judge(candidates_payload, tech_verdicts, skeptic_verdicts, risk_verdicts, bear_verdicts, target_count=5):
     if not _anthropic_configured():
-        return [], "ANTHROPIC_API_KEY not set in Streamlit secrets."
+        return [], "ANTHROPIC_API_KEY is not set."
 
     system = f"""You are the Judge/Synthesizer. You will receive the original candidate data plus
 four independent agent verdicts per candidate: Technical Analyst, Statistical Skeptic, Risk/Capital
@@ -7498,7 +7472,7 @@ def _call_learning_panel_agent(system_prompt, payload, schema, max_tokens=2000):
     """_call_agent()'s (Phase 8) pattern adapted for ONE system-wide payload -> ONE
     structured finding OBJECT (not a per-candidate array). Returns (dict, error)."""
     if not _anthropic_configured():
-        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+        return None, "ANTHROPIC_API_KEY is not set."
 
     user_content = "Here is the current aggregated system data:\n\n" + json.dumps(payload, indent=2, default=str)
     try:
@@ -7598,7 +7572,7 @@ Component, Risk & Stop-Loss) saw, and your job is to challenge their likely clai
 
 def learning_panel_agent_judge(payload, strategy_finding, marking_finding, risk_finding, skeptic_finding):
     if not _anthropic_configured():
-        return None, "ANTHROPIC_API_KEY not set in Streamlit secrets."
+        return None, "ANTHROPIC_API_KEY is not set."
 
     system = """You are the Judge/Synthesizer for a 5-agent System Learning Panel. You will
 receive the original aggregated system payload plus four independent findings: Strategy
@@ -8233,7 +8207,7 @@ def load_scan_dataset(tickers, min_bars=260, lookback_days=1000):
 def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     """The scan itself: every stock against every selected strategy.
 
-    Single source of truth shared by the Streamlit Daily Scanner and the
+    Single source of truth shared by the API's scanner service and the
     headless daily job, so the scheduled run can never drift from what the UI
     shows. A setup is produced only when ALL rules of that individual strategy
     pass; score and safety rank the survivors, they never suppress one.
@@ -8259,8 +8233,8 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
 
     ml_model = train_win_probability_model("INDIA")
     # Exposed so a caller can report on the model without re-training it
-    # (train_win_probability_model is cached, but the cache is Streamlit's and
-    # is not available headlessly).
+    # (train_win_probability_model is memoised, but the caller has no other way
+    # to see which model was actually used).
     counts["ml_model"] = ml_model
     rows = []
     total = max(1, len(data))
