@@ -1,0 +1,35 @@
+# Both processes on one machine — the simplest self-hosted option.
+#
+#   cp backend/.env.example .env   # fill it in
+#   docker compose up -d
+#
+# Then open http://localhost:3000.
+
+services:
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATA_DB: /data/market_data.sqlite3
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    volumes:
+      # Named volume, not a bind mount into the checkout: a deploy that checks
+      # the repository out again must never land on top of the database.
+      - market-data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  market-data:
