@@ -24,3 +24,6 @@ backtest_cache/
 # Frontend
 node_modules/
 .next/
+
+# Runtime logs and PIDs written by start.sh.
+.run/
