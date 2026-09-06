@@ -109,7 +109,9 @@ for name, fn in (("raw-signal study", core.run_raw_signal_backtest),
     except RuntimeError as exc:
         check(f"the {name} refuses to call a total failure an empty result", True)
         check(f"  and names the first real failure ({name})",
-              "synthetic per-ticker failure" in str(exc) and "2 of 2" in str(exc), str(exc))
+              "synthetic per-ticker failure" in str(exc) and "failed=2" in str(exc), str(exc))
+        check(f"  and accounts for every symbol ({name})",
+              "symbols=2" in str(exc) and "scanned=0" in str(exc), str(exc))
 
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")

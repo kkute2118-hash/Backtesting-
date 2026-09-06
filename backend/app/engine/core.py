@@ -3619,6 +3619,133 @@ def _monthly_asof(d):
         ]
     return m
 
+def _asof_period_blocks(x, freq):
+    """Building blocks for point-in-time resampled features at `freq`.
+
+    Returns the in-progress period's OHLC as of each daily bar, the completed
+    period frame, a `prior()` accessor giving the value at the end of the
+    PREVIOUS period broadcast onto this period's daily rows, and how many
+    completed periods precede each bar.
+    """
+    key = x.index.to_period(freq)
+    g = x.groupby(key)
+    asof = pd.DataFrame(index=x.index)
+    asof["open"] = g.open.transform("first")
+    asof["high"] = g.high.cummax()
+    asof["low"] = g.low.cummin()
+    asof["close"] = x.close
+    full = pd.DataFrame({"open": g.open.first(), "high": g.high.max(),
+                         "low": g.low.min(), "close": g.close.last()})
+    n_before = pd.Series(np.arange(len(full)), index=full.index).reindex(key).to_numpy()
+
+    def prior(series):
+        return series.shift(1).reindex(key).to_numpy()
+
+    return asof, full, prior, n_before
+
+
+def _asof_ema(asof_close, full_close, prior, n_before, n):
+    """EMA of the resampled close, advanced one exact step into the open period.
+
+    ema() is defined with adjust=False, so ema_t = a*x_t + (1-a)*ema_{t-1} and a
+    single step from the last completed period is exact rather than approximate.
+    min_periods=n is honoured: the open period counts as one observation.
+    """
+    a = 2.0 / (n + 1.0)
+    state = prior(full_close.ewm(span=n, adjust=False).mean())
+    value = a * asof_close + (1 - a) * state
+    return np.where(n_before + 1 >= n, value, np.nan)
+
+
+def _asof_rsi(asof_close, full_close, prior, n_before, n=14):
+    """Wilder RSI of the resampled close, advanced one exact step. Same reasoning."""
+    a = 1.0 / n
+    d_full = full_close.diff()
+    up_prev = prior(d_full.clip(lower=0).ewm(alpha=a, adjust=False).mean())
+    dn_prev = prior((-d_full.clip(upper=0)).ewm(alpha=a, adjust=False).mean())
+    d = asof_close - prior(full_close)
+    up = a * np.clip(d, 0, None) + (1 - a) * up_prev
+    dn = a * np.clip(-d, 0, None) + (1 - a) * dn_prev
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = up / np.where(dn == 0, np.nan, dn)
+        value = 100 - 100 / (1 + rs)
+    return np.where(n_before >= n, value, np.nan)
+
+
+def _weekly_asof_columns(x):
+    """Point-in-time weekly features for every daily bar.
+
+    features_fast() built these by grouping the frame into whole weeks and
+    mapping each week's finished high, low and close onto every day inside it —
+    so a Tuesday signal read Friday's close. Its docstring called the function
+    "the core anti-lookahead safeguard", which is presumably why nobody looked.
+    """
+    asof, full, prior, n_before = _asof_period_blocks(x, "W-FRI")
+    close = asof.close.to_numpy()
+    out = pd.DataFrame(index=x.index)
+    out["wclose"] = close
+    out["wrsi14"] = _asof_rsi(close, full.close, prior, n_before, 14)
+    out["wema20"] = _asof_ema(close, full.close, prior, n_before, 20)
+    out["wema50"] = _asof_ema(close, full.close, prior, n_before, 50)
+    return out
+
+
+def _monthly_asof_columns(x):
+    """Point-in-time monthly features for every daily bar.
+
+    THE RULE: a bar at date T in month M may use months before M in full — they
+    were complete by then — but of M itself only the days up to and including T.
+
+    _monthly_asof() broke that rule. It resampled the whole frame into calendar
+    months and patched only the LAST month to be as-of, so a signal on the 3rd of
+    a month was evaluated against that month's eventual high, low and close. S1
+    reads eight such fields, S2 one, S4 its entire SEPA gate; their entire
+    backtest record was built on information that did not exist yet.
+
+    The in-progress month is therefore built by expanding aggregation within the
+    month (high = running max so far, close = today's close), and the monthly
+    indicators are advanced ONE step from the state at the end of month M-1
+    rather than recomputed over a finished month. For EMA and Wilder's RSI —
+    both of which the engine defines with adjust=False — that single step is
+    exact, not an approximation:
+
+        ema_asof  = a·close_asof + (1-a)·ema_{M-1}
+        up_asof   = a·max(d,0)   + (1-a)·up_{M-1}      d = close_asof - close_{M-1}
+
+    Returns a DataFrame indexed like x, holding the m* columns the strategies read.
+    """
+    asof_o, full, prior, before = _asof_period_blocks(x, "M")
+    close = asof_o.close.to_numpy()
+
+    asof = pd.DataFrame(index=x.index)
+    asof["mopen"], asof["mhigh"] = asof_o.open, asof_o.high
+    asof["mlow"], asof["mclose"] = asof_o.low, close
+
+    prev_close = prior(full.close)
+    asof["mprevclose"] = prev_close
+    asof["mprevhigh"] = prior(full.high)
+    asof["mprevlow"] = prior(full.low)
+
+    for n in (10, 15, 20):
+        asof[f"mema{n}"] = _asof_ema(close, full.close, prior, before, n)
+    asof["mrsi14"] = _asof_rsi(close, full.close, prior, before, 14)
+
+    mom = (close / prev_close - 1) * 100
+    asof["mmom"] = mom
+    mom_full = full.close.pct_change() * 100
+    asof["mmax20"] = np.fmax(mom, prior(mom_full.rolling(19, min_periods=1).max()))
+
+    e10 = full.close.ewm(span=10, adjust=False).mean()
+    e20 = full.close.ewm(span=20, adjust=False).mean()
+    cross_asof = ((asof.mema10.to_numpy() > asof.mema20.to_numpy()) &
+                  (prior(e10) <= prior(e20))).astype(float)
+    asof["m_cross_10_20"] = cross_asof
+    cross_full = ((e10 > e20) & (e10.shift(1) <= e20.shift(1))).astype(float)
+    asof["m_cross_count20"] = np.nan_to_num(
+        prior(cross_full.rolling(19, min_periods=1).sum())) + cross_asof
+    return asof
+
+
 def _weekly_asof(d):
     return d.resample("W-FRI").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})
 
@@ -3649,44 +3776,14 @@ def features(d):
     x["wema50"]=[v.get("ema50",np.nan) for v in wkvals]
     x["wclose"]=[v.get("close",np.nan) for v in wkvals]
 
-    m=_monthly_asof(x)
-    m["rsi14"]=rsi(m.close,14)
-    m["ema10"]=ema(m.close,10)
-    m["ema15"]=ema(m.close,15)
-    m["ema20"]=ema(m.close,20)
-    m["mom"]=m.close.pct_change()*100
-    m["prev_close"]=m.close.shift(1)
-    m["prev_high"]=m.high.shift(1)
-    m["prev_low"]=m.low.shift(1)
-
-    # Monthly max momentum over 20 months, as of the current month.
-    m["mom20max"]=m.mom.rolling(20,min_periods=1).max()
-
-    # Monthly EMA10/20 bullish cross on each month.
-    cross=(m.ema10>m.ema20)&(m.ema10.shift(1)<=m.ema20.shift(1))
-    m["cross_10_20"]=cross.astype(int)
-    m["cross_count20"]=m.cross_10_20.rolling(20,min_periods=1).sum()
-
-    # Daily rows mapped to current as-of month.
-    vals=[]
-    for dt in x.index:
-        mm=m[m.index.to_period("M") <= dt.to_period("M")]
-        vals.append(mm.iloc[-1] if not mm.empty else pd.Series(dtype=float))
-    x["mclose"]=[v.get("close",np.nan) for v in vals]
-    x["mopen"]=[v.get("open",np.nan) for v in vals]
-    x["mhigh"]=[v.get("high",np.nan) for v in vals]
-    x["mlow"]=[v.get("low",np.nan) for v in vals]
-    x["mrsi14"]=[v.get("rsi14",np.nan) for v in vals]
-    x["mema10"]=[v.get("ema10",np.nan) for v in vals]
-    x["mema15"]=[v.get("ema15",np.nan) for v in vals]
-    x["mema20"]=[v.get("ema20",np.nan) for v in vals]
-    x["mmom"]=[v.get("mom",np.nan) for v in vals]
-    x["mmax20"]= [v.get("mom20max",np.nan) for v in vals]
-    x["mprevclose"]=[v.get("prev_close",np.nan) for v in vals]
-    x["mprevhigh"]=[v.get("prev_high",np.nan) for v in vals]
-    x["mprevlow"]=[v.get("prev_low",np.nan) for v in vals]
-    x["m_cross_count20"]=[v.get("cross_count20",np.nan) for v in vals]
-    x["m_cross_10_20"]=[v.get("cross_10_20",np.nan) for v in vals]
+    # Monthly features, point-in-time. See _monthly_asof_columns(): the previous
+    # code resampled whole calendar months and let a bar early in a month see
+    # that month's eventual high, low and close.
+    _m = _monthly_asof_columns(x)
+    for _col in ("mclose", "mopen", "mhigh", "mlow", "mrsi14", "mema10", "mema15",
+                 "mema20", "mmom", "mmax20", "mprevclose", "mprevhigh", "mprevlow",
+                 "m_cross_count20", "m_cross_10_20"):
+        x[_col] = _m[_col].to_numpy()
     return x
 
 # ========================= STRATEGIES =========================
@@ -5395,7 +5492,14 @@ def save_scan_state(market, universe_size, elapsed):
 
 
 # ========================= LONG-LIVED FAST ENGINE =========================
-ENGINE_VERSION = "FINAL-2_ASOF_CACHE"
+# Bumped when a change makes previously stored feature snapshots wrong. The
+# snapshot store is keyed by this string, so raising it retires every cached
+# frame rather than serving features computed by the old code.
+#
+# ASOF_PIT_FIX: weekly and monthly features are now genuinely point-in-time.
+# Everything cached before this was built by the leaking resample and must not
+# be reused, or the fix would appear to do nothing.
+ENGINE_VERSION = "FINAL-3_ASOF_PIT"
 
 def ensure_engine_tables():
     con = _db()
@@ -5571,7 +5675,16 @@ def _snapshot_matches(snapshot, df):
 @st.cache_data(ttl=86400,show_spinner=False)
 def features_fast(symbol, df):
     """Strict as-of feature engine. Historical rows never see future days inside
-    their current week/month. This is the core anti-lookahead safeguard."""
+    their current week/month.
+
+    This claim used to be false. The weekly and monthly blocks grouped the frame
+    into finished periods and mapped each period's completed high, low and close
+    onto every day inside it, so a Tuesday bar read Friday's close and a bar on
+    the 3rd read the month's eventual high. It is enforced now by
+    _weekly_asof_columns()/_monthly_asof_columns() and checked by
+    tests/regression/test_point_in_time.py, which recomputes features on a
+    truncated frame and requires the value at the truncation point to be
+    identical."""
     key=_load_feature_snapshot(symbol)
     if key is not None and not key.empty and _snapshot_matches(key, df):
         return key
@@ -5583,34 +5696,20 @@ def features_fast(symbol, df):
     tr=pd.concat([x.high-x.low,(x.high-x.close.shift()).abs(),(x.low-x.close.shift()).abs()],axis=1).max(axis=1)
     x["atr14"]=tr.rolling(14).mean()
 
-    # Weekly as-of state: one cheap loop per week, not one loop per day.
-    wk_key=x.index.to_period("W-FRI")
-    wk_rows=[]
-    for period, g in x.groupby(wk_key, sort=True):
-        g=g.sort_index(); close=g.close.iloc[-1]
-        wk_rows.append((period, g.open.iloc[0], g.high.max(), g.low.min(), close, g.volume.sum()))
-    wk=pd.DataFrame(wk_rows, columns=["period","open","high","low","close","volume"]).set_index("period")
-    wk["rsi14"]=rsi(wk.close,14); wk["ema20"]=ema(wk.close,20); wk["ema50"]=ema(wk.close,50)
-    wk_map={p:row for p,row in wk.iterrows()}
-    x["wrsi14"]=[wk_map.get(p,{}).get("rsi14",np.nan) for p in wk_key]
-    x["wema20"]=[wk_map.get(p,{}).get("ema20",np.nan) for p in wk_key]
-    x["wema50"]=[wk_map.get(p,{}).get("ema50",np.nan) for p in wk_key]
-    x["wclose"]=[wk_map.get(p,{}).get("close",np.nan) for p in wk_key]
+    # Weekly and monthly features, point-in-time. Both blocks here used to group
+    # the frame into finished weeks/months and map each finished high, low and
+    # close onto every day inside the period — so a Tuesday signal read Friday's
+    # close, and a signal on the 3rd read the month's eventual high. Every
+    # strategy reads wrsi14; S1, S2 and S4 read the monthly fields.
+    _w = _weekly_asof_columns(x)
+    for _col in ("wrsi14", "wema20", "wema50", "wclose"):
+        x[_col] = _w[_col].to_numpy()
 
-    # Monthly as-of state. Each daily row uses the current month's partial OHLCV.
-    mo_key=x.index.to_period("M")
-    mo_rows=[]
-    for period,g in x.groupby(mo_key,sort=True):
-        g=g.sort_index(); mo_rows.append((period,g.open.iloc[0],g.high.max(),g.low.min(),g.close.iloc[-1],g.volume.sum()))
-    mo=pd.DataFrame(mo_rows,columns=["period","open","high","low","close","volume"]).set_index("period")
-    mo["rsi14"]=rsi(mo.close,14); mo["ema10"]=ema(mo.close,10); mo["ema15"]=ema(mo.close,15); mo["ema20"]=ema(mo.close,20)
-    mo["mom"]=mo.close.pct_change()*100; mo["prev_close"]=mo.close.shift(1); mo["prev_high"]=mo.high.shift(1); mo["prev_low"]=mo.low.shift(1)
-    mo["mom20max"]=mo.mom.rolling(20,min_periods=1).max()
-    cross=(mo.ema10>mo.ema20)&(mo.ema10.shift(1)<=mo.ema20.shift(1)); mo["cross_10_20"]=cross.astype(int); mo["cross_count20"]=mo.cross_10_20.rolling(20,min_periods=1).sum()
-    mo_map={p:row for p,row in mo.iterrows()}
-    fields={"mclose":"close","mopen":"open","mhigh":"high","mlow":"low","mrsi14":"rsi14","mema10":"ema10","mema15":"ema15","mema20":"ema20","mmom":"mom","mmax20":"mom20max","mprevclose":"prev_close","mprevhigh":"prev_high","mprevlow":"prev_low","m_cross_count20":"cross_count20","m_cross_10_20":"cross_10_20"}
-    for out,src in fields.items():
-        x[out]=[mo_map.get(p,{}).get(src,np.nan) for p in mo_key]
+    _m = _monthly_asof_columns(x)
+    for _col in ("mclose", "mopen", "mhigh", "mlow", "mrsi14", "mema10", "mema15",
+                 "mema20", "mmom", "mmax20", "mprevclose", "mprevhigh", "mprevlow",
+                 "m_cross_count20", "m_cross_10_20"):
+        x[_col] = _m[_col].to_numpy()
     x=x.replace([np.inf,-np.inf],np.nan)
     # Never persist features derived from a still-forming intraday bar: the
     # snapshot store is shared with the backtest/research paths, which must only
@@ -5929,18 +6028,29 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
     # which the per-ticker guard below then swallowed, so this study reported
     # "0 signals" over a universe where the gated backtest found thousands.
     start = pd.Timestamp(start); end = pd.Timestamp(end)
-    failures = 0
+    # A research job must never report "no signals" when it means "everything
+    # broke". Each symbol is accounted for by outcome, and the tally travels
+    # with the result so the caller can print it.
+    diag = {"symbols": 0, "no_data": 0, "short_history": 0, "no_features": 0,
+            "failed": 0, "scanned": 0}
     first_failure = None
     tickers = list(data.keys())
+    diag["symbols"] = len(tickers)
     for n, ticker in enumerate(tickers):
         try:
             df = data[ticker]
-            if df is None or df.empty or len(df) < 260:
+            if df is None or df.empty:
+                diag["no_data"] += 1
+                continue
+            if len(df) < 260:
+                diag["short_history"] += 1
                 continue
             df = df.sort_index()
             f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
             if f.empty:
+                diag["no_features"] += 1
                 continue
+            diag["scanned"] += 1
 
             # Same O(1) precompute the existing >=85 backtest uses (see
             # _professional_bt) instead of recomputing regime_from_index()/
@@ -6002,7 +6112,8 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
         # captured nothing because EVERY symbol raised is not an empty result,
         # it is a broken run, and it reported success for months.
         except Exception as exc:
-            failures += 1
+            diag["failed"] += 1
+            diag["scanned"] = max(0, diag["scanned"] - 1)
             if first_failure is None:
                 first_failure = f"{ticker}: {type(exc).__name__}: {exc}"
             continue
@@ -6011,10 +6122,12 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
                 progress_cb(n + 1, len(tickers), str(ticker))
 
     result = pd.DataFrame(rows)
-    if result.empty and failures:
+    result.attrs["diagnostics"] = dict(diag, first_failure=first_failure)
+    if result.empty and diag["scanned"] == 0:
         raise RuntimeError(
-            f"Captured nothing: all {failures} of {len(tickers)} symbols failed. "
-            f"First failure — {first_failure}"
+            "Captured nothing, and no symbol was even scanned: "
+            + ", ".join(f"{k}={v}" for k, v in diag.items())
+            + (f". First failure — {first_failure}" if first_failure else "")
         )
     _persist_raw_fingerprints(result, start, end, len(tickers))
     return result
@@ -6138,20 +6251,25 @@ def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
     # Same normalisation, same reason as run_raw_signal_backtest(): this study had
     # the identical defect and reported the identical empty result.
     start = pd.Timestamp(start); end = pd.Timestamp(end)
-    failures = 0
+    diag = {"symbols": 0, "no_data": 0, "short_history": 0, "no_features": 0,
+            "failed": 0, "scanned": 0}
     first_failure = None
     rows = []
     tickers = list(data.keys())
+    diag["symbols"] = len(tickers)
     ticker = None
     for n, ticker in enumerate(tickers):
         try:
             df = data[ticker]
             if df is None or df.empty or len(df) < 260:
+                diag["short_history" if df is not None and not df.empty else "no_data"] += 1
                 continue
             df = df.sort_index()
             f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
             if f.empty:
+                diag["no_features"] += 1
                 continue
+            diag["scanned"] += 1
 
             # Once per ticker — NOT per scheme, NOT per signal. See header comment.
             avg_value, abnormal = _safety_fast_series(df)
@@ -6211,7 +6329,8 @@ def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
         # See run_raw_signal_backtest(): an empty result with every symbol failing
         # is a broken run, not a finding.
         except Exception as exc:
-            failures += 1
+            diag["failed"] += 1
+            diag["scanned"] = max(0, diag["scanned"] - 1)
             if first_failure is None:
                 first_failure = f"{ticker}: {type(exc).__name__}: {exc}"
             continue
@@ -6220,10 +6339,12 @@ def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
                 progress_cb(n + 1, len(tickers), str(ticker))
 
     result = pd.DataFrame(rows)
-    if result.empty and failures:
+    result.attrs["diagnostics"] = dict(diag, first_failure=first_failure)
+    if result.empty and diag["scanned"] == 0:
         raise RuntimeError(
-            f"Captured nothing: all {failures} of {len(tickers)} symbols failed. "
-            f"First failure — {first_failure}"
+            "Captured nothing, and no symbol was even scanned: "
+            + ", ".join(f"{k}={v}" for k, v in diag.items())
+            + (f". First failure — {first_failure}" if first_failure else "")
         )
     _persist_sl_calibration(result, start, end, len(tickers))
     return result

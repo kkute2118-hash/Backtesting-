@@ -582,6 +582,18 @@ def run_backtest():
 # The research studies, by the name the workflow passes in. Each returns a short
 # summary for the run log; all of them persist their full output to the database,
 # which is where the app reads them from.
+def _log_study_diagnostics(result):
+    """Say what happened to every symbol, so 'no signals' can never again mean
+    'everything crashed'."""
+    diag = getattr(result, "attrs", {}).get("diagnostics") if result is not None else None
+    if not diag:
+        return
+    first = diag.pop("first_failure", None)
+    log("study", "  symbols: " + ", ".join(f"{k}={v}" for k, v in diag.items()))
+    if first:
+        log("study", f"  first failure — {first}")
+
+
 def _study_raw_signals(data, tickers, start, end):
     """Every S1-S4 signal, ungated — the only way to ask whether the score predicts
     anything, rather than only ever seeing setups that already passed the gate."""
@@ -591,6 +603,7 @@ def _study_raw_signals(data, tickers, start, end):
     # forgets to filter by run_id, and to double the backup for nothing.
     result = core.run_raw_signal_backtest(data, [1, 2, 3, 4], start, end)
     signals = 0 if result is None else len(result)
+    _log_study_diagnostics(result)
     summary = {"signals": signals}
     if signals:
         summary["gated_at_85"] = int((result.Score >= 85).sum()) if "Score" in result else None
@@ -602,6 +615,7 @@ def _study_sl_calibration(data, tickers, start, end):
     which isolates the effect of placement alone."""
     # Persisted inside the study, as above — do not write the rows a second time.
     result = core.run_sl_calibration_study(data, [1, 2, 3, 4], start, end)
+    _log_study_diagnostics(result)
     report = core.sl_calibration_report(result)
     if report is not None and not report.empty:
         for row in report.to_dict("records"):

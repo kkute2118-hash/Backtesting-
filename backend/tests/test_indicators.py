@@ -101,19 +101,19 @@ def test_daily_and_weekly_features_do_not_depend_on_later_bars(frames):
         )
 
 
-def test_monthly_features_use_the_whole_calendar_month(frames):
-    """Documents a real limitation, so a future fix has to be deliberate.
+def test_monthly_features_are_point_in_time(frames):
+    """The monthly columns must describe the month SO FAR, not the finished month.
 
-    ``features_fast`` aggregates each calendar month in one pass and maps that
-    single value onto every daily row inside it. For the current month that is
-    correct - the partial month is all that exists - and the live scanner is
-    therefore sound. For a *historical* bar it means the monthly columns carry
-    that month's eventual close and high, which the bar could not have known.
-    Any backtest or learning observation that leans on a monthly gate inherits
-    that, so its results read optimistically.
+    This test previously documented the opposite. ``features_fast`` aggregated
+    each calendar month in one pass and mapped the finished value onto every
+    daily row inside it, so a bar on the 3rd carried that month's eventual close
+    and high — information it could not have had. It was pinned rather than
+    corrected because fixing it changes every stored backtest, which it duly
+    did: the corrected engine is a different measuring instrument.
 
-    Pinned rather than corrected: fixing it changes every stored backtest and
-    learning row, which is an engine decision, not a UI migration's to make.
+    Now the first bar of a month sees its own close and its own high, and the
+    last bar of the month sees the finished figures. tests/regression/
+    test_point_in_time.py proves the general property by truncation.
     """
     df = frames["TRENDUP"]
     f = core.features_fast("MONTHLY_ASOF", df)
@@ -123,5 +123,17 @@ def test_monthly_features_use_the_whole_calendar_month(frames):
     assert len(bars) > 5
 
     first_bar = bars.index[0]
-    assert f.loc[first_bar, "mclose"] == pytest.approx(float(bars.close.iloc[-1]))
-    assert f.loc[first_bar, "mhigh"] == pytest.approx(float(bars.high.max()))
+    assert f.loc[first_bar, "mclose"] == pytest.approx(float(bars.close.iloc[0]))
+    assert f.loc[first_bar, "mhigh"] == pytest.approx(float(bars.high.iloc[0]))
+
+    # Mid-month: the running high, never a high set on a later day.
+    mid = bars.index[len(bars) // 2]
+    seen = bars.loc[:mid]
+    assert f.loc[mid, "mhigh"] == pytest.approx(float(seen.high.max()))
+    assert f.loc[mid, "mlow"] == pytest.approx(float(seen.low.min()))
+    assert f.loc[mid, "mclose"] == pytest.approx(float(seen.close.iloc[-1]))
+
+    # By the last bar the month is complete, so the finished figures are correct.
+    last_bar = bars.index[-1]
+    assert f.loc[last_bar, "mclose"] == pytest.approx(float(bars.close.iloc[-1]))
+    assert f.loc[last_bar, "mhigh"] == pytest.approx(float(bars.high.max()))
