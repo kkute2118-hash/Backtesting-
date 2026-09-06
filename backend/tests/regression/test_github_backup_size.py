@@ -287,12 +287,44 @@ core._github_configured = lambda: True
 core.requests.put = lambda *a, **k: (_ for _ in ()).throw(
     AssertionError("staging must not touch the contents API"))
 
+# A derived cache the size of the real data must not ride along: 365 pickled
+# feature frames were 65 MB, more than the candle history they are computed
+# from, and the app unpacks the backup on every cold start with 512 MB of RAM.
+_con = sqlite3.connect(core.DATA_DB)
+_con.execute("CREATE TABLE IF NOT EXISTS feature_snapshots("
+             "symbol TEXT PRIMARY KEY, last_dt TEXT, n_rows INTEGER, payload BLOB, "
+             "engine_version TEXT)")
+_con.executemany("INSERT OR REPLACE INTO feature_snapshots VALUES (?,?,?,?,?)",
+                 [(f"SYM{i}", "2026-09-04", 100, b"x" * 50_000, "v1") for i in range(40)])
+_con.commit()
+_con.close()
+with_cache_bytes = os.path.getsize(core.DATA_DB)
+
 staged_ok = daily_job.step_backup()
 check("staging reports success", staged_ok)
 check("it created the staged file, directories and all", os.path.exists(stage))
 check("the staged file is gzip", open(stage, "rb").read(2) == bytes((0x1F, 0x8B)))
-check("it decompresses to the database byte for byte",
-      _gzip.decompress(open(stage, "rb").read()) == expected)
+restored_bytes = _gzip.decompress(open(stage, "rb").read())
+scratch = os.path.join(tempfile.mkdtemp(prefix="ati-staged-"), "staged.sqlite3")
+with open(scratch, "wb") as f:
+    f.write(restored_bytes)
+_scon = sqlite3.connect(scratch)
+staged_candles = _scon.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
+staged_cache = _scon.execute("SELECT COUNT(*) FROM feature_snapshots").fetchone()[0]
+_scon.close()
+check("every candle is in the staged copy", staged_candles == 2_000, str(staged_candles))
+check("the rebuildable cache is left out", staged_cache == 0, str(staged_cache))
+check("and leaving it out actually shrinks the file",
+      len(restored_bytes) < with_cache_bytes,
+      f"{len(restored_bytes):,} vs {with_cache_bytes:,} on disk")
+
+# The live database keeps its cache — staging works on a copy.
+_lcon = sqlite3.connect(core.DATA_DB)
+check("the live database still has its cache",
+      _lcon.execute("SELECT COUNT(*) FROM feature_snapshots").fetchone()[0] == 40)
+_lcon.close()
+check("no staging scratch file is left behind",
+      not os.path.exists(stage + ".staging.sqlite3"))
 
 os.environ.pop("BACKUP_STAGE_PATH")
 

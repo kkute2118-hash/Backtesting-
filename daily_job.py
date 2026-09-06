@@ -287,6 +287,49 @@ def step_add(result, min_score):
     return added
 
 
+# Derived tables: rebuilt from the candles on demand, so backing them up costs
+# transfer and memory on a host that has little of either and buys nothing.
+# feature_snapshots alone is one pickled DataFrame per symbol — 183 KB each,
+# 65 MB across a 500-stock universe, which was more than the entire candle
+# history it is computed from. The app has to download and unpack the backup on
+# every cold start, on an instance with 512 MB of RAM.
+BACKUP_SKIP_TABLES = ("feature_snapshots",)
+
+
+def _stage_backup(stage_path):
+    """Write a gzipped copy of the database for the workflow to push.
+
+    Returns (whole MB, kept MB, dropped MB). Works on a copy, so the live
+    database keeps its caches.
+    """
+    import sqlite3
+
+    raw_bytes = os.path.getsize(core.DATA_DB)
+    work = f"{stage_path}.staging.sqlite3"
+    try:
+        shutil.copyfile(core.DATA_DB, work)
+        con = sqlite3.connect(work)
+        try:
+            present = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in BACKUP_SKIP_TABLES:
+                if table in present:
+                    con.execute(f'DELETE FROM "{table}"')
+            con.commit()
+            con.execute("VACUUM")      # otherwise the freed pages ride along anyway
+        finally:
+            con.close()
+        kept_bytes = os.path.getsize(work)
+        with open(work, "rb") as src, gzip.open(stage_path, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
+    finally:
+        for leftover in (work, f"{work}-wal", f"{work}-shm", f"{work}-journal"):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+    mb = 1_048_576
+    return raw_bytes / mb, kept_bytes / mb, (raw_bytes - kept_bytes) / mb
+
+
 def backup_or_fail():
     """Back up, and treat a failure as a failed run.
 
@@ -333,15 +376,15 @@ def step_backup():
     if stage:
         try:
             os.makedirs(os.path.dirname(stage) or ".", exist_ok=True)
-            with open(core.DATA_DB, "rb") as src, gzip.open(stage, "wb", compresslevel=6) as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            raw_mb, kept_mb, dropped = _stage_backup(stage)
         except Exception as exc:
             log("backup", f"FAILED — could not stage the database: {type(exc).__name__}: {exc}")
             return False
-        raw_mb = os.path.getsize(core.DATA_DB) / 1_048_576
         gz_mb = os.path.getsize(stage) / 1_048_576
-        log("backup", f"staged {raw_mb:.1f} MB ({gz_mb:.1f} MB compressed) for the workflow to "
-                      f"push with git — the run is not saved until that step succeeds")
+        note = f", {dropped:.0f} MB of rebuildable cache left out" if dropped >= 1 else ""
+        log("backup", f"staged {kept_mb:.1f} MB of {raw_mb:.1f} MB ({gz_mb:.1f} MB compressed){note} "
+                      f"for the workflow to push with git — the run is not saved until that "
+                      f"step succeeds")
         return True
 
     ok, reason = core.backup_db_to_github(return_reason=True)
