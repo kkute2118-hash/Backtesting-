@@ -363,8 +363,16 @@ def run_bootstrap():
     summary["latest_session"] = str(status["latest"])
     log("build", f"stored candles end {status['latest']}")
 
-    # Everything above cost real Dhan rate limit; it must not die with the runner.
-    step_backup()
+    # Everything above cost real Dhan rate limit; it must not die with the
+    # runner. A build whose backup fails has produced nothing at all — the
+    # container is thrown away minutes later — so it must not report success:
+    # the first full build did exactly that, downloading three years for 500
+    # stocks and then exiting 0 after GitHub rejected the upload as too large.
+    if not step_backup():
+        raise RuntimeError(
+            "The history was downloaded but could NOT be saved, so this run produced nothing. "
+            "The backup step above says why."
+        )
     return summary
 
 

@@ -117,7 +117,7 @@ def restore_on_cold_start() -> dict[str, object]:
         # anyone about; after one has been taken, a 404 really is a token or
         # repository problem.
         result["reason"] = (
-            f"No backup found at {core.GITHUB_BACKUP_PATH} on branch "
+            f"No backup found at {core.GITHUB_BACKUP_PATH_GZ} on branch "
             f"{core._github_backup_branch() or 'the default branch'}. That is expected "
             "until your first backup runs. If you have already taken one, the token "
             "cannot see the repository — use Data Manager → Test the backup path."
