@@ -1,0 +1,86 @@
+# Replay the strategies over the stored history, on hardware that can finish it.
+#
+# The app cannot run this. On the free web instance a Nifty 500 / 1 Year replay
+# pins the CPU at its 0.15-core limit and climbs to 535 MB against a 512 MB cap,
+# where it sits until something kills it — so the run never returns and the page
+# waits forever. A GitHub runner has real cores and 16 GB.
+#
+# No Dhan credentials are needed: the backtest reads the local candle store and
+# never downloads. Build the history first if there is none.
+name: Run backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      universe:
+        description: 'Universe to replay'
+        required: true
+        default: 'Nifty 500'
+        type: choice
+        options:
+          - 'Nifty 500'
+          - 'Nifty Midcap 150'
+          - 'Nifty Smallcap 100'
+          - 'Nifty Smallcap 250'
+          - 'NSE All Cash (~2000)'
+      period:
+        description: 'How far back to replay'
+        required: true
+        default: '1 Year'
+        type: choice
+        options:
+          - '6 Months'
+          - '1 Year'
+          - '2 Years'
+          - '3 Years'
+      threshold:
+        description: 'Score gate — only setups at or above this are traded'
+        required: true
+        default: '85'
+        type: string
+
+concurrency:
+  # The database is one file; never let two jobs write it at once.
+  group: dhan-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    # A 3-year replay of the full cash market is the worst case; 350 minutes
+    # stays inside GitHub's 6-hour ceiling with room to spare.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run the backtest
+        env:
+          # The workflow's own token, guaranteed write by contents:write above.
+          GH_BACKUP_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+          SCAN_UNIVERSE: ${{ inputs.universe }}
+          BACKTEST_PERIOD: ${{ inputs.period }}
+          BACKTEST_THRESHOLD: ${{ inputs.threshold }}
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+        run: python daily_job.py backtest
+
+      # The job stages the database instead of uploading it; git is what
+      # actually stores it. See scripts/push_backup.sh for why.
+      - name: Push the database to the backup branch
+        env:
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+          GH_PUSH_TOKEN: ${{ github.token }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+        run: ./scripts/push_backup.sh

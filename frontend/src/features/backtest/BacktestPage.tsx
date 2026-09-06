@@ -26,6 +26,17 @@ import { compact, date, inr, int, num, pct, signed } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { BacktestStats, Row } from "@/types/api";
 
+// Set NEXT_PUBLIC_BACKTEST_WORKFLOW_URL to the repository's "Run backtest"
+// workflow to turn the note below into a link. Without it the note still says
+// what to do; it just cannot point at your repository.
+const WORKFLOW_URL = process.env.NEXT_PUBLIC_BACKTEST_WORKFLOW_URL ?? "";
+
+// Measured, not guessed: 500 stocks over 1 Year pinned a 0.15-core instance at
+// its CPU limit and reached 535 MB against a 512 MB cap, where it sat until it
+// was killed. The page cannot know how big its server is, so it warns by the
+// size of the request — which is the thing the reader can actually change.
+const HEAVY_STOCK_COUNT = 150;
+
 const PERIODS = ["6 Months", "1 Year", "2 Years", "3 Years"] as const;
 
 const STUDIES = [
@@ -235,6 +246,26 @@ export function BacktestPage() {
               <Play className="h-3.5 w-3.5" aria-hidden />
               Run backtest
             </Button>
+
+            {(dataset.data?.ready ?? 0) > HEAVY_STOCK_COUNT ? (
+              <p className="text-2xs leading-relaxed text-muted">
+                <span className="text-warn">A run this size needs more CPU and memory than a
+                small server has.</span>{" "}
+                {int(dataset.data?.ready ?? 0)} stocks over {period} saturated a 0.15-core,
+                512&nbsp;MB instance and never finished.{" "}
+                {WORKFLOW_URL ? (
+                  <a href={WORKFLOW_URL} target="_blank" rel="noreferrer"
+                    className="underline underline-offset-2 hover:text-ink">
+                    Run it as a scheduled job instead
+                  </a>
+                ) : (
+                  <span>Run it from the repository&rsquo;s &ldquo;Run backtest&rdquo; workflow
+                    instead</span>
+                )}{" "}
+                — same engine, same tables, and this page shows the result when it lands. A
+                shorter period or a smaller universe will run here.
+              </p>
+            ) : null}
           </CardBody>
         </Card>
 
