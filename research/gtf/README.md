@@ -60,3 +60,23 @@ python diag.py                 # duplicates, dark quarters, what F5 really admit
 **Nothing here imports `backend/app/engine/core.py`.** The prior audit found
 look-ahead in that engine's higher-timeframe features, and the brief's rule is
 that a contaminated backtest is never the thing you optimise.
+
+## Round four — the liquidity course, on the speaker's definitions
+
+`liq.py` implements liquidity grabs, sweeps and runs as the 93-minute course
+defines them, replacing the earlier `sweep.py`, which turned out to encode my
+paraphrase rather than his rules. `test_liq.py` covers point-in-time
+correctness; it caught two contaminations that would have flattered the
+results (see FINDINGS_V4.md §2).
+
+    python build_liq.py --db $DB --out /tmp/gtf/liq.parquet
+    python build_liq_control.py --db $DB --setups /tmp/gtf/liq.parquet \
+        --out /tmp/gtf/liq_control.parquet
+    python analysis_liq.py    # each pattern, and which discriminators work
+    python analysis_liq2.py   # against the matched placebo and the mirror trade
+    python analysis_liq3.py   # as a filter on GTF and S1-S4, split by period
+    python analysis_liq4.py   # rank on 2021-2023, read the held-out period once
+    python analysis_liq5.py   # significance for the one rule that survived
+    python analysis_liq6.py   # that rule used as a filter, split by period
+
+Result: a small real edge standalone, harmful as a filter. Not deployed.
