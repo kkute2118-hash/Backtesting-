@@ -23,7 +23,8 @@
     "atr_pct_min": 3.24,
     "approach_speed_pct_min": 1.19,
     "dist_ema200_atr_max": 0.96,
-    "market_vol_regime": "vol20 > trailing 500d median"
+    "market_vol_regime": "vol20 > trailing 500d median",
+    "dist_ema200_atr_max_note": "not 'near the 200 EMA' - it is 'not extended above' it; 86.6% of trades sit below the 200 EMA, median 2.4 ATR below"
   },
   "execution": {
     "entry": "resting buy limit at proximal",
@@ -88,7 +89,48 @@
       "max_dd_pct": -21.4,
       "sharpe": 1.53
     },
-    "corr_with_index": -0.118
+    "corr_with_index": -0.118,
+    "prior_audit_window_2024_09_04_to_2026_09_04": {
+      "n": 2454,
+      "symbols": 396,
+      "win_pct": 43.3,
+      "avg_pct": 2.83,
+      "avg_r": 0.289,
+      "pf": 1.53,
+      "held_out_tail_2025_07_onward": {
+        "n": 852,
+        "win_pct": 48.4,
+        "avg_r": 0.431,
+        "pf": 1.88
+      },
+      "deduplicated_one_trade_per_zone": {
+        "n": 1637,
+        "win_pct": 43.8,
+        "avg_r": 0.305,
+        "pf": 1.573
+      },
+      "outcome_mix": {
+        "stop": 1207,
+        "target": 1063,
+        "time": 184
+      },
+      "median_bars_held": 14,
+      "signals_by_quarter": [
+        234,
+        1010,
+        358,
+        0,
+        0,
+        660,
+        192
+      ],
+      "prior_audit_gated_s1_s4_same_window": {
+        "n": 2357,
+        "win_pct": 26.1,
+        "avg_r": -0.1885,
+        "pf": 0.74
+      }
+    }
   },
   "video_claims_rejected": [
     "trade score monotone in outcome (A12) - inverted",
@@ -113,7 +155,9 @@
     "one market, 5.5 years, one of its strongest bull runs",
     "supply zones detected but untested; the short side is an assumption",
     "13 candidates compared - apply a multiple-comparison haircut",
-    "unlevered it loses to buy-and-hold over this window"
+    "unlevered it loses to buy-and-hold over this window",
+    "feast or famine: two full quarters of 2025 produced zero signals, and 1010 of 2454 trades came from the Feb-Mar 2025 correction",
+    "40% of zones are entered more than once; per-trade averages double-count unless de-duplicated"
   ],
   "confidence": "medium"
 }

@@ -252,6 +252,66 @@ universe over 2021-2026.
 
 ---
 
+## 7b. The prior audit's own window, and the actual trades
+
+Run on **2024-09-04 .. 2026-09-04**, the exact window
+`research/strategy_config.proposed.json` used, so the numbers sit next to that
+file's headline rather than floating free. Trade counts land within 4 % of each
+other, which makes it close to like-for-like.
+
+| | trades | symbols | win % | avg R | PF | max DD |
+| --- | --- | --- | --- | --- | --- | --- |
+| every GTF arrival | 43,741 | 475 | 31.3 | −0.082 | 0.93 | — |
+| C12, five filters | 3,001 | 401 | 40.1 | +0.190 | 1.36 | −404 % |
+| **C13** | **2,454** | 396 | **43.3** | **+0.289** | **1.53** | −292 % |
+| *prior audit, gated S1-S4* | *2,357* | — | *26.1* | *−0.189* | *0.74* | *−629.5 R* |
+
+Inside that window: 2024-09 → 2025-06 (which overlaps the training tail)
++0.213 R; 2025-07 → 2026-09, fully held out, **+0.431 R, PF 1.88, 48.4 % wins**.
+
+**One trade per zone.** 40 % of zones are entered more than once, so the raw
+count double-counts. De-duplicated to the first arrival only: 1,637 trades,
+43.8 % wins, +2.97 %, **+0.305 R, PF 1.573** — slightly *better* than the
+undeduplicated figure, so the repeats were not carrying it.
+
+Outcome mix: 1,207 stops, 1,063 targets, 184 time exits. Median hold 14 bars.
+Every trade is in `trades_audit_window.csv` with the zone's bar coordinates;
+`chart_check.py` prints the raw candles so any of them can be checked by eye.
+
+### Two things that only showed up in the trade list
+
+**The gate goes dark.** Signals by quarter: 234, 1010, 358, **0, 0**, 660, 192.
+Two full quarters in 2025 produced nothing at all, and 1,010 of 2,454 trades
+came from the Feb-Mar 2025 correction alone. This is a feast-or-famine,
+event-driven strategy, not a steady one. Any capital plan has to survive six
+months of no signals.
+
+**Zones wait a long time.** Median 22 bars from formation to the arrival, but
+the 75th percentile is 177 bars and the best cohort is `>150 bars` (+0.43 R).
+The video says this explicitly — its own example waits two years. Only the
+61-150 bar band is negative (−0.05 R).
+
+### Two reporting bugs found by looking at the trades
+
+* **R was divided by the realised fill, not the planned risk.** When an open
+  gapped down to just above the stop, realised risk collapsed to 0.99 % against
+  a 12 % plan and a normal winner scored 39.5 R. It hits 0.38 % of arrivals —
+  enough to move a mean. R is now measured against the planned risk, which is
+  also what the position was sized on. Percentages were never affected.
+* **The outcome label counted "neither hit" as a stop**, so time exits were
+  being reported as stop-outs.
+
+### A description of mine that was wrong
+
+Filter F5 was described as "near the 200 EMA". It is not. `dist_ema200_atr
+<= 0.96` is **"not extended above the 200 EMA"**, and it admits names far below
+it: the median trade sits 2.4 ATR *below* the 200 EMA and **86.6 % of trades are
+below it entirely**. The strategy buys deep pullbacks in weak-looking, volatile
+names during selloffs. That is a materially different picture from "near the
+200 EMA" and it is the accurate one.
+
+---
+
 ## 8. What this study cannot tell you
 
 * **Survivorship.** Today's Nifty 500 applied to the whole window. The probe in

@@ -267,6 +267,12 @@ def _row(symbol, dates, O, H, L, C, V, A, e200, e50, e20, r14, vol20, d_trend,
         "pattern": "RBR" if C[z.legin_idx] >= O[z.legin_idx] else "DBR",
         "score": z.score(arrivals),
         "zone_age": j - (z.legout_start + z.legout_n - 1),
+        # exact bar coordinates, so any trade can be pulled up on a chart and
+        # the marking checked by eye
+        "legin_date": dates[z.legin_idx], "base_start": dates[z.base_lo],
+        "base_end": dates[z.base_hi], "legout_date": dates[z.legout_start],
+        "legin_i": int(z.legin_idx), "base_lo_i": int(z.base_lo),
+        "base_hi_i": int(z.base_hi), "legout_i": int(z.legout_start),
         "zone_h_pct": 100.0 * (prox - dist) / prox,
         # --- trade geometry
         "entry": entry, "entry_plan": prox, "stop": dist,

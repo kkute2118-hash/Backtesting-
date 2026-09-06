@@ -61,6 +61,10 @@ entry day informs the decision.
 | F3 | `ATR14 / close * 100 >= 3.24` | data |
 | F4 | `100 * (prev_close / proximal - 1) >= 1.19` | data — approach speed |
 | F5 | `(prev_close - EMA200) / ATR14 <= 0.96` | **our own prior audit** |
+
+F5 is **not** "near the 200 EMA". It is *not extended above* it, and it admits
+names far below: the median trade sits 2.4 ATR under the 200 EMA and 86.6 % of
+trades are below it. This buys deep pullbacks in volatile names during selloffs.
 | F6 | market volatility regime is high (above) | data |
 
 Thresholds F1-F4 are the training-set 40th/50th percentiles. Every one sits on
@@ -115,6 +119,14 @@ independent studies, same answer: **rank by nothing, filter by F1-F6.**
 If a ranking is needed for capacity, rank by `zone_height_pct` descending. It is
 the only monotone quality variable we found.
 
+## Availability — this strategy is not always on
+
+Signals by quarter over the audit window: 234, 1010, 358, **0, 0**, 660, 192.
+Two full quarters of 2025 produced nothing, and 1,010 of 2,454 trades came from
+the Feb-Mar 2025 correction. The volatility gate is doing its job, but the
+consequence is a feast-or-famine profile. Size the capital plan for six
+consecutive months of no signals.
+
 ## Expected behaviour
 
 | | train | validation | test |
@@ -124,6 +136,11 @@ the only monotone quality variable we found.
 | avg % per trade | +2.60 | +2.48 | +3.91 |
 | avg R | +0.281 | +0.305 | +0.431 |
 | profit factor | 1.49 | 1.44 | 1.88 |
+
+On the prior audit's own window (2024-09-04 .. 2026-09-04): 2,454 trades,
+396 symbols, 43.3 % wins, **+0.289 R, PF 1.53** — against that audit's gated
+S1-S4 record of 2,357 trades, 26.1 % wins, −0.189 R, PF 0.74. De-duplicated to
+one trade per zone: 1,637 trades, +0.305 R, PF 1.573.
 
 Whole sample: 3,758 trades, 432 symbols, +2.84 % / +0.326 R per trade, PF 1.54.
 Signal frequency ≈ 690 per year across 500 names, ≈ 1.4 per symbol per year.

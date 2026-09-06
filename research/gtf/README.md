@@ -18,6 +18,10 @@ python analysis_candidates.py  # candidate strategies
 python analysis_challenge.py   # sensitivity, walk-forward, concentration, regime
 python analysis_portfolio.py   # no-trade filter and portfolio constraints
 python analysis_final.py       # survivorship probe, selection variance
+
+python trades_2y.py            # the prior audit's own window + trades_audit_window.csv
+python chart_check.py          # raw candles of real trades, to check by eye
+python diag.py                 # duplicates, dark quarters, what F5 really admits
 ```
 
 | file | role |
@@ -30,6 +34,9 @@ python analysis_final.py       # survivorship probe, selection variance
 | `build_events.py` | every demand-zone arrival, with context and forward path |
 | `build_control.py` | the matched placebo |
 | `evaluate.py` / `exits.py` / `candidates.py` | scoring under an explicit exit policy |
+| `trades_2y.py` | the strategy on 2024-09-04..2026-09-04, and the trade list |
+| `chart_check.py` | prints a trade's raw candles with the zone marked |
+| `diag.py` | duplicate zones, the quarters with no signals, the F5 distribution |
 
 **Nothing here imports `backend/app/engine/core.py`.** The prior audit found
 look-ahead in that engine's higher-timeframe features, and the brief's rule is

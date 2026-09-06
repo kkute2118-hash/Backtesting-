@@ -21,10 +21,33 @@ def pct_pnl(df, stop_col=STOP, tgt_col=TGT, max_hold=HOLD, cost=0.23):
     return np.where(ok, out - cost, np.nan)
 
 def r_pnl(df, **kw):
+    """R against the PLANNED risk (proximal to stop), not the realised fill.
+
+    A gap that opens just above the stop collapses the realised risk to a
+    fraction of a percent, and dividing by that turns an ordinary winner into
+    a 39R trade. It hits 0.38% of arrivals, which is more than enough to move
+    a mean. Planned risk is what the position was actually sized on, so it is
+    also the honest denominator.
+    """
     p = pct_pnl(df, **kw)
-    e = df["entry"].to_numpy()
+    ep = df["entry_plan"].to_numpy()
     sp = df[kw.get("stop_col", STOP).replace("_bar", "_px")].to_numpy()
-    return p / (100 * (e - sp) / e)
+    return p / (100 * (ep - sp) / ep)
+
+
+def outcome(df, max_hold=HOLD):
+    sb = df[STOP].to_numpy().astype(float); tb = df[TGT].to_numpy().astype(float)
+    sb = np.where((sb >= 0) & (sb <= max_hold), sb, np.inf)
+    tb = np.where((tb >= 0) & (tb <= max_hold), tb, np.inf)
+    return np.where(np.isinf(sb) & np.isinf(tb), "time",
+                    np.where(sb <= tb, "stop", "target"))
+
+
+def bars_held(df, max_hold=HOLD):
+    sb = df[STOP].to_numpy().astype(float); tb = df[TGT].to_numpy().astype(float)
+    sb = np.where((sb >= 0) & (sb <= max_hold), sb, np.inf)
+    tb = np.where((tb >= 0) & (tb <= max_hold), tb, np.inf)
+    return np.minimum(np.minimum(sb, tb), max_hold)
 
 def summarise(p, label, r=None):
     p = np.asarray(p, float); m = np.isfinite(p); p = p[m]
