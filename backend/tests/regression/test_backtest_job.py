@@ -131,6 +131,50 @@ except RuntimeError as exc:
     check("an empty candle store is explained, not raised raw",
           "history build" in str(exc) and "NO_LOCAL_DATA" != str(exc), str(exc))
 
+# ------------------------------------------------- 4. the research studies
+#
+# Same reason they run here: each walks every signal forward over years of bars.
+# What matters for the wiring is that the named study is the one that runs, that
+# it gets the loaded dataset, and that an unknown name fails by name rather than
+# silently running something else.
+ran = {}
+core.load_local_backtest_data = lambda t, s, e: {"AAA": "frame", "BBB": "frame"}
+def _record(name, result):
+    def study(data, tickers, start, end):
+        ran[name] = {"symbols": len(data), "tickers": len(tickers)}
+        return result
+    return study
+
+
+daily_job.STUDIES = {
+    "raw_signals": _record("raw_signals", {"signals": 42}),
+    "sl_calibration": _record("sl_calibration", {"trades": 7}),
+}
+
+os.environ["BACKTEST_STUDY"] = "raw_signals"
+os.environ["BACKTEST_PERIOD"] = "2 Years"
+calls["backed_up"] = 0
+summary = daily_job.run_study()
+
+check("the named study is the one that runs", "raw_signals" in ran and "sl_calibration" not in ran,
+      str(sorted(ran)))
+check("it is handed the loaded dataset", ran["raw_signals"]["symbols"] == 2)
+check("and the resolved universe", ran["raw_signals"]["tickers"] == 500)
+check("its summary reaches the run log", summary.get("signals") == 42, str(summary))
+check("a study is saved like any other run", calls["backed_up"] == 1)
+
+start2, end2 = core._bt_period("2 Years")
+check("a 2-year study really covers two years",
+      720 <= (end2 - start2).days <= 740, str((end2 - start2).days))
+
+os.environ["BACKTEST_STUDY"] = "not_a_study"
+try:
+    daily_job.run_study()
+    check("an unknown study name is refused", False, "it ran anyway")
+except RuntimeError as exc:
+    check("an unknown study name is refused", "not_a_study" in str(exc), str(exc))
+    check("and the error lists the real ones", "raw_signals" in str(exc))
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")
 sys.exit(1 if FAILS else 0)
