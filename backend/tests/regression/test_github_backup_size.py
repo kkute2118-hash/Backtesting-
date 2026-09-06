@@ -93,10 +93,12 @@ class Stub:
 
 
 class Resp:
-    def __init__(self, status_code, content):
+    def __init__(self, status_code, content, headers=None):
         self.status_code = status_code
         self.content = content
         self.text = content.decode(errors="replace")
+        # Real responses carry these; the retry path reads Retry-After from them.
+        self.headers = headers or {}
 
     def json(self):
         import json as js
@@ -185,6 +187,66 @@ ok, reason = core.backup_db_to_github(return_reason=True)
 check("a persistent 502 is reported as a failure", not ok, reason)
 check("and it stops at the attempt limit",
       down.attempts == core.GITHUB_UPLOAD_ATTEMPTS, str(down.attempts))
+
+# ---------- 5. a 403 is two different problems, and only one is worth retrying
+#
+# GitHub throttles repeated large writes with a 403 and an explanatory body, not
+# a 429 — so after five multi-megabyte commits in under an hour a backup was
+# refused with the same status code a bad token produces, and the canned
+# "your token cannot write" message was simply wrong.
+class Throttled(Stub):
+    BODY = b'{"message":"You have exceeded a secondary rate limit. Please wait a few minutes."}'
+
+    def __init__(self, failures):
+        super().__init__()
+        self.failures_left = failures
+        self.attempts = 0
+
+    def put(self, url, headers=None, json=None, timeout=None):
+        self.attempts += 1
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            return Resp(403, self.BODY)
+        return super().put(url, headers=headers, json=json, timeout=timeout)
+
+
+throttled = Throttled(failures=1)
+core.requests.get = throttled.get
+core.requests.put = throttled.put
+build_database(2_000)
+ok, reason = core.backup_db_to_github(return_reason=True)
+check("a throttling 403 is retried and the backup lands", ok, reason)
+check("it took a second attempt", throttled.attempts == 2, str(throttled.attempts))
+
+check("a throttling 403 is recognised as a throttle",
+      core._github_is_throttled(403, Throttled.BODY.decode()))
+check("a permissions 403 is NOT treated as a throttle",
+      not core._github_is_throttled(403, "Resource not accessible by personal access token"))
+check("the rate-limit message says to wait, not to fix the token",
+      "throttling" in core._github_error_hint(403, Throttled.BODY.decode()))
+check("the permissions message still explains the permission",
+      "Contents: Read and write"
+      in core._github_error_hint(403, "Resource not accessible by personal access token"))
+check("either way GitHub's own words are kept",
+      "secondary rate limit" in core._github_error_hint(403, Throttled.BODY.decode()))
+
+
+# A permissions 403 must fail immediately — waiting cannot grant a permission.
+class Denied(Stub):
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    def put(self, url, headers=None, json=None, timeout=None):
+        self.attempts += 1
+        return Resp(403, b'{"message":"Resource not accessible by personal access token"}')
+
+
+denied = Denied()
+core.requests.get = denied.get
+core.requests.put = denied.put
+ok, reason = core.backup_db_to_github(return_reason=True)
+check("a permissions 403 fails at once", not ok and denied.attempts == 1, str(denied.attempts))
 
 # A 4xx is never retried: waiting cannot make a too-large file small.
 class TooLarge(Stub):
