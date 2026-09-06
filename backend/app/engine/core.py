@@ -245,18 +245,28 @@ def _github_ensure_branch(repo, branch):
     return False, f"Could not create branch '{branch}': {mk.status_code} {mk.text[:200]}"
 
 
-def _github_is_throttled(status, body):
-    """True when GitHub is asking us to slow down rather than turning us away.
+# Phrases GitHub uses in a 403 body when the answer is "not now" rather than
+# "not you". Two have actually been seen backing this repository up: the
+# secondary rate limit after several large commits in an hour, and
+#
+#     {"message":"Timed out validating rule, please try again"}
+#
+# which is repository-ruleset validation giving up on an 18 MB file. Both are
+# transient and both arrive as 403, the same status a token without write
+# permission gets — and that one must never be retried, because waiting cannot
+# grant a permission.
+_GITHUB_TRANSIENT_403 = (
+    "rate limit", "secondary", "abuse",
+    "try again", "timed out", "timeout", "temporarily",
+)
 
-    Secondary rate limits come back as 403 with an explanatory body, not as 429,
-    so the status alone cannot distinguish a throttle from a permissions
-    failure. Retrying the first is right; retrying the second is pointless.
-    """
+
+def _github_is_throttled(status, body):
+    """True when GitHub is asking us to come back later rather than turning us away."""
     if status == 429:
         return True
     text = str(body or "").lower()
-    return status == 403 and ("rate limit" in text or "secondary" in text
-                              or "abuse" in text or "try again later" in text)
+    return status == 403 and any(phrase in text for phrase in _GITHUB_TRANSIENT_403)
 
 
 def _github_error_hint(status, body):
@@ -271,8 +281,9 @@ def _github_error_hint(status, body):
         # in under an hour it answered a backup with 403 rather than 429. The
         # body is what tells them apart, so it is no longer discarded.
         if _github_is_throttled(status, body):
-            return ("403 rate-limited — GitHub is throttling writes to this repository, not "
-                    "refusing them. Wait a few minutes and run it again; the job is idempotent. "
+            return ("403 but temporary — GitHub is asking for this write later, not refusing "
+                    "it (a rate limit, or ruleset validation timing out on a large file). "
+                    "Wait a few minutes and run it again; the job is idempotent. "
                     f"GitHub said: {body[:200]}")
         return ("403 Forbidden — the token authenticated but is not allowed to write. A "
                 "fine-grained token needs Repository permissions → Contents: Read and write, "

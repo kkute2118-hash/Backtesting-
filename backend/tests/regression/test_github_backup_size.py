@@ -220,10 +220,14 @@ check("it took a second attempt", throttled.attempts == 2, str(throttled.attempt
 
 check("a throttling 403 is recognised as a throttle",
       core._github_is_throttled(403, Throttled.BODY.decode()))
+# The one this repository actually hit: ruleset validation giving up on an 18 MB
+# file. It says "please try again" and means it.
+check("a ruleset-validation timeout is recognised as temporary",
+      core._github_is_throttled(403, '{"message":"Timed out validating rule, please try again"}'))
 check("a permissions 403 is NOT treated as a throttle",
       not core._github_is_throttled(403, "Resource not accessible by personal access token"))
-check("the rate-limit message says to wait, not to fix the token",
-      "throttling" in core._github_error_hint(403, Throttled.BODY.decode()))
+check("the temporary-403 message says to wait, not to fix the token",
+      "Wait a few minutes" in core._github_error_hint(403, Throttled.BODY.decode()))
 check("the permissions message still explains the permission",
       "Contents: Read and write"
       in core._github_error_hint(403, "Resource not accessible by personal access token"))
