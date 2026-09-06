@@ -19,6 +19,14 @@ python analysis_challenge.py   # sensitivity, walk-forward, concentration, regim
 python analysis_portfolio.py   # no-trade filter and portfolio constraints
 python analysis_final.py       # survivorship probe, selection variance
 
+python build_exits.py   --db $DB --events events.parquet --out exits.parquet
+python analysis_exit_policy.py  # trailing vs static, chosen on train
+python analysis_winners.py      # winner anatomy + cross-validated score
+python analysis_walkforward.py  # quarterly refit, no fold sees its future
+python analysis_robust.py       # exit / liquidity / model-choice sensitivity
+python analysis_production.py   # the as-deployed configuration
+python scan.py          --db $DB            # tomorrow's ranked signals
+
 python trades_2y.py            # the prior audit's own window + trades_audit_window.csv
 python chart_check.py          # raw candles of real trades, to check by eye
 python diag.py                 # duplicates, dark quarters, what F5 really admits
@@ -27,9 +35,12 @@ python diag.py                 # duplicates, dark quarters, what F5 really admit
 | file | role |
 | --- | --- |
 | `CONCEPT_INVENTORY.md` | every testable concept extracted from the 52-hour transcript |
-| `FINDINGS.md` | the research outcome: claims tested, what survived, what did not |
-| `STRATEGY.md` | implementation-ready specification of the surviving strategy |
-| `gtf_strategy.json` | the same, machine-readable |
+| `FINDINGS.md` | round one: the video's claims tested, what survived, what did not |
+| `FINDINGS_V2.md` | round two: better exits, a learned score, and what removing the illiquidity tilt cost |
+| `STRATEGY.md` | GTF-D13, round one's specification (kept for the record) |
+| `SYSTEM.md` | **GTF-D14, the running system** |
+| `scan.py` | produces tomorrow's ranked signals |
+| `gtf_strategy.json` | both, machine-readable |
 | `gtfcore.py` | zone detection, point-in-time aggregation, indicators |
 | `build_events.py` | every demand-zone arrival, with context and forward path |
 | `build_control.py` | the matched placebo |

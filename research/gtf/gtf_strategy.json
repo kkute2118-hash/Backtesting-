@@ -159,5 +159,67 @@
     "feast or famine: two full quarters of 2025 produced zero signals, and 1010 of 2454 trades came from the Feb-Mar 2025 correction",
     "40% of zones are entered more than once; per-trade averages double-count unless de-duplicated"
   ],
-  "confidence": "medium"
+  "confidence": "medium",
+  "successor": {
+    "$comment": "GTF-D14, see FINDINGS_V2.md and SYSTEM.md. Supersedes D13. enabled false.",
+    "strategy_name": "GTF-D14",
+    "enabled": false,
+    "selection": "learned score >= train 90th pct OR the five hand rules",
+    "model": {
+      "kind": "HistGradientBoostingRegressor",
+      "max_depth": 3,
+      "max_iter": 250,
+      "learning_rate": 0.05,
+      "min_samples_leaf": 80,
+      "l2_regularization": 1.0,
+      "target": "percent return under stop 2 ATR / target 8 ATR / 60-bar cap",
+      "refit": "every quarter on trades resolved >=95 days earlier",
+      "turnover_excluded": true
+    },
+    "guards": {
+      "max_approach_pct": 9.66,
+      "min_turnover_cr": 10.0,
+      "one_row_per_symbol": true,
+      "reject_gap_through_stop": true
+    },
+    "execution": {
+      "entry": "resting buy limit at proximal",
+      "stop": "entry - 2.0 * ATR14 on the fill day",
+      "target": "entry + 8.0 * ATR14 on the fill day",
+      "time_stop_bars": 60
+    },
+    "portfolio": {
+      "risk_per_trade": 0.015,
+      "slots": 30,
+      "leverage": "none",
+      "one_position_per_symbol": true
+    },
+    "measured_walkforward_2022_01_to_2026_09": {
+      "n": 10617,
+      "win_pct": 41.1,
+      "avg_pct": 3.97,
+      "pf": 1.7,
+      "placebo_avg_pct": 0.78,
+      "cagr_pct": 21.3,
+      "max_dd_pct": -19.2,
+      "sharpe": 1.85,
+      "corr_with_index": -0.13,
+      "benchmark_buy_and_hold": {
+        "cagr_pct": 23.4,
+        "max_dd_pct": -21.4,
+        "sharpe": 1.32
+      },
+      "worst_calendar_year_pct": -11.1,
+      "robustness_cagr_range_across_exits_pct": [
+        30.8,
+        39.9
+      ],
+      "robustness_cagr_range_across_model_settings_pct": [
+        20.3,
+        30.3
+      ]
+    },
+    "honest_summary": "lower raw return than buying the index, materially better risk-adjusted return, near-zero correlation with it. A diversifier, not a replacement. Roughly half of the first headline figure was an illiquidity tilt that was removed.",
+    "largest_unexplored_gain": "the short side - supply zones are detected but untested"
+  }
 }
