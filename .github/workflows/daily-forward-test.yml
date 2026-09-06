@@ -74,4 +74,14 @@ jobs:
           SCAN_STRATEGIES: ${{ vars.SCAN_STRATEGIES }}
           SCAN_MIN_SCORE: ${{ vars.SCAN_MIN_SCORE }}
           SYNC_TAIL_DAYS: ${{ vars.SYNC_TAIL_DAYS }}
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
         run: python daily_job.py daily
+
+      # The job stages the database instead of uploading it; git is what
+      # actually stores it. See scripts/push_backup.sh for why.
+      - name: Push the database to the backup branch
+        env:
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+          GH_PUSH_TOKEN: ${{ github.token }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+        run: ./scripts/push_backup.sh

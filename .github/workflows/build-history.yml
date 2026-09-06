@@ -140,4 +140,14 @@ jobs:
           SCAN_UNIVERSE: ${{ inputs.universe }}
           BOOTSTRAP_YEARS: ${{ inputs.years }}
           REBUILD_CANDLES: ${{ inputs.rebuild }}
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
         run: python daily_job.py bootstrap
+
+      # The job stages the database instead of uploading it; git is what
+      # actually stores it. See scripts/push_backup.sh for why.
+      - name: Push the database to the backup branch
+        env:
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+          GH_PUSH_TOKEN: ${{ github.token }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+        run: ./scripts/push_backup.sh

@@ -44,8 +44,10 @@ original GITHUB_TOKEN / GITHUB_REPO names still work in a local .env).
 """
 
 import argparse
+import gzip
 import json
 import os
+import shutil
 import sys
 import traceback
 from datetime import date, datetime, timedelta
@@ -305,9 +307,43 @@ def backup_or_fail():
 
 
 def step_backup():
+    """Save the database where the next run and the app can find it.
+
+    Two ways out, because the contents API turned out not to be a reliable way
+    to store a file this size against this repository. It worked three times and
+    then answered every attempt with
+
+        403 {"message":"Timed out validating rule, please try again"}
+
+    — ruleset validation giving up on an 18 MB upload — and retrying three times
+    over seven minutes did not help. GitHub's own 422 for an oversized file says
+    what to do instead: "Consider creating/updating the file in a local clone
+    and pushing it to GitHub."
+
+    So on a runner, which has a clone and a credentialed remote already, the
+    database is staged to BACKUP_STAGE_PATH and pushed by git in the next
+    workflow step. Everywhere else — the app on its web host, a laptop — there is
+    no clone to push from, and the API remains the only option.
+    """
     if not core._github_configured():
         log("backup", "GITHUB_TOKEN/GITHUB_REPO not set — SKIPPED, this run will be lost")
         return False
+
+    stage = os.environ.get("BACKUP_STAGE_PATH", "").strip()
+    if stage:
+        try:
+            os.makedirs(os.path.dirname(stage) or ".", exist_ok=True)
+            with open(core.DATA_DB, "rb") as src, gzip.open(stage, "wb", compresslevel=6) as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+        except Exception as exc:
+            log("backup", f"FAILED — could not stage the database: {type(exc).__name__}: {exc}")
+            return False
+        raw_mb = os.path.getsize(core.DATA_DB) / 1_048_576
+        gz_mb = os.path.getsize(stage) / 1_048_576
+        log("backup", f"staged {raw_mb:.1f} MB ({gz_mb:.1f} MB compressed) for the workflow to "
+                      f"push with git — the run is not saved until that step succeeds")
+        return True
+
     ok, reason = core.backup_db_to_github(return_reason=True)
     log("backup", reason if ok else f"FAILED — {reason}")
     return ok
