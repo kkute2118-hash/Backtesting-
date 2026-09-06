@@ -37,6 +37,7 @@ import math
 import bisect
 import os
 import base64
+import gzip
 import tempfile
 import shutil
 import anthropic
@@ -156,6 +157,17 @@ DATA_DB = os.environ.get("DATA_DB") or os.path.join(_writable_data_dir(), DATA_D
 # which will bloat the repo's history over months. A hosted SQLite-compatible
 # DB (e.g. Turso) is the real long-term fix; this just prevents data loss now.
 GITHUB_BACKUP_PATH = "backups/market_data.sqlite3"
+
+# The whole-database backup is stored gzipped, because the uncompressed file is
+# not storable at all past a certain size: GitHub's contents API rejects a large
+# upload with "422 Sorry, the file is too large to be processed", which is
+# exactly what the first successful history build hit after downloading three
+# years for 500 stocks. A SQLite candle store compresses several-fold, which
+# brings a full universe comfortably back inside the limit.
+#
+# The uncompressed path is still read on restore, so a backup taken before this
+# existed is not stranded.
+GITHUB_BACKUP_PATH_GZ = GITHUB_BACKUP_PATH + ".gz"
 
 
 # GitHub refuses to create any Actions secret or repository variable whose name
@@ -290,6 +302,20 @@ def _github_headers():
         "Accept": "application/vnd.github+json",
     }
 
+
+def _github_raw_headers():
+    """Headers that fetch a file's BYTES rather than a JSON description of it.
+
+    The JSON form carries the content base64-encoded in a field GitHub simply
+    leaves empty above 1 MB — so a large backup came back as a valid 200 with
+    nothing in it, and the restore wrote a zero-byte database. The raw media
+    type has no such cutoff below the 100 MB file ceiling.
+    """
+    return {
+        "Authorization": f"token {_github_setting('GITHUB_TOKEN') or ''}",
+        "Accept": "application/vnd.github.raw",
+    }
+
 def db_row_count(path=None):
     """Total rows across every table in a SQLite file, or -1 if unreadable.
 
@@ -333,21 +359,39 @@ def restore_db_from_github():
         return False  # local file already holds data this container session
     try:
         repo = _github_setting("GITHUB_REPO")
-        url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
         branch = _github_backup_branch()
-        r = requests.get(url, headers=_github_headers(), timeout=30,
-                         params={"ref": branch} if branch else None)
-        if r.status_code != 200:
-            # No backup exists yet, or auth/branch problem. Record why so the
-            # Data Manager and the scheduled job can report it instead of
-            # silently starting from an empty database.
-            _GITHUB_LAST_ERROR = _github_error_hint(r.status_code, r.text)
-            return False
-        content_b64 = r.json().get("content", "")
-        raw = base64.b64decode(content_b64)
-        with open(DATA_DB, "wb") as f:
-            f.write(raw)
-        return True
+        params = {"ref": branch} if branch else None
+        last_status, last_body = None, ""
+
+        # Newest format first, then the uncompressed path a backup taken before
+        # gzipping existed would still be sitting at.
+        for path, gzipped in ((GITHUB_BACKUP_PATH_GZ, True), (GITHUB_BACKUP_PATH, False)):
+            url = f"https://api.github.com/repos/{repo}/contents/{path}"
+            # Raw bytes, not the JSON wrapper: above 1 MB GitHub returns the
+            # JSON with an empty content field and a 200, which used to write a
+            # zero-byte database over a perfectly good empty one.
+            r = requests.get(url, headers=_github_raw_headers(), timeout=120, params=params)
+            if r.status_code != 200:
+                last_status, last_body = r.status_code, r.text
+                continue
+
+            raw = gzip.decompress(r.content) if gzipped else r.content
+            if not raw:
+                last_status, last_body = 200, f"{path} is empty"
+                continue
+
+            # Write beside the target and move into place, so an interrupted
+            # download cannot leave a half-written database behind.
+            tmp = f"{DATA_DB}.restore-tmp"
+            with open(tmp, "wb") as f:
+                f.write(raw)
+            os.replace(tmp, DATA_DB)
+            return True
+
+        # Nothing to restore. Record why so the Data Manager and the scheduled
+        # job can report it instead of silently starting from an empty database.
+        _GITHUB_LAST_ERROR = _github_error_hint(last_status or 404, last_body)
+        return False
     except Exception as exc:
         _GITHUB_LAST_ERROR = f"{type(exc).__name__}: {exc}"
         return False
@@ -388,9 +432,15 @@ def backup_db_to_github(return_reason=False):
                 return done(False, msg)
             note = msg
 
-        url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}"
+        url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH_GZ}"
+        # Compressed, because the raw file is not storable past a certain size:
+        # GitHub answers a large upload with "422 Sorry, the file is too large
+        # to be processed", which is what the first full history build hit. The
+        # candle store compresses several-fold, so this is the difference
+        # between a backup that exists and one that does not.
         with open(DATA_DB, "rb") as f:
-            content_b64 = base64.b64encode(f.read()).decode()
+            packed = gzip.compress(f.read(), compresslevel=6)
+        content_b64 = base64.b64encode(packed).decode()
 
         # Need the current file's SHA if it already exists, else GitHub
         # rejects the update as a conflicting create.
@@ -411,11 +461,13 @@ def backup_db_to_github(return_reason=False):
         if branch:
             payload["branch"] = branch
 
-        put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=120)
+        put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=300)
         if put_r.status_code in (200, 201):
             mb = os.path.getsize(DATA_DB) / 1_048_576
-            where = f"{repo}@{branch or 'default branch'}:{GITHUB_BACKUP_PATH}"
-            return done(True, (note + " " if note else "") + f"Backed up {mb:.1f} MB to {where}.")
+            packed_mb = len(packed) / 1_048_576
+            where = f"{repo}@{branch or 'default branch'}:{GITHUB_BACKUP_PATH_GZ}"
+            return done(True, (note + " " if note else "")
+                              + f"Backed up {mb:.1f} MB ({packed_mb:.1f} MB compressed) to {where}.")
         return done(False, _github_error_hint(put_r.status_code, put_r.text))
     except Exception as exc:
         return done(False, f"{type(exc).__name__}: {exc}")
@@ -502,15 +554,17 @@ def github_backup_diagnostic():
                 "automatically on the next backup.")
             result["branch_ok"] = result["can_write"]
 
-    fr = requests.get(f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH}",
-                      headers=_github_headers(), timeout=30,
-                      params={"ref": branch} if branch else None)
-    if fr.status_code == 200:
-        result["backup_exists"] = True
-        size_mb = (fr.json().get("size") or 0) / 1_048_576
-        say(f"Existing backup found: {GITHUB_BACKUP_PATH} ({size_mb:.1f} MB).")
-    else:
-        say(f"No backup at {GITHUB_BACKUP_PATH} yet — the first successful backup creates it.")
+    for backup_path in (GITHUB_BACKUP_PATH_GZ, GITHUB_BACKUP_PATH):
+        fr = requests.get(f"https://api.github.com/repos/{repo}/contents/{backup_path}",
+                          headers=_github_headers(), timeout=30,
+                          params={"ref": branch} if branch else None)
+        if fr.status_code == 200:
+            result["backup_exists"] = True
+            size_mb = (fr.json().get("size") or 0) / 1_048_576
+            say(f"Existing backup found: {backup_path} ({size_mb:.1f} MB).")
+            break
+    if not result["backup_exists"]:
+        say(f"No backup at {GITHUB_BACKUP_PATH_GZ} yet — the first successful backup creates it.")
 
     if _GITHUB_LAST_ERROR:
         say(f"Last backup error was: {_GITHUB_LAST_ERROR}")
