@@ -220,6 +220,30 @@
       ]
     },
     "honest_summary": "lower raw return than buying the index, materially better risk-adjusted return, near-zero correlation with it. A diversifier, not a replacement. Roughly half of the first headline figure was an illiquidity tilt that was removed.",
-    "largest_unexplored_gain": "the short side - supply zones are detected but untested"
+    "largest_unexplored_gain": "the short side - supply zones are detected but untested",
+    "measured_last_two_years_2024_09_04_to_2026_09_04": {
+      "signals": 5608,
+      "win_pct": 39.2,
+      "avg_pct_per_trade": 3.05,
+      "pf": 1.53,
+      "avg_winner_pct": 22.6,
+      "avg_loser_pct": -9.53,
+      "portfolio_total_return_pct": 2.4,
+      "portfolio_cagr_pct": 1.2,
+      "max_dd_pct": -18.9,
+      "sharpe": 0.21,
+      "selection_order_spread_pct": [
+        -1.1,
+        8.8
+      ],
+      "benchmark_total_return_pct": 7.9,
+      "benchmark_sharpe": 0.31,
+      "trades_taken_of_signals": [
+        472,
+        5608
+      ],
+      "avg_pct_of_trades_actually_taken": 0.48,
+      "note": "capacity is the binding failure: signals arrive in selloff bursts, slots fill on the way down with the early poor trades in the cluster, and the good trades arrive with no capacity left. The 21.3% CAGR in SYSTEM.md covers 2022-2026 and is front-loaded."
+    }
   }
 }

@@ -92,6 +92,19 @@ top of it.**
 
 ---
 
+## The last two years on their own
+
+The table above spans 2022-2026 and is front-loaded. Over **2024-09 to 2026-09**:
+
+| | GTF-D14 | buy & hold |
+| --- | --- | --- |
+| total return, 2 yrs | **+2.4 %** | +7.9 % |
+| CAGR | +1.2 % | +3.9 % |
+| Sharpe | 0.21 | 0.31 |
+
+Signal quality held (39.2 % wins, +3.05 %/trade, PF 1.53). **Capacity did not:**
+472 of 5,608 signals get taken and those average +0.48 %. See FINDINGS_V2 §10.
+
 ## How this fails
 
 * **A losing year.** 2025 was −11.1 % for the production set.

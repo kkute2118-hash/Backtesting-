@@ -170,3 +170,47 @@ model seed and exit policy that print the best figure. Both are available and
 both are how a backtest stops being evidence. The spread across seeds
 (20.3-30.3 % CAGR) is the honest uncertainty, and the centre of it is what I
 have quoted.
+
+---
+
+## 10. The last two years on their own — a correction
+
+The 21.3 % CAGR in §6 covers 2022-01 to 2026-09 and is **front-loaded**:
++54.6 %, +27.7 %, −11.1 %, +14.0 %. Asked for the last two years specifically
+(2024-09-04 to 2026-09-04), the answer is much worse and it should be the
+headline anyone acts on.
+
+| | GTF-D14 | equal-weight buy & hold |
+| --- | --- | --- |
+| **total return, 2 years** | **+2.4 %** | **+7.9 %** |
+| CAGR | +1.2 % | +3.9 % |
+| max drawdown | −18.9 % | −21.4 % |
+| Sharpe | 0.21 | 0.31 |
+
+Signal quality over those two years is fine: 5,608 signals, **39.2 % wins,
++3.05 % per trade, profit factor 1.53**, average winner +22.6 %, average loser
+−9.5 %.
+
+**The portfolio destroys it, and the reason is capacity.** Only **472 of 5,608**
+signals can be taken at 30 slots — and the ones actually taken average
+**+0.48 %, not +3.05 %.**
+
+Signals arrive in bursts, and the bursts are selloffs: 2,806 of the 5,608 came
+in the half-year to 2025-03, which averaged +0.5 % on a 32 % win rate. The slots
+fill on the way down with the early, poor trades in the cluster; the good ones
+(the half-years to 2025-09 and 2026-09 averaged +8.9 % and +7.4 %) arrive when
+there is no capacity left.
+
+Slot sensitivity confirms the mechanism — 10 slots −1.0 %, 30 slots +6.8 %,
+80 slots +9.2 % — and the spread across random selection orders (−1.1 % to
++8.8 %) is wider than the result itself. Over this window the outcome is
+**noise-dominated**.
+
+### What this means
+
+The per-trade edge is real and survives walk-forward. **It does not survive
+contact with a capacity-constrained portfolio in a clustered-signal regime.**
+Fixing that is a queueing and capital-allocation problem — staged entry through
+a cluster, reserving slots, or sizing by signal strength rather than first-come
+— and none of it has been tested here. Until it is, the honest number for the
+last two years is **+2.4 %**.
