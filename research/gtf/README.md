@@ -27,6 +27,11 @@ python analysis_robust.py       # exit / liquidity / model-choice sensitivity
 python analysis_production.py   # the as-deployed configuration
 python scan.py          --db $DB            # tomorrow's ranked signals
 
+python score7.py               # 7/7 only, per trade and as a portfolio
+python score7b.py              # why the score flipped: the stop, not the score
+python last2y.py               # win rate and ROI for the last two years
+python walkthrough.py          # one real trade end to end, winner and loser
+
 python trades_2y.py            # the prior audit's own window + trades_audit_window.csv
 python chart_check.py          # raw candles of real trades, to check by eye
 python diag.py                 # duplicates, dark quarters, what F5 really admits
@@ -47,6 +52,9 @@ python diag.py                 # duplicates, dark quarters, what F5 really admit
 | `evaluate.py` / `exits.py` / `candidates.py` | scoring under an explicit exit policy |
 | `trades_2y.py` | the strategy on 2024-09-04..2026-09-04, and the trade list |
 | `chart_check.py` | prints a trade's raw candles with the zone marked |
+| `walkthrough.py` | one 7/7 trade start to finish, and the arithmetic of the edge |
+| `score7.py` / `score7b.py` | the 7/7 result and the stop-vs-score correction |
+| `last2y.py` | the last two years on their own |
 | `diag.py` | duplicate zones, the quarters with no signals, the F5 distribution |
 
 **Nothing here imports `backend/app/engine/core.py`.** The prior audit found
