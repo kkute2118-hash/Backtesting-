@@ -285,6 +285,25 @@ def step_add(result, min_score):
     return added
 
 
+def backup_or_fail():
+    """Back up, and treat a failure as a failed run.
+
+    Everything a run produces lives in the database, and the machine it lives on
+    is discarded a minute later — so a run whose backup fails has produced
+    nothing, whatever else it did. One such run had already recorded four
+    forward-test candidates from a completed scan when GitHub answered the
+    upload with a 502; it reported success and the candidates were gone. The
+    next scheduled run redoes the work, which is the right outcome, but only if
+    this one is honest about having failed.
+    """
+    if not step_backup():
+        raise RuntimeError(
+            "The run finished but could NOT be saved, so nothing it did survives. "
+            "The backup step above says why."
+        )
+    return True
+
+
 def step_backup():
     if not core._github_configured():
         log("backup", "GITHUB_TOKEN/GITHUB_REPO not set — SKIPPED, this run will be lost")
@@ -301,7 +320,7 @@ def run_token_only():
     step_token(force=True)
     # The token is cached inside the database, so it only survives if the
     # database goes back to GitHub.
-    step_backup()
+    backup_or_fail()
     return {"step": "token", "ok": True}
 
 
@@ -335,7 +354,7 @@ def run_daily():
                      "SKIPPING the scan so no candidate is recorded from stale prices")
         checked, closed = step_resolve()
         summary["resolved"] = closed
-        step_backup()
+        backup_or_fail()
         return summary
 
     checked, closed = step_resolve()
@@ -347,7 +366,7 @@ def run_daily():
     summary["regime"] = regime
     summary["qualified"] = int(len(result))
 
-    step_backup()
+    backup_or_fail()
     return summary
 
 
@@ -402,11 +421,7 @@ def run_bootstrap():
     # container is thrown away minutes later — so it must not report success:
     # the first full build did exactly that, downloading three years for 500
     # stocks and then exiting 0 after GitHub rejected the upload as too large.
-    if not step_backup():
-        raise RuntimeError(
-            "The history was downloaded but could NOT be saved, so this run produced nothing. "
-            "The backup step above says why."
-        )
+    backup_or_fail()
     return summary
 
 

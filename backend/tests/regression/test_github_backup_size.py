@@ -148,6 +148,54 @@ check("a pre-gzip backup still restores", core.restore_db_from_github())
 check("and it is intact too", os.path.exists(core.DATA_DB)
       and open(core.DATA_DB, "rb").read() == original)
 
+# ------------------- 4. a transient 502 must not throw away a finished run
+#
+# One did: a daily job had already scanned and recorded four forward-test
+# candidates when GitHub answered the upload with "502 Server Error". The run
+# reported success and the candidates went with the container.
+class FlakyStub(Stub):
+    def __init__(self, failures):
+        super().__init__()
+        self.failures_left = failures
+        self.attempts = 0
+
+    def put(self, url, headers=None, json=None, timeout=None):
+        self.attempts += 1
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            return Resp(502, b'{"message":"Server Error"}')
+        return super().put(url, headers=headers, json=json, timeout=timeout)
+
+
+core.time.sleep = lambda seconds: None      # do not actually back off in a test
+
+flaky = FlakyStub(failures=1)
+core.requests.get = flaky.get
+core.requests.put = flaky.put
+build_database(2_000)
+ok, reason = core.backup_db_to_github(return_reason=True)
+check("one 502 is retried and the backup still lands", ok, reason)
+check("it took a second attempt", flaky.attempts == 2, str(flaky.attempts))
+
+# ...but a server that is genuinely down must still be reported as a failure.
+down = FlakyStub(failures=99)
+core.requests.get = down.get
+core.requests.put = down.put
+ok, reason = core.backup_db_to_github(return_reason=True)
+check("a persistent 502 is reported as a failure", not ok, reason)
+check("and it stops at the attempt limit",
+      down.attempts == core.GITHUB_UPLOAD_ATTEMPTS, str(down.attempts))
+
+# A 4xx is never retried: waiting cannot make a too-large file small.
+class TooLarge(Stub):
+    WRITE_LIMIT = 0
+
+too_large = TooLarge()
+core.requests.get = too_large.get
+core.requests.put = too_large.put
+ok, reason = core.backup_db_to_github(return_reason=True)
+check("a 422 is not retried", not ok and too_large.rejected_too_large, reason)
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")
 sys.exit(1 if FAILS else 0)
