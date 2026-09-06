@@ -9,6 +9,7 @@ GitHub Actions instead, on a cron schedule, with nothing else running.
     python daily_job.py daily      # full post-close run
     python daily_job.py bootstrap  # build the candle history from scratch, once
     python daily_job.py backtest   # replay the strategies over the stored history
+    python daily_job.py study      # one research study (BACKTEST_STUDY names it)
     python daily_job.py --help
 
 The full run, in order:
@@ -578,18 +579,125 @@ def run_backtest():
     return summary
 
 
+# The research studies, by the name the workflow passes in. Each returns a short
+# summary for the run log; all of them persist their full output to the database,
+# which is where the app reads them from.
+def _study_raw_signals(data, tickers, start, end):
+    """Every S1-S4 signal, ungated — the only way to ask whether the score predicts
+    anything, rather than only ever seeing setups that already passed the gate."""
+    result = core.run_raw_signal_backtest(data, [1, 2, 3, 4], start, end)
+    try:
+        core._persist_raw_fingerprints(result, start, end, len(tickers))
+    except Exception:
+        log("study", "  (fingerprints could not be persisted; the summary below still stands)")
+    signals = 0 if result is None else len(result)
+    summary = {"signals": signals}
+    if signals:
+        summary["gated_at_85"] = int((result.Score >= 85).sum()) if "Score" in result else None
+    return summary
+
+
+def _study_sl_calibration(data, tickers, start, end):
+    """Five stop-placement schemes over the SAME signals and the SAME forward bars,
+    which isolates the effect of placement alone."""
+    result = core.run_sl_calibration_study(data, [1, 2, 3, 4], start, end)
+    try:
+        core._persist_sl_calibration(result, start, end, len(tickers))
+    except Exception:
+        log("study", "  (calibration rows could not be persisted; the report below still stands)")
+    report = core.sl_calibration_report(result)
+    if report is not None and not report.empty:
+        for row in report.to_dict("records"):
+            log("study", "  " + "  ".join(f"{k}={v}" for k, v in row.items()))
+    return {"trades": 0 if result is None else len(result),
+            "schemes": sorted(core.SL_CALIBRATION_SCHEMES)}
+
+
+def _study_s4_extension(data, tickers, start, end):
+    cal = core.s4_ema20_extension_calibration(data, start, end)
+    report = core.s4_extension_bucket_report(cal)
+    if report is not None and not report.empty:
+        for row in report.to_dict("records"):
+            log("study", "  " + "  ".join(f"{k}={v}" for k, v in row.items()))
+    return {"signals": 0 if cal is None else len(cal)}
+
+
+def _study_s4_recovery(data, tickers, start, end):
+    result = core.study_s4_recovery_walkforward(data, start, end)
+    metrics = core.research_metrics(result) if result is not None else {}
+    return {"events": 0 if result is None else len(result),
+            "metrics": {str(k): v for k, v in (metrics or {}).items()}}
+
+
+STUDIES = {
+    "raw_signals": _study_raw_signals,
+    "sl_calibration": _study_sl_calibration,
+    "s4_extension": _study_s4_extension,
+    "s4_recovery": _study_s4_recovery,
+}
+
+
+def run_study():
+    """One research study over the stored history, on hardware that can finish it.
+
+    Same reason as the backtest: these walk every signal forward over years of
+    bars, which the free web instance cannot do. They read local candles only and
+    need no Dhan credentials.
+    """
+    name = os.environ.get("BACKTEST_STUDY", "").strip()
+    if name not in STUDIES:
+        raise RuntimeError(f"Unknown study {name!r}. Use one of: {', '.join(sorted(STUDIES))}.")
+
+    period = os.environ.get("BACKTEST_PERIOD", "1 Year").strip() or "1 Year"
+    summary = {"study": name, "period": period}
+
+    step_restore()
+
+    universes = _universes()
+    tickers = core.resolve_universes(universes)
+    summary["universes"] = universes
+    summary["symbols"] = len(tickers)
+
+    try:
+        start, end = core._bt_period(period)
+    except KeyError:
+        raise RuntimeError(
+            f"Unknown BACKTEST_PERIOD {period!r}. Use one of: 6 Months, 1 Year, 2 Years, 3 Years."
+        )
+    summary["window"] = f"{start} → {end}"
+    log("study", f"{name} — {', '.join(universes)}, {len(tickers):,} symbols, "
+                 f"{period} ({start} → {end})")
+
+    data = core.load_local_backtest_data(tickers, start, end)
+    if not data:
+        raise RuntimeError(
+            "No local history covers this window. Run the history build first, or pick a "
+            "shorter period."
+        )
+    log("study", f"{len(data):,} symbols loaded")
+
+    started = time.perf_counter()
+    summary.update(STUDIES[name](data, tickers, start, end))
+    summary["elapsed_seconds"] = round(time.perf_counter() - started, 1)
+    log("study", f"{name} finished in {summary['elapsed_seconds'] / 60:.1f} minutes")
+
+    backup_or_fail()
+    return summary
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("job", choices=["token", "daily", "bootstrap", "backtest"],
+    parser.add_argument("job", choices=["token", "daily", "bootstrap", "backtest", "study"],
                         help="token = renew the Dhan token only; daily = the full post-close "
                              "run; bootstrap = build the candle history from scratch, once; "
-                             "backtest = replay the strategies over the stored history")
+                             "backtest = replay the strategies over the stored history; "
+                             "study = one research study, named by BACKTEST_STUDY")
     args = parser.parse_args(argv)
 
     log("start", f"job={args.job}")
     jobs = {"token": run_token_only, "daily": run_daily, "bootstrap": run_bootstrap,
-            "backtest": run_backtest}
+            "backtest": run_backtest, "study": run_study}
     try:
         summary = jobs[args.job]()
     except Exception:

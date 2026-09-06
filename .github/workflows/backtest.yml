@@ -34,10 +34,21 @@ on:
           - '2 Years'
           - '3 Years'
       threshold:
-        description: 'Score gate — only setups at or above this are traded'
+        description: 'Score gate — only setups at or above this are traded (backtest only)'
         required: true
         default: '85'
         type: string
+      study:
+        description: 'Run a research study instead of the backtest'
+        required: false
+        default: 'none — run the backtest'
+        type: choice
+        options:
+          - 'none — run the backtest'
+          - 'raw_signals'
+          - 'sl_calibration'
+          - 's4_extension'
+          - 's4_recovery'
 
 concurrency:
   # The database is one file; never let two jobs write it at once.
@@ -64,7 +75,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Run the backtest
+      # One step, two jobs: the choice input decides which. Keeping them in one
+      # workflow means one place to set the universe, the period and the backup
+      # wiring, and one concurrency group protecting the database from both.
+      - name: Run the backtest or study
         env:
           # The workflow's own token, guaranteed write by contents:write above.
           GH_BACKUP_TOKEN: ${{ github.token }}
@@ -74,7 +88,12 @@ jobs:
           BACKTEST_PERIOD: ${{ inputs.period }}
           BACKTEST_THRESHOLD: ${{ inputs.threshold }}
           BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
-        run: python daily_job.py backtest
+          BACKTEST_STUDY: ${{ inputs.study }}
+        run: |
+          case "$BACKTEST_STUDY" in
+            ""|none*) python daily_job.py backtest ;;
+            *)        python daily_job.py study ;;
+          esac
 
       # The job stages the database instead of uploading it; git is what
       # actually stores it. See scripts/push_backup.sh for why.
