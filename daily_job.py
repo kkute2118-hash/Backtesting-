@@ -8,6 +8,7 @@ GitHub Actions instead, on a cron schedule, with nothing else running.
     python daily_job.py token      # renew the Dhan access token only
     python daily_job.py daily      # full post-close run
     python daily_job.py bootstrap  # build the candle history from scratch, once
+    python daily_job.py backtest   # replay the strategies over the stored history
     python daily_job.py --help
 
 The full run, in order:
@@ -49,6 +50,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -504,16 +506,90 @@ def run_bootstrap():
     return summary
 
 
+def run_backtest():
+    """Replay the strategies over the stored history and record the result.
+
+    This exists because the backtest cannot run where the app runs. On the free
+    web instance a Nifty 500 / 1 Year replay pins the CPU at its 0.15-core limit
+    and climbs to 535 MB against a 512 MB cap, where it sits until something
+    kills it — measured, not guessed. A runner has real cores and 16 GB and gets
+    through it.
+
+    It needs no Dhan credentials at all: run_local_backtest() reads the local
+    candle store and is documented never to download. The result is written to
+    the same tables the app reads, so the Backtest page shows this run as its
+    latest without knowing where it happened.
+    """
+    period = os.environ.get("BACKTEST_PERIOD", "1 Year").strip() or "1 Year"
+    threshold = _env_int("BACKTEST_THRESHOLD", 85)
+    summary = {"period": period, "threshold": threshold}
+
+    step_restore()
+
+    universes = _universes()
+    tickers = core.resolve_universes(universes)
+    summary["universes"] = universes
+    summary["symbols"] = len(tickers)
+
+    try:
+        start, end = core._bt_period(period)
+    except KeyError:
+        raise RuntimeError(
+            f"Unknown BACKTEST_PERIOD {period!r}. Use one of: 6 Months, 1 Year, 2 Years, 3 Years."
+        )
+    summary["window"] = f"{start} → {end}"
+    log("backtest", f"{', '.join(universes)} — {len(tickers):,} symbols, {period} "
+                    f"({start} → {end}), score gate {threshold}")
+
+    status = core.local_backtest_status(tickers, start, end)
+    ready = int(status.Ready.sum()) if not status.empty else 0
+    log("backtest", f"{ready:,}/{len(tickers):,} symbols have enough local history for this window")
+
+    started = time.perf_counter()
+    try:
+        bt = core.run_local_backtest(tickers, start, end, threshold)
+    except RuntimeError as exc:
+        if str(exc) == "NO_LOCAL_DATA":
+            raise RuntimeError(
+                "No local history covers this window. Run the history build first, or pick a "
+                "shorter period."
+            ) from exc
+        raise
+    elapsed = time.perf_counter() - started
+
+    trades = int(len(bt)) if bt is not None else 0
+    summary["trades"] = trades
+    summary["elapsed_seconds"] = round(elapsed, 1)
+    log("backtest", f"{trades:,} trade(s) replayed in {elapsed / 60:.1f} minutes")
+
+    if trades:
+        wins = int((bt.R > 0).sum())
+        summary["win_pct"] = round(wins / trades * 100, 1)
+        summary["avg_r"] = round(float(bt.R.mean()), 3)
+        summary["total_r"] = round(float(bt.R.sum()), 2)
+        log("backtest", f"win rate {summary['win_pct']}%, average {summary['avg_r']}R, "
+                        f"{summary['total_r']}R total")
+
+    core._persist_backtest(bt, period, start, end, threshold, len(tickers), elapsed)
+    summary["learning_observations_added"] = int(core._learn_from_backtest(bt))
+    log("backtest", f"recorded; {summary['learning_observations_added']} learning observation(s) added")
+
+    backup_or_fail()
+    return summary
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("job", choices=["token", "daily", "bootstrap"],
+    parser.add_argument("job", choices=["token", "daily", "bootstrap", "backtest"],
                         help="token = renew the Dhan token only; daily = the full post-close "
-                             "run; bootstrap = build the candle history from scratch, once")
+                             "run; bootstrap = build the candle history from scratch, once; "
+                             "backtest = replay the strategies over the stored history")
     args = parser.parse_args(argv)
 
     log("start", f"job={args.job}")
-    jobs = {"token": run_token_only, "daily": run_daily, "bootstrap": run_bootstrap}
+    jobs = {"token": run_token_only, "daily": run_daily, "bootstrap": run_bootstrap,
+            "backtest": run_backtest}
     try:
         summary = jobs[args.job]()
     except Exception:
