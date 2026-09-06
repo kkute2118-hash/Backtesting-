@@ -148,11 +148,25 @@ def step_restore():
     # engine's own diagnostic is what separates the two — a bare 404 from the
     # contents API cannot, since a missing file and an invisible repository
     # return the same status.
+    #
+    # What makes it safe is that there is nothing to overwrite, so the two
+    # conditions are: the token can see the repository (otherwise "no backup
+    # here" is not a claim it is entitled to make) and no backup file is there.
+    # Write permission is deliberately NOT required. It is not a safety
+    # property — a token that cannot write simply fails at the end of the run,
+    # which loses nothing — and the diagnostic reads it from the repository
+    # API's `permissions` block, which GitHub's own Actions token under-reports:
+    # requiring it here stopped the very first history build on a repository
+    # whose backup branch did not exist yet.
     diag = core.github_backup_diagnostic()
-    if diag["repo_visible"] and diag["can_write"] and not diag["backup_exists"]:
+    if diag["repo_visible"] and not diag["backup_exists"]:
         log("restore", "no backup exists on GitHub yet; starting a new database")
         if outcome["restored_learning"]:
             log("restore", "  (forward tests and learning were restored from the small backup)")
+        if not diag["can_write"]:
+            log("restore", "  note: this token does not report write access. If the backup at the "
+                           "end of the run fails, that is why — but GitHub's Actions token "
+                           "under-reports it, so this is a warning, not a reason to stop.")
         return False
 
     raise RuntimeError(
