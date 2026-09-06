@@ -5923,6 +5923,14 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
     Returns a DataFrame of everything captured (also persisted to DB).
     """
     rows = []
+    # Normalise the window exactly as _professional_bt does. Without this, `start`
+    # and `end` arrive as datetime.date while the bar timestamps are pd.Timestamp,
+    # and `dt < start` raises TypeError on the FIRST signal of every ticker —
+    # which the per-ticker guard below then swallowed, so this study reported
+    # "0 signals" over a universe where the gated backtest found thousands.
+    start = pd.Timestamp(start); end = pd.Timestamp(end)
+    failures = 0
+    first_failure = None
     tickers = list(data.keys())
     for n, ticker in enumerate(tickers):
         try:
@@ -5990,13 +5998,24 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
                         "source": "raw_phase1",
                         **fingerprint,
                     })
-        except Exception:
+        # One unusable symbol must not end a 500-symbol study — but a study that
+        # captured nothing because EVERY symbol raised is not an empty result,
+        # it is a broken run, and it reported success for months.
+        except Exception as exc:
+            failures += 1
+            if first_failure is None:
+                first_failure = f"{ticker}: {type(exc).__name__}: {exc}"
             continue
         finally:
             if progress_cb:
                 progress_cb(n + 1, len(tickers), str(ticker))
 
     result = pd.DataFrame(rows)
+    if result.empty and failures:
+        raise RuntimeError(
+            f"Captured nothing: all {failures} of {len(tickers)} symbols failed. "
+            f"First failure — {first_failure}"
+        )
     _persist_raw_fingerprints(result, start, end, len(tickers))
     return result
 
@@ -6116,6 +6135,11 @@ def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
     backtest loop expect. Returns a DataFrame of one row per (ticker, strategy, signal,
     scheme) trade — also persisted (aggregated) to sl_calibration_results/_runs.
     """
+    # Same normalisation, same reason as run_raw_signal_backtest(): this study had
+    # the identical defect and reported the identical empty result.
+    start = pd.Timestamp(start); end = pd.Timestamp(end)
+    failures = 0
+    first_failure = None
     rows = []
     tickers = list(data.keys())
     ticker = None
@@ -6184,13 +6208,23 @@ def run_sl_calibration_study(data, strategies, start, end, progress_cb=None):
                             "outcome": outcome, "r_multiple": round(float(r_mult), 3),
                             "holding_bars": int(held),
                         })
-        except Exception:
+        # See run_raw_signal_backtest(): an empty result with every symbol failing
+        # is a broken run, not a finding.
+        except Exception as exc:
+            failures += 1
+            if first_failure is None:
+                first_failure = f"{ticker}: {type(exc).__name__}: {exc}"
             continue
         finally:
             if progress_cb:
                 progress_cb(n + 1, len(tickers), str(ticker))
 
     result = pd.DataFrame(rows)
+    if result.empty and failures:
+        raise RuntimeError(
+            f"Captured nothing: all {failures} of {len(tickers)} symbols failed. "
+            f"First failure — {first_failure}"
+        )
     _persist_sl_calibration(result, start, end, len(tickers))
     return result
 
