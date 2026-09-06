@@ -1,0 +1,36 @@
+# GTF "Trading in the Zone" — quantitative research
+
+Reproduces the study end to end.
+
+```bash
+pip install pandas numpy pyarrow pytest
+python -m pytest test_gtfcore.py -q          # 15 point-in-time / rule tests
+
+DB=/path/to/market_data.sqlite3
+python build_events.py  --db $DB --out events.parquet     # ~85 s, 104,592 arrivals
+python build_control.py --db $DB --events events.parquet --out control.parquet
+
+python analysis_control.py     # is it a bull market or an edge?
+python analysis_claims.py      # every video claim, train / val / test
+python analysis_mechanism.py   # why the video's own score is inverted
+python analysis_exits2.py      # stop x target discovery vs the placebo
+python analysis_candidates.py  # candidate strategies
+python analysis_challenge.py   # sensitivity, walk-forward, concentration, regime
+python analysis_portfolio.py   # no-trade filter and portfolio constraints
+python analysis_final.py       # survivorship probe, selection variance
+```
+
+| file | role |
+| --- | --- |
+| `CONCEPT_INVENTORY.md` | every testable concept extracted from the 52-hour transcript |
+| `FINDINGS.md` | the research outcome: claims tested, what survived, what did not |
+| `STRATEGY.md` | implementation-ready specification of the surviving strategy |
+| `gtf_strategy.json` | the same, machine-readable |
+| `gtfcore.py` | zone detection, point-in-time aggregation, indicators |
+| `build_events.py` | every demand-zone arrival, with context and forward path |
+| `build_control.py` | the matched placebo |
+| `evaluate.py` / `exits.py` / `candidates.py` | scoring under an explicit exit policy |
+
+**Nothing here imports `backend/app/engine/core.py`.** The prior audit found
+look-ahead in that engine's higher-timeframe features, and the brief's rule is
+that a contaminated backtest is never the thing you optimise.

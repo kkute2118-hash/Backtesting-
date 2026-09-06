@@ -1,0 +1,119 @@
+{
+  "$comment": [
+    "GTF-D13. Derived in research/gtf/FINDINGS.md from 104,592 demand-zone",
+    "arrivals over Nifty 500 daily candles, 2021-04-12 to 2026-08-07.",
+    "Thresholds fixed on data before 2024-04-01; validation and test read once.",
+    "enabled is false: this is a research result, not a production decision."
+  ],
+  "strategy_name": "GTF-D13",
+  "enabled": false,
+  "source": "GTF 'Trading in the Zone', 3146-minute Hindi transcript, plus this repo's 2026-09 audit",
+  "side": "long_only",
+  "universe": "Nifty 500, >=320 daily bars",
+  "zone": {
+    "exciting_body_ratio": 0.5,
+    "max_base_candles": 12,
+    "proximal": "max body of all base candles",
+    "distal": "min low of all base candles",
+    "invalidated_when": "any close below distal"
+  },
+  "filters": {
+    "zone_height_pct_min": 2.21,
+    "legout_atr_min": 0.837,
+    "atr_pct_min": 3.24,
+    "approach_speed_pct_min": 1.19,
+    "dist_ema200_atr_max": 0.96,
+    "market_vol_regime": "vol20 > trailing 500d median"
+  },
+  "execution": {
+    "entry": "resting buy limit at proximal",
+    "fill": "min(proximal, open)",
+    "reject_if": "open <= distal",
+    "stop": "entry - 2.0 * ATR14",
+    "stop_fill": "min(stop, open)",
+    "target": "entry + 4.0 * ATR14",
+    "time_stop_bars": 60,
+    "tie_break": "stop wins when stop and target share a bar",
+    "cost_pct_round_trip": 0.23
+  },
+  "scoring": {
+    "use_a_score": false,
+    "reason": "the GTF 7-point trade score is inversely predictive (spread -0.204/-0.195/-0.196 R across train/val/test); it correlates -0.216 with zone width, and width is the variable that matters",
+    "rank_by_if_capacity_constrained": "zone_height_pct desc"
+  },
+  "measured": {
+    "train": {
+      "n": 1213,
+      "win_pct": 43.4,
+      "avg_pct": 2.6,
+      "avg_r": 0.281,
+      "pf": 1.49
+    },
+    "validation": {
+      "n": 1693,
+      "win_pct": 41.7,
+      "avg_pct": 2.48,
+      "avg_r": 0.305,
+      "pf": 1.44
+    },
+    "test": {
+      "n": 852,
+      "win_pct": 48.4,
+      "avg_pct": 3.91,
+      "avg_r": 0.431,
+      "pf": 1.88
+    },
+    "all": {
+      "n": 3758,
+      "symbols": 432,
+      "avg_pct": 2.84,
+      "avg_r": 0.326,
+      "pf": 1.54
+    },
+    "matched_placebo_avg_pct": -1.65,
+    "bootstrap_ci_mean_pct": [
+      0.09,
+      3.92
+    ],
+    "walk_forward_windows_positive": "8/10",
+    "pct_symbols_profitable": 62.5,
+    "top5_share_of_gross_profit_pct": 7.5,
+    "portfolio_unlevered_15_slots": {
+      "cagr_pct": 9.1,
+      "max_dd_pct": -18.7,
+      "sharpe": 0.94
+    },
+    "benchmark_equal_weight_buy_and_hold": {
+      "cagr_pct": 27.7,
+      "max_dd_pct": -21.4,
+      "sharpe": 1.53
+    },
+    "corr_with_index": -0.118
+  },
+  "video_claims_rejected": [
+    "trade score monotone in outcome (A12) - inverted",
+    "fresh beats tested (A4) - backwards",
+    "fewer base candles are better (A12) - backwards",
+    "one leg-out plus a gap scores like two (A12) - worst bucket",
+    "curve / location decides buyer or seller (A9)",
+    "buy demand only in an uptrend (A7)",
+    "closing concept as a standalone gate (A6)",
+    "reversal vs continuation patterns differ (A2)",
+    "execution stacked on location is best (A13) - worse",
+    "require >=2R available (A11 gate) - selects against the better trades"
+  ],
+  "video_claims_supported": [
+    "zone construction: leg-in / base / leg-out, body-to-wick marking (A1-A3)",
+    "leg-out achievement (A5), once given a number",
+    "target at the opposing zone on the trending timeframe (A11)"
+  ],
+  "known_limits": [
+    "survivorship: today's Nifty 500 applied to the whole window; the probe bounds but cannot remove it (corr(symbol edge, symbol buy-and-hold) = 0.066)",
+    "corporate actions unverified - still open from the prior audit",
+    "one market, 5.5 years, one of its strongest bull runs",
+    "supply zones detected but untested; the short side is an assumption",
+    "13 candidates compared - apply a multiple-comparison haircut",
+    "unlevered it loses to buy-and-hold over this window"
+  ],
+  "confidence": "medium"
+}
