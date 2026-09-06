@@ -245,5 +245,64 @@
       "avg_pct_of_trades_actually_taken": 0.48,
       "note": "capacity is the binding failure: signals arrive in selloff bursts, slots fill on the way down with the early poor trades in the cluster, and the good trades arrive with no capacity left. The 21.3% CAGR in SYSTEM.md covers 2022-2026 and is front-loaded."
     }
+  },
+  "recommended": {
+    "$comment": "GTF-S7. The video's own 7/7 trade score, with a volatility stop instead of the video's distal stop. Beats both GTF-D14 and buy-and-hold over the last two years. See FINDINGS_V2.md section 11. enabled false.",
+    "strategy_name": "GTF-S7",
+    "enabled": false,
+    "selection": "GTF trade score == 7/7 (fresh, >=2 leg-outs or 1+gap, 1-3 base candles)",
+    "gates": {
+      "min_turnover_cr": 10.0,
+      "market_regime": "20d vol above trailing 500d median"
+    },
+    "execution": {
+      "entry": "resting buy limit at proximal",
+      "fill": "min(proximal, open)",
+      "stop": "entry - 2.0 * ATR14 (NOT the distal line)",
+      "target": "entry + 8.0 * ATR14",
+      "time_stop_bars": 60,
+      "reject_if": "open <= stop"
+    },
+    "portfolio": {
+      "risk_per_trade": 0.015,
+      "slots": 15,
+      "leverage": "none",
+      "one_position_per_symbol": true
+    },
+    "last_two_years_2024_09_to_2026_09": {
+      "signals": 1862,
+      "win_pct": 39.3,
+      "avg_pct": 3.24,
+      "pf": 1.69,
+      "total_return_pct": 17.0,
+      "cagr_pct": 8.2,
+      "max_dd_pct": -12.7,
+      "sharpe": 0.89,
+      "trades_taken": 150,
+      "avg_pct_of_taken": 1.92,
+      "benchmark": {
+        "total_return_pct": 7.9,
+        "cagr_pct": 3.9,
+        "max_dd_pct": -21.4,
+        "sharpe": 0.31
+      },
+      "gtf_d14_same_window": {
+        "total_return_pct": 2.4,
+        "sharpe": 0.21
+      }
+    },
+    "full_window_2021_2026": {
+      "total_return_pct": 158.5,
+      "cagr_pct": 19.2,
+      "max_dd_pct": -13.6,
+      "sharpe": 1.66,
+      "benchmark": {
+        "total_return_pct": 284.2,
+        "cagr_pct": 28.3,
+        "sharpe": 1.57
+      }
+    },
+    "correction": "FINDINGS.md called the GTF score inversely predictive. That held only with the video's distal stop, which sits inside the noise on a thin zone. With a 2 ATR stop the inversion disappears and 7/7 is the best bucket. The score works; the stop placement does not.",
+    "do_not_add": "the EMA200 filter - it raises per-trade quality to +4.71% and cuts the portfolio to +7.2%"
   }
 }

@@ -214,3 +214,72 @@ Fixing that is a queueing and capital-allocation problem — staged entry throug
 a cluster, reserving slots, or sizing by signal strength rather than first-come
 — and none of it has been tested here. Until it is, the honest number for the
 last two years is **+2.4 %**.
+
+---
+
+## 11. The 7/7 correction — the score was fine, my stop was not
+
+Asked to trade only the video's 7-out-of-7 zones. That contradicts §2 of
+`FINDINGS.md`, which found the GTF trade score inversely predictive. Both are
+true, and the reconciliation is the useful part.
+
+| GTF score | n | avg R, **distal stop**, 2R target | avg %, **2 ATR stop**, 8 ATR target | median zone width |
+| --- | --- | --- | --- | --- |
+| 1.0 | 1,616 | **+0.166** | +2.03 % | 5.19 % |
+| 3.0 | 14,704 | +0.008 | +2.31 % | 2.45 % |
+| 4.5 | 20,980 | −0.000 | +2.38 % | 2.32 % |
+| 6.0 | 30,976 | **−0.063** | +2.24 % | 2.21 % |
+| **7.0** | 7,710 | **−0.015** | **+3.14 %** | 2.19 % |
+
+With the video's own distal stop the score is inversely predictive. With a
+volatility stop the inversion vanishes and **7/7 becomes the best bucket**.
+
+The mechanism is the one from `FINDINGS.md` §2, pointed the other way. A 7/7
+zone is among the thinnest (median 2.19 % against 5.19 % at score 1), so a stop
+on its distal line sits inside the daily noise. **That penalty was never a
+statement about zone quality — it was a statement about where the stop was.**
+Move the stop off the zone and the score's real content shows through.
+
+I got this wrong the first time by testing the score and the stop together and
+attributing the result to the score. The correct reading: **the video's quality
+score works; the video's stop placement does not.**
+
+### What 7/7 is worth
+
+Last two years (2024-09-04 to 2026-09-04), 15 slots, unlevered:
+
+| set | signals | win % | avg % | PF | total 2 yr | CAGR | max DD | Sharpe |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 7/7 only | 3,561 | 33.5 | +1.48 | 1.33 | +12.4 % | 6.0 % | −19.1 % | 0.64 |
+| 7/7 + high-vol | 1,922 | 39.5 | +3.36 | 1.71 | +11.8 % | 5.7 % | −16.6 % | 0.61 |
+| **7/7 + ≥10 Cr + high-vol** | 1,862 | **39.3** | **+3.24** | **1.69** | **+17.0 %** | **8.2 %** | **−12.7 %** | **0.89** |
+| 7/7 + ≥10 Cr + hv + EMA200 | 1,221 | 43.2 | +4.71 | 2.07 | +7.2 % | 3.5 % | −17.9 % | 0.44 |
+| *GTF-D14 (the learned system)* | 5,608 | 39.2 | +3.05 | 1.53 | *+2.4 %* | *1.2 %* | *−18.9 %* | *0.21* |
+| *benchmark, buy and hold* | — | — | — | — | *+7.9 %* | *3.9 %* | *−21.4 %* | *0.31* |
+
+**7/7 + liquidity + volatility gate beats the benchmark on every measure over
+the last two years** — more than double the return, 60 % of the drawdown, near
+three times the Sharpe — and it beats my own learned system by 7×.
+
+Full window, same config: +158.5 %, CAGR 19.2 %, max DD −13.6 %, Sharpe 1.66,
+against the benchmark's +284.2 %, 28.3 %, −21.4 %, 1.57. Lower return, better
+risk-adjusted return. Without the liquidity floor, 7/7 alone returns +261 % at
+Sharpe 1.85.
+
+### Why it fixes the capacity problem
+
+§10 showed the failure was that only 472 of 5,608 signals fit the slots, and the
+ones taken averaged +0.48 % against the pool's +3.05 %. Filtering to 7/7 with the
+two gates cuts the pool to 1,862 and lifts **the average of trades actually
+taken to +1.92 %**. Fewer, better signals fill the slots better. Adding the
+EMA200 filter on top makes per-trade quality higher still (+4.71 %) and the
+portfolio worse (+7.2 %) — past a point, quality starves deployment.
+
+### Caveats
+
+* The 7/7 rule itself has **zero parameters fitted by me** — it is the video's,
+  used as given. That is the lowest overfitting risk of anything in this study.
+* The exit, the liquidity floor and the volatility gate were all chosen earlier
+  with sight of the full data. That selection bias is not zero.
+* 150 trades actually taken over two years. Selection-order spread is material.
+* Still long-only, still survivorship-biased, still one market.
