@@ -169,6 +169,10 @@ GITHUB_BACKUP_PATH = "backups/market_data.sqlite3"
 # existed is not stranded.
 GITHUB_BACKUP_PATH_GZ = GITHUB_BACKUP_PATH + ".gz"
 
+# Attempts for the upload itself, not for the whole backup: see the retry loop
+# in backup_db_to_github().
+GITHUB_UPLOAD_ATTEMPTS = 3
+
 
 # GitHub refuses to create any Actions secret or repository variable whose name
 # starts with "GITHUB_" — the prefix is reserved. The original setting names all
@@ -461,7 +465,17 @@ def backup_db_to_github(return_reason=False):
         if branch:
             payload["branch"] = branch
 
-        put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=300)
+        # GitHub answers a multi-megabyte upload with a 502 often enough to
+        # matter: one did, and it cost a full scan — the day's forward-test
+        # candidates went into a container that was discarded a second later.
+        # A transient server error is worth retrying; a 4xx never is, because
+        # nothing about waiting makes a bad token or a too-large file valid.
+        put_r = None
+        for attempt in range(1, GITHUB_UPLOAD_ATTEMPTS + 1):
+            put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=300)
+            if put_r.status_code < 500 or attempt == GITHUB_UPLOAD_ATTEMPTS:
+                break
+            time.sleep(min(30, 2 ** attempt))
         if put_r.status_code in (200, 201):
             mb = os.path.getsize(DATA_DB) / 1_048_576
             packed_mb = len(packed) / 1_048_576
