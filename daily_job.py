@@ -585,11 +585,11 @@ def run_backtest():
 def _study_raw_signals(data, tickers, start, end):
     """Every S1-S4 signal, ungated — the only way to ask whether the score predicts
     anything, rather than only ever seeing setups that already passed the gate."""
+    # run_raw_signal_backtest() persists its own fingerprints on the way out, so
+    # this must not persist them again: doing both wrote every signal twice and
+    # left 177,890 rows for 88,945 signals — enough to mislead any query that
+    # forgets to filter by run_id, and to double the backup for nothing.
     result = core.run_raw_signal_backtest(data, [1, 2, 3, 4], start, end)
-    try:
-        core._persist_raw_fingerprints(result, start, end, len(tickers))
-    except Exception:
-        log("study", "  (fingerprints could not be persisted; the summary below still stands)")
     signals = 0 if result is None else len(result)
     summary = {"signals": signals}
     if signals:
@@ -600,11 +600,8 @@ def _study_raw_signals(data, tickers, start, end):
 def _study_sl_calibration(data, tickers, start, end):
     """Five stop-placement schemes over the SAME signals and the SAME forward bars,
     which isolates the effect of placement alone."""
+    # Persisted inside the study, as above — do not write the rows a second time.
     result = core.run_sl_calibration_study(data, [1, 2, 3, 4], start, end)
-    try:
-        core._persist_sl_calibration(result, start, end, len(tickers))
-    except Exception:
-        log("study", "  (calibration rows could not be persisted; the report below still stands)")
     report = core.sl_calibration_report(result)
     if report is not None and not report.empty:
         for row in report.to_dict("records"):

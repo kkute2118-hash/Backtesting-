@@ -1,0 +1,244 @@
+{
+  "$comment": [
+    "PROPOSAL, NOT A DROP-IN CONFIGURATION. Produced by the two-year audit of",
+    "2,357 gated trades and 88,945 ungated signals over Nifty 500 daily candles,",
+    "2024-09-04 to 2026-09-04.",
+    "",
+    "Nothing here is validated enough to trade. Three of four strategies read",
+    "monthly features that had not completed when the signal fired, so their",
+    "historical record is not evidence. Every 'enabled' flag below is therefore",
+    "false, and every recommendation carries the confidence the data supports",
+    "rather than the confidence a configuration file usually implies.",
+    "",
+    "The correct sequence is: fix blocking_defects, re-run the backtest and the",
+    "ungated capture, then revisit this file with results that mean something."
+  ],
+
+  "audit": {
+    "generated_at": "2026-09-06",
+    "universe": "Nifty 500",
+    "window": { "start": "2024-09-04", "end": "2026-09-04" },
+    "gated_trades": 2357,
+    "ungated_signals": 88945,
+    "symbols_with_history": 485,
+    "cost_model_pct_round_trip": 0.23,
+    "headline": {
+      "total_r": -444.3,
+      "expectancy_r": -0.1885,
+      "win_rate_pct": 26.1,
+      "profit_factor": 0.74,
+      "max_drawdown_r": -629.5,
+      "t_statistic": -6.36,
+      "months_positive": "8/25"
+    }
+  },
+
+  "blocking_defects": [
+    {
+      "id": "monthly_lookahead",
+      "severity": "invalidating",
+      "location": "backend/app/engine/core.py :: _monthly_asof()",
+      "detail": "Resamples the full daily frame into calendar months and patches only the final month to be point-in-time. Every earlier bar sees its own month's eventual high, low and close.",
+      "affects": ["S1", "S2", "S4"],
+      "fix": "Compute the monthly aggregate as-of each evaluation date, not once over the whole frame.",
+      "verification": "A test that computes a feature on a truncated frame and on the full frame and requires equality at the truncation point.",
+      "confidence": "high"
+    },
+    {
+      "id": "survivorship_bias",
+      "severity": "optimistic",
+      "location": "backend/app/engine/core.py :: index_universe()",
+      "detail": "Today's Nifty 500 constituent CSV is applied to the whole history. Demoted names are absent; promoted names are present for periods when they were not members.",
+      "affects": ["all"],
+      "fix": "Store index membership with effective dates from today forward; the past cannot be recovered.",
+      "confidence": "high"
+    },
+    {
+      "id": "stop_fills_through_gaps",
+      "severity": "optimistic_small",
+      "location": "backend/app/engine/core.py :: _professional_bt(), run_raw_signal_backtest()",
+      "detail": "Assumes a fill at exactly the stop price. 109 of 1,599 stop-outs (6.8%) opened below the stop; realistic fill on those averaged -9.74% against -7.00% modelled, worst -19.41%.",
+      "measured_effect_r_per_trade": -0.018,
+      "fix": "Fill at min(stop, bar.open).",
+      "confidence": "high"
+    },
+    {
+      "id": "corporate_actions_unverified",
+      "severity": "unknown",
+      "location": "no adjustment code exists",
+      "detail": "Nothing adjusts for splits or bonuses. Unadjusted history would manufacture false breakdowns and false volume spikes.",
+      "fix": "Reconcile known 2024-2026 split dates against stored candles.",
+      "confidence": "insufficient_evidence"
+    }
+  ],
+
+  "scoring_system": {
+    "enabled": false,
+    "current_gate": 85,
+    "recommended_gate": null,
+    "verdict": "inversely_predictive",
+    "evidence": {
+      "method": "Average R by score band across 88,945 ungated signals; the ordering reproduces within each year separately.",
+      "bands": [
+        { "range": "0-49",  "signals": 2450,  "win_pct": 32.6, "avg_r":  0.036 },
+        { "range": "50-59", "signals": 19456, "win_pct": 31.8, "avg_r":  0.007 },
+        { "range": "60-69", "signals": 22705, "win_pct": 30.0, "avg_r": -0.067 },
+        { "range": "70-74", "signals": 18013, "win_pct": 28.1, "avg_r": -0.170 },
+        { "range": "75-79", "signals": 15979, "win_pct": 28.9, "avg_r": -0.145 },
+        { "range": "80-84", "signals": 7985,  "win_pct": 26.9, "avg_r": -0.185 },
+        { "range": "85-89", "signals": 2167,  "win_pct": 25.8, "avg_r": -0.199 },
+        { "range": "90-94", "signals": 190,   "win_pct": 28.9, "avg_r": -0.070 }
+      ],
+      "not_an_exit_artefact": "High-score signals show LOWER favourable excursion (+8.71% vs +9.77%), the same adverse excursion, and a higher stop rate (68.0% vs 61.6%).",
+      "withdrawn_claim": "On the one-year sample the 90-94 band looked profitable (+28.9R / 73 trades). Across two years it is -37.4R in year one and +24.0R in year two. Regime, not edge."
+    },
+    "components": {
+      "score_htf": { "keep": false, "quintile_spread_r": -0.003, "years_agree": false, "note": "No measurable contribution." },
+      "score_footprint": { "keep": "review", "quintile_spread_r": -0.105, "years_agree": true, "note": "Consistent, but pointing the wrong way — higher is worse." }
+    },
+    "confidence": "high"
+  },
+
+  "strategies": [
+    {
+      "strategy_name": "S1",
+      "enabled": false,
+      "reason_disabled": "monthly_lookahead",
+      "timeframe_fields": { "monthly": 8, "weekly": 1, "daily": 2 },
+      "ungated": { "signals": 28068, "win_pct": 24.9, "avg_r": -0.226, "profit_factor": 0.69 },
+      "gated_2y": { "trades": 1533, "avg_r": -0.249, "total_r": -382.3 },
+      "share_of_traded_signals_pct": 65.0,
+      "robustness_score": 0,
+      "overfitting_risk": "not_assessable",
+      "confidence": "insufficient_evidence",
+      "note": "Largest contributor to both signal count and loss. Its record cannot be read until the look-ahead is fixed."
+    },
+    {
+      "strategy_name": "S2",
+      "enabled": false,
+      "reason_disabled": "monthly_lookahead",
+      "timeframe_fields": { "monthly": 1, "weekly": 1, "daily": 10 },
+      "ungated": { "signals": 3027, "win_pct": 33.6, "avg_r": 0.040, "profit_factor": 1.06 },
+      "gated_2y": { "trades": 43, "avg_r": 0.319, "total_r": 13.7, "year1_avg_r": 0.316, "year2_avg_r": 0.324 },
+      "robustness_score": null,
+      "overfitting_risk": "medium",
+      "confidence": "low",
+      "note": "The only strategy positive in both years gated (+0.316 / +0.324 R), but on 26 and 17 trades. Contaminated by one monthly field. Worth re-testing first after the fix."
+    },
+    {
+      "strategy_name": "S3",
+      "enabled": false,
+      "reason_disabled": "negative_expectancy",
+      "timeframe_fields": { "monthly": 0, "weekly": 1, "daily": 5 },
+      "ungated": { "signals": 53907, "win_pct": 29.3, "avg_r": -0.138, "profit_factor": 0.80 },
+      "gated_2y": { "trades": 764, "avg_r": -0.165, "total_r": -126.2 },
+      "robustness_score": 0,
+      "overfitting_risk": "low",
+      "confidence": "high",
+      "note": "The only strategy with no look-ahead, and therefore the only one whose result is evidence. It loses money. This is the most trustworthy negative finding in the audit."
+    },
+    {
+      "strategy_name": "S4",
+      "enabled": false,
+      "reason_disabled": "monthly_lookahead",
+      "timeframe_fields": { "monthly": "entire SEPA gate", "weekly": 0, "daily": 1 },
+      "ungated": { "signals": 3943, "win_pct": 62.4, "avg_r": 1.286, "profit_factor": 4.46 },
+      "gated_2y": { "trades": 17, "win_pct": 100.0, "avg_r": 2.970 },
+      "robustness_score": 0,
+      "overfitting_risk": "artefact",
+      "confidence": "insufficient_evidence",
+      "note": "17 of 17 winners at exactly 2.970R, and 62.4% wins at 3R ungated. This is what a strategy looks like when it can see the end of the month, not an edge."
+    }
+  ],
+
+  "filters": [
+    {
+      "id": "ema200_proximity",
+      "status": "candidate",
+      "rule": "dist_ema200_atr <= 0.96",
+      "description": "Reject signals extended more than ~1 ATR above the 200 EMA.",
+      "evidence": {
+        "year1": { "signals": 8603, "win_pct": 35.1, "avg_r": 0.120, "profit_factor": 1.19 },
+        "year2": { "signals": 9195, "win_pct": 35.0, "avg_r": 0.102, "profit_factor": 1.17 },
+        "year1_rejected": { "signals": 36694, "avg_r": -0.265 },
+        "year2_rejected": { "signals": 34453, "avg_r": -0.025 }
+      },
+      "rejects_share_of_signals_pct": 80,
+      "confidence": "medium",
+      "caveat": "The only relationship in the dataset that reproduces across two disjoint years. Still only +0.12R before slippage — useful as a filter, not as a strategy."
+    },
+    {
+      "id": "pullback_depth",
+      "status": "hypothesis",
+      "rule": "pullback_depth_pct >= median",
+      "evidence": {
+        "year1_combined_with_ema200": { "signals": 4790, "win_pct": 33.9, "avg_r": 0.107 },
+        "year2_combined_with_ema200": { "signals": 4678, "win_pct": 36.6, "avg_r": 0.203 }
+      },
+      "confidence": "low",
+      "caveat": "Positive in both years but not clearly additive — it improved year two and slightly weakened year one."
+    },
+    {
+      "id": "relative_volume",
+      "status": "remove",
+      "fields": ["relvol", "relvol_trend", "retracement_volume_ratio"],
+      "evidence": "Quintile spreads of +0.038, +0.062 and +0.058 R; relvol flips direction between years.",
+      "confidence": "medium"
+    }
+  ],
+
+  "feature_screen": {
+    "$comment": "Average R in the bottom vs top quintile of each field, over 88,945 ungated signals. 'years_agree' is the only column that separates a relationship from a coincidence. Signals overlap heavily, so these are screens, not significance tests.",
+    "consistent": [
+      { "feature": "dist_ema200_atr",     "bottom_q":  0.111, "top_q": -0.287, "spread": -0.398 },
+      { "feature": "score",               "bottom_q":  0.011, "top_q": -0.177, "spread": -0.187 },
+      { "feature": "pullback_depth_pct",  "bottom_q": -0.149, "top_q":  0.008, "spread":  0.157 },
+      { "feature": "dist_recent_low_atr", "bottom_q": -0.017, "top_q": -0.167, "spread": -0.150 },
+      { "feature": "dist_ema20_atr",      "bottom_q": -0.027, "top_q": -0.159, "spread": -0.131 },
+      { "feature": "rsi14",               "bottom_q": -0.042, "top_q": -0.168, "spread": -0.127 },
+      { "feature": "dist_ema50_atr",      "bottom_q": -0.052, "top_q": -0.177, "spread": -0.125 },
+      { "feature": "macd_hist",           "bottom_q": -0.046, "top_q": -0.163, "spread": -0.117 },
+      { "feature": "score_footprint",     "bottom_q": -0.048, "top_q": -0.153, "spread": -0.105 }
+    ],
+    "inconsistent_across_years": [
+      "atr_pct", "atr_adjusted_stop", "relvol", "candle_body_pct",
+      "gap_pct", "dist_resistance_atr", "score_htf", "retracement_duration_bars"
+    ],
+    "interpretation": "Every consistent feature says the same thing: extension predicts underperformance, pullback depth predicts the opposite. The system is built to buy strength; over this window strength was the wrong side."
+  },
+
+  "exit_rules": {
+    "current": {
+      "stop": "entry * 0.93",
+      "target": "entry + 3 * (entry - stop)",
+      "timeout_bars": 60,
+      "applies_to": "all four strategies identically"
+    },
+    "evidence": {
+      "sample": "1,104 gated trades, one-year run",
+      "reach_target_pct": 15.2,
+      "hit_stop_pct": 56.4,
+      "timeout_pct": 28.4,
+      "median_return_pct": -7.23,
+      "avg_mfe_pct": 9.04,
+      "avg_realised_pct": 0.15,
+      "excursion_distribution": {
+        "+3%": 68.2, "+5%": 53.6, "+7%": 44.7, "+10%": 34.5, "+15%": 25.5, "+21%": 15.2
+      }
+    },
+    "recommendation": "Volatility-scaled stop and a target placed near the observed favourable excursion rather than a fixed 3R. Exact values pending the stop-placement study.",
+    "status": "pending_study",
+    "confidence": "medium"
+  },
+
+  "not_assessed": {
+    "$comment": "Requested by the brief; the data cannot support them. Listed so nothing here is mistaken for a gap in the analysis rather than a gap in the data.",
+    "sector_analysis": "no sector mapping stored",
+    "market_cap_cohorts": "no capitalisation field",
+    "timeframe_comparison": "only daily candles stored; weekly and monthly are derived",
+    "parameter_sweeps": "thresholds hard-coded in strategy_signal(); must be parameterised first",
+    "sharpe_sortino_cagr": "backtest records R, not portfolio equity",
+    "monte_carlo": "resampling a contaminated trade set produces confident nonsense",
+    "walk_forward_optimisation": "blocked on monthly_lookahead; optimising on leaked data fits the leak"
+  }
+}
