@@ -83,7 +83,7 @@ Open your Vercel URL. The candle store starts empty, so:
 
 1. **Data Manager → Sync missing history** — once, to build the history. It is
    rate-limited to five requests a second, so a full universe takes a while.
-2. **Data Manager → Back up now** — confirm a `backups/market_data.sqlite3`
+2. **Data Manager → Back up now** — confirm a `backups/market_data.sqlite3.gz`
    file appears on the `db-backup` branch. If it fails, **Test the backup path**
    names the exact reason.
 3. Thereafter, **Top up latest sessions** daily — or leave it to the scheduled
@@ -135,7 +135,9 @@ accumulated.
    ```
 
 3. Sync some history, then check **Data Manager → Back up now**. A
-   `backups/market_data.sqlite3` file should appear on the `db-backup` branch.
+   `backups/market_data.sqlite3.gz` file should appear on the `db-backup` branch.
+   It is gzipped because the uncompressed file is too large for GitHub's
+   contents API once a full universe is stored.
    The branch is created automatically on the first backup.
 4. Confirm recovery works: `GET /api/v1/health` reports a `boot_restore`
    object saying what the last cold start recovered.

@@ -28,6 +28,11 @@ on:
         required: true
         default: '3'
         type: string
+      rebuild:
+        description: 'Delete the stored candles first and download every bar again. Use when the stored data is WRONG rather than missing — a top-up only fills gaps, so it cannot correct a bar that is already there. Forward tests and learning are not touched.'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   # Never let this and the daily job write the backup at the same time.
@@ -134,4 +139,5 @@ jobs:
           DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
           SCAN_UNIVERSE: ${{ inputs.universe }}
           BOOTSTRAP_YEARS: ${{ inputs.years }}
+          REBUILD_CANDLES: ${{ inputs.rebuild }}
         run: python daily_job.py bootstrap
