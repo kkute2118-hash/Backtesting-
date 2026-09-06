@@ -70,6 +70,34 @@ def _env_int(name, default):
         return default
 
 
+def _env_flag(name):
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _clear_candles():
+    """Drop every stored candle so the next download rebuilds the store.
+
+    Only the candle table: forward tests, resolved results and learning live in
+    other tables and are not reproducible from anywhere, so they are never
+    touched here. Candles are, by definition, re-downloadable — which is what
+    makes a rebuild the safe way to correct data that is wrong rather than
+    missing, where a top-up would find nothing to do.
+    """
+    con = core._db()
+    try:
+        removed = int(con.execute("SELECT COUNT(*) FROM candles").fetchone()[0])
+        con.execute("DELETE FROM candles")
+        con.commit()
+    finally:
+        con.close()
+    con = core._db()
+    try:
+        con.execute("VACUUM")          # otherwise the freed pages ride along in every backup
+    finally:
+        con.close()
+    return removed
+
+
 def _selected_strategies():
     raw = os.environ.get("SCAN_STRATEGIES", "1,2,3,4")
     out = []
@@ -340,6 +368,12 @@ def run_bootstrap():
 
     step_restore()
     step_token(force=True)
+
+    if _env_flag("REBUILD_CANDLES"):
+        removed = _clear_candles()
+        summary["rebuilt_from_scratch"] = True
+        summary["candles_removed"] = removed
+        log("rebuild", f"deleted {removed:,} stored candle(s); every bar will be re-downloaded")
 
     universes = _universes()
     tickers = core.resolve_universes(universes)

@@ -1400,6 +1400,27 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
     raise RuntimeError(last_error or f"Dhan {label} request failed")
 
 
+# NSE trades in IST, and Dhan stamps each daily bar at the start of its session
+# day in IST — which is 18:30 UTC of the DAY BEFORE. Reading those epochs as UTC
+# therefore dated every candle one day early: a store built this way held 272
+# Sundays and four Fridays across five years, and its newest bar was always a
+# session behind, which is what permanently blocked the daily scan (the
+# freshness guard compares the newest stored date against the real expected
+# session, and it could never match).
+#
+# Converting to IST is also the safe reading if Dhan ever sends a plain
+# midnight-UTC timestamp instead: 00:00 UTC becomes 05:30 IST on the same date,
+# so the date is unchanged. There is no input for which UTC is right and IST is
+# wrong.
+DHAN_MARKET_TZ = "Asia/Kolkata"
+
+
+def _dhan_session_index(timestamps):
+    """Session dates from Dhan's epoch seconds, read in market time."""
+    idx = pd.to_datetime(timestamps, unit="s", errors="coerce", utc=True)
+    return idx.tz_convert(DHAN_MARKET_TZ).tz_localize(None).normalize()
+
+
 def dhan_history(symbol,start_date,end_date):
     clean=str(symbol).upper().replace(".NS","")
     sid=dhan_map().get(clean)
@@ -1412,7 +1433,7 @@ def dhan_history(symbol,start_date,end_date):
     j=r.json()
     if "close" not in j:raise RuntimeError("Unexpected Dhan historical response")
     d=pd.DataFrame({k:j.get(k,[]) for k in ["open","high","low","close","volume"]})
-    if j.get("timestamp"):d.index=pd.to_datetime(j["timestamp"],unit="s",errors="coerce")
+    if j.get("timestamp"):d.index=_dhan_session_index(j["timestamp"])
     d=d.apply(pd.to_numeric,errors="coerce").dropna(subset=["close"]).sort_index()
     return d
 
