@@ -245,16 +245,40 @@ def _github_ensure_branch(repo, branch):
     return False, f"Could not create branch '{branch}': {mk.status_code} {mk.text[:200]}"
 
 
+def _github_is_throttled(status, body):
+    """True when GitHub is asking us to slow down rather than turning us away.
+
+    Secondary rate limits come back as 403 with an explanatory body, not as 429,
+    so the status alone cannot distinguish a throttle from a permissions
+    failure. Retrying the first is right; retrying the second is pointless.
+    """
+    if status == 429:
+        return True
+    text = str(body or "").lower()
+    return status == 403 and ("rate limit" in text or "secondary" in text
+                              or "abuse" in text or "try again later" in text)
+
+
 def _github_error_hint(status, body):
     """Turn a GitHub API status into something actionable."""
     if status == 401:
         return ("401 Unauthorized — the token is invalid or expired. Generate a new one and "
                 "update it in the backend environment / Actions secrets.")
     if status == 403:
+        # A 403 is two very different problems wearing the same status code, and
+        # the canned permissions answer was wrong for the other one: GitHub also
+        # throttles repeated large writes, and after five multi-megabyte commits
+        # in under an hour it answered a backup with 403 rather than 429. The
+        # body is what tells them apart, so it is no longer discarded.
+        if _github_is_throttled(status, body):
+            return ("403 rate-limited — GitHub is throttling writes to this repository, not "
+                    "refusing them. Wait a few minutes and run it again; the job is idempotent. "
+                    f"GitHub said: {body[:200]}")
         return ("403 Forbidden — the token authenticated but is not allowed to write. A "
                 "fine-grained token needs Repository permissions → Contents: Read and write, "
                 "AND this repository selected under 'Repository access'. In Actions, the "
-                "workflow also needs 'permissions: contents: write'.")
+                "workflow also needs 'permissions: contents: write'. "
+                f"GitHub said: {body[:200]}")
     if status == 404:
         return ("404 Not Found — the repository name is wrong, the branch does not exist, or "
                 "the token cannot see this repository. GITHUB_REPO must be 'owner/repo', not "
@@ -473,9 +497,23 @@ def backup_db_to_github(return_reason=False):
         put_r = None
         for attempt in range(1, GITHUB_UPLOAD_ATTEMPTS + 1):
             put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=300)
-            if put_r.status_code < 500 or attempt == GITHUB_UPLOAD_ATTEMPTS:
+            retryable = put_r.status_code >= 500 or _github_is_throttled(put_r.status_code,
+                                                                        put_r.text)
+            if not retryable or attempt == GITHUB_UPLOAD_ATTEMPTS:
                 break
-            time.sleep(min(30, 2 ** attempt))
+            # GitHub says how long to wait when it is throttling; believe it.
+            backoff = min(60, 2 ** attempt)
+            for header in ("Retry-After", "X-RateLimit-Reset"):
+                try:
+                    hinted = float(put_r.headers.get(header, "") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if header == "X-RateLimit-Reset" and hinted > 1_000_000_000:
+                    hinted -= time.time()          # it is an epoch, not a duration
+                if hinted > 0:
+                    backoff = max(backoff, min(120.0, hinted))
+                    break
+            time.sleep(backoff)
         if put_r.status_code in (200, 201):
             mb = os.path.getsize(DATA_DB) / 1_048_576
             packed_mb = len(packed) / 1_048_576
