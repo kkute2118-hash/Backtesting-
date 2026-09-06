@@ -88,3 +88,162 @@ at +5 % and you are inside the noise: 83.8 % of trades that reach +3 % and
 71.3 % of those that reach +5 % dip back to breakeven, and most of those
 recover. Wait until +15 %, where only 26.6 % dip back, and the move is nearly
 free.
+
+---
+
+## 2. The S1-S4 marking system — I could not rebuild it, and that is the finding
+
+You asked me to replace the scoring system using the winners. I regenerated all
+**210,409 ungated S1-S4 signals** with the look-ahead-fixed engine (the 273,688
+rows already in the store predate commit a30a00e, so they were not evidence),
+and tried.
+
+### The existing score, after the fix
+
+| score band | n | avg R train | avg R val | avg R test |
+| --- | --- | --- | --- | --- |
+| 0-49 | 4,369 | +0.215 | −0.167 | +0.032 |
+| 50-59 | 42,124 | +0.516 | −0.185 | +0.032 |
+| 70-74 | 41,918 | +0.504 | +0.004 | −0.039 |
+| 80-84 | 23,846 | +0.606 | −0.043 | −0.011 |
+| 85-89 | 7,916 | +0.555 | −0.125 | −0.043 |
+| **90-100** | 722 | +0.373 | **−0.120** | **−0.134** |
+
+Under 70 gives +0.142 R; 85 and over gives +0.169 R. **The strong inversion the
+audit found is gone after the look-ahead fix — the score is now simply flat.**
+That corrects what I told you earlier: it was contamination, not a real
+inversion, across most of the range. But the top of the scale is still the worst
+part of it, in both held-out periods.
+
+And the live gate does not earn its place:
+
+| selection | n | win % | avg R | PF |
+| --- | --- | --- | --- | --- |
+| every signal | 194,266 | 36.6 | **+0.186** | 1.30 |
+| **old score ≥ 85 (the live gate)** | 8,347 | 34.0 | **+0.154** | 1.24 |
+| old score ≥ 90 | 694 | 30.3 | +0.042 | 1.06 |
+
+**Gating at 85 selects worse than taking everything.**
+
+### The replacement score failed
+
+Same method that worked for GTF — 35 fingerprint features, gradient boosting,
+refit every quarter on past data only, 194,266 signals scored out of sample:
+
+| decile of the new score | avg R | win % |
+| --- | --- | --- |
+| 0 (lowest predicted) | **+0.234** | 37.6 |
+| 4 | +0.204 | 36.7 |
+| 9 (highest predicted) | **+0.126** | 35.5 |
+
+**Monotonically backwards.** The model's ranking is anti-predictive out of
+sample. Its top decile returns +0.183 R against +0.186 R for taking everything —
+it adds nothing. Combining it with the old gate is worse than either
+(−0.081 R, PF 0.89).
+
+I am not going to dress this up. **S1-S4 signals are not rankable by these
+features.** The honest answer to "build a new marking system" is that the data
+will not support one, and shipping a score that cannot rank is how the current
+one came to exist.
+
+### What does separate them: which strategy, and the exit
+
+| | full window | | last two years | |
+| --- | --- | --- | --- | --- |
+| strategy | avg R | PF | avg R | PF |
+| S1 | +0.211 | 1.33 | **−0.102** | 0.86 |
+| S2 | +0.296 | 1.50 | **−0.063** | 0.91 |
+| S3 | +0.146 | 1.24 | **−0.142** | 0.79 |
+| **S4** | **+0.398** | **1.65** | **+0.168** | **1.25** |
+
+**Only S4 makes money in the last two years.** S1, S2 and S3 all lose, under
+every exit tested. S4 is also the one whose record the audit dismissed as an
+artefact of monthly look-ahead — post-fix it drops from 62.4 % wins and PF 4.46
+to 39.4 % and PF 1.65, so most of that was the leak, but what is left is real.
+
+And the exit matters more than any score:
+
+| strategy | engine exit (7 % stop, 3R) | 2 ATR stop, 8 ATR target | breakeven at +15 % |
+| --- | --- | --- | --- |
+| S1 | +1.47 % | +2.17 % | **+2.96 %** |
+| S2 | +2.07 % | +2.72 % | **+3.25 %** |
+| S3 | +1.02 % | +0.95 % | **+1.51 %** |
+| **S4** | +2.78 % | **+4.72 %** | +4.44 % |
+
+Last two years, S4: **+1.17 % → +2.09 %** simply by changing the exit.
+
+### What to change in S1-S4
+
+1. **Delete the ≥85 gate.** It selects worse than random.
+2. **Do not replace the score.** Two attempts, two failures. Rank by nothing.
+3. **Trade S4 only.** S1, S2 and S3 have lost money for two years.
+4. **Change the exit** to a 2 ATR stop with an 8 ATR target. That is worth more
+   than any scoring change on the table.
+
+---
+
+## 3. Improving GTF — what worked and what did not
+
+### Worked: the exit
+
+Breakeven at +15 % on the 7/7 set lifts the last two years from **+16.1 % to
++21.5 %** and the Sharpe from 0.84 to 0.87.
+
+### Did not work: allocation
+
+§10 of `FINDINGS_V2.md` diagnosed the capacity failure as slots filling on the
+way down through a cluster. That suggested throttling entries. It does not work:
+
+| policy | total, last 2 yr | Sharpe |
+| --- | --- | --- |
+| **first come (current)** | **+21.5 %** | **0.87** |
+| rank by ATR % | +19.7 % | 0.67 |
+| rank by zone width | +19.3 % | 0.70 |
+| max 5 new positions per day | +13.6 % | 0.62 |
+| keep 25 % dry powder | +12.6 % | 0.67 |
+| max 3 new per day | +8.7 % | 0.45 |
+| max 2 new per day | +7.5 % | 0.41 |
+| only when the index is above its 20-day MA | **−2.5 %** | −0.11 |
+
+Throttling costs more than the bad early trades it avoids. And requiring the
+index to be above its 20-day average destroys the strategy outright, which
+confirms the shape of the edge: **it needs the selloff.** You cannot have the
+good trades in a cluster without taking the early poor ones.
+
+Over the full window ranking by ATR % does help (+194.7 % against +145.1 %), but
+it does not carry to the recent window.
+
+### Did not work: combining with S4
+
+The two streams are uncorrelated (monthly correlation **−0.006**), which
+normally argues for running both. It does not help here:
+
+| system | last 2 yr | Sharpe | full window | Sharpe |
+| --- | --- | --- | --- | --- |
+| **GTF 7/7 alone** | **+21.5 %** | **0.87** | +145.1 % | **1.60** |
+| S4 alone | +10.8 % | 0.55 | +128.2 % | 1.58 |
+| both together | +10.0 % | 0.48 | +157.1 % | 1.52 |
+
+They compete for the same 15 slots, and S4's weaker trades displace GTF's better
+ones. Uncorrelated is not enough when capacity, not risk, is the constraint —
+you would need separate books.
+
+---
+
+## 4. Where this leaves the answer to "improve the return"
+
+Last two years, unlevered, 15 slots: **+21.5 %, CAGR 10.2 %, max DD −15.7 %,
+Sharpe 0.87**, against buy-and-hold's +7.9 %, 3.9 %, −21.4 %, 0.31. That is up
+from +16.1 % before this round, and it beats the benchmark on every measure.
+
+What is left, in order of expected size:
+
+1. **The short side.** Supply zones are detected and still untested. It would
+   roughly double capacity and cut the long-only regime risk. Largest single
+   gain available.
+2. **Separate books** for GTF and S4 rather than one shared slot pool.
+3. **Leverage**, at −0.13 correlation and Sharpe 0.87. A capital decision.
+4. **More slots**, which helped modestly and monotonically.
+
+What is exhausted: scoring, allocation throttles, ratchet schedules beyond a
+single late breakeven move.
