@@ -152,6 +152,22 @@ try:
 except RuntimeError:
     check("a restore it cannot explain aborts the run", True)
 
+# ------- 4. a token that cannot prove write access must still build history
+#
+# GitHub's own Actions token reports no push permission on the repository API
+# even though the workflow grants it contents:write, and requiring that
+# permission here stopped the first history build on a repository that had no
+# backup yet. Nothing exists to overwrite, so there is nothing to protect: a
+# token that truly cannot write just fails at the end, losing nothing.
+fakes = Fakes(backup_exists=False, repo_visible=True, can_write=False).install()
+reset_local_db_to_learning_only()
+try:
+    restored = daily_job.step_restore()
+    check("an unprovable write permission does not block the first run", restored is False)
+except Exception as exc:
+    check("an unprovable write permission does not block the first run", False,
+          f"{type(exc).__name__}: {exc}")
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")
 sys.exit(1 if FAILS else 0)
