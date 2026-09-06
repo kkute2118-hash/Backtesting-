@@ -923,37 +923,82 @@ def _write_cached_dhan_token(token):
     finally:
         con.close()
 
+# A TOTP code is only valid inside its 30-second window, and both ends of that
+# window are hazardous: a code minted with a second left can expire in flight,
+# and Dhan's clock need not agree with ours to the second. Two consecutive
+# builds using the same, correct secret proved it — one succeeded, the next was
+# told "Invalid TOTP" 17 minutes later. So a rejection is retried in a fresh
+# window rather than failing a job that is otherwise ready to run for an hour.
+DHAN_TOTP_ATTEMPTS = 3
+DHAN_TOTP_MIN_REMAINING = 5.0   # seconds of validity a code must still have
+
+
+def _dhan_totp_code(totp):
+    """A code with enough of its window left to survive the round trip."""
+    remaining = totp.interval - (time.time() % totp.interval)
+    if remaining < DHAN_TOTP_MIN_REMAINING:
+        time.sleep(remaining + 0.5)
+    return totp.now()
+
+
+def _dhan_wait_for_next_totp_window(totp):
+    """Sleep into the next window, so a retry cannot resend the rejected code."""
+    time.sleep(totp.interval - (time.time() % totp.interval) + 1.0)
+
+
 def _dhan_generate_fresh_token():
     """Headless PIN+TOTP login (no browser step). Requires DHAN_PIN and
     DHAN_TOTP_SECRET (the base32 secret shown once when enabling TOTP-based
-    API login in Dhan's console) alongside DHAN_CLIENT_ID in the environment."""
+    API login in Dhan's console) alongside DHAN_CLIENT_ID in the environment.
+
+    A TOTP rejection is retried in a later window (see above); every other Dhan
+    error is raised immediately, since retrying "Token can be generated once
+    every 2 minutes" only wastes the window.
+    """
     import pyotp
     from dhanhq import DhanLogin
-    code = pyotp.TOTP(str(_secret_required("DHAN_TOTP_SECRET"))).now()
+    totp = pyotp.TOTP(str(_secret_required("DHAN_TOTP_SECRET")))
     login = DhanLogin(str(_secret_required("DHAN_CLIENT_ID")))
-    result = login.generate_token(str(_secret_required("DHAN_PIN")), code)
-    token = None
-    if isinstance(result, str):
-        token = result
-    elif isinstance(result, dict):
-        if result.get("status") == "error":
-            # A real Dhan API error (e.g. "Token can be generated once every
-            # 2 minutes.") - distinct from an unrecognized SDK response shape,
-            # so the caller sees the actual reason instead of a confusing
-            # "unrecognized response" message.
-            raise RuntimeError(f"Dhan rejected the token request: {result.get('message', 'unknown error')}")
-        for key in ("accessToken", "access_token", "token"):
-            v = result.get(key)
-            if isinstance(v, str) and v:
-                token = v
-                break
-    if not token:
-        # Unknown response shape from the dhanhq SDK - fail loudly rather than
-        # silently caching a bad value. Whatever `result` actually looks like
-        # here tells us exactly which key name to add above.
-        raise RuntimeError(f"Dhan generate_token() returned an unrecognized response: {result!r}")
-    _write_cached_dhan_token(token)
-    return token
+    pin = str(_secret_required("DHAN_PIN"))
+
+    for attempt in range(1, DHAN_TOTP_ATTEMPTS + 1):
+        result = login.generate_token(pin, _dhan_totp_code(totp))
+
+        token = None
+        if isinstance(result, str):
+            token = result
+        elif isinstance(result, dict):
+            if result.get("status") == "error":
+                # A real Dhan API error (e.g. "Token can be generated once every
+                # 2 minutes.") - distinct from an unrecognized SDK response
+                # shape, so the caller sees the actual reason instead of a
+                # confusing "unrecognized response" message.
+                message = str(result.get("message", "unknown error"))
+                if "totp" in message.lower() and attempt < DHAN_TOTP_ATTEMPTS:
+                    _dhan_wait_for_next_totp_window(totp)
+                    continue
+                raise RuntimeError(
+                    f"Dhan rejected the token request: {message}"
+                    + (f" (after {attempt} attempts in separate TOTP windows, so the secret "
+                       "itself is probably wrong, not the timing)"
+                       if "totp" in message.lower() else "")
+                )
+            for key in ("accessToken", "access_token", "token"):
+                v = result.get(key)
+                if isinstance(v, str) and v:
+                    token = v
+                    break
+
+        if not token:
+            # Unknown response shape from the dhanhq SDK - fail loudly rather
+            # than silently caching a bad value. Whatever `result` actually
+            # looks like here tells us exactly which key name to add above.
+            raise RuntimeError(f"Dhan generate_token() returned an unrecognized response: {result!r}")
+
+        _write_cached_dhan_token(token)
+        return token
+
+    raise RuntimeError("Dhan rejected every TOTP attempt.")   # unreachable
 
 def _dhan_ensure_fresh_token():
     """Returns a valid Dhan access token, auto-renewing via PIN+TOTP if the
