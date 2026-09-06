@@ -262,6 +262,40 @@ core.requests.put = too_large.put
 ok, reason = core.backup_db_to_github(return_reason=True)
 check("a 422 is not retried", not ok and too_large.rejected_too_large, reason)
 
+
+# --------------- 6. the runner path: stage the file, let git do the storing
+#
+# The contents API stopped being able to store this database at all — three
+# successes, then 403 "Timed out validating rule" on every attempt, retries
+# included. On a runner the database is therefore written to BACKUP_STAGE_PATH
+# and pushed by git in the next workflow step. What matters here is that the
+# staged file is a real gzip of the real database, because the restore path
+# reads exactly that.
+import gzip as _gzip
+import importlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+daily_job = importlib.import_module("daily_job")
+
+build_database(2_000)
+with open(core.DATA_DB, "rb") as f:
+    expected = f.read()
+
+stage = os.path.join(tempfile.mkdtemp(prefix="ati-stage-"), "nested", "market_data.sqlite3.gz")
+os.environ["BACKUP_STAGE_PATH"] = stage
+core._github_configured = lambda: True
+core.requests.put = lambda *a, **k: (_ for _ in ()).throw(
+    AssertionError("staging must not touch the contents API"))
+
+staged_ok = daily_job.step_backup()
+check("staging reports success", staged_ok)
+check("it created the staged file, directories and all", os.path.exists(stage))
+check("the staged file is gzip", open(stage, "rb").read(2) == bytes((0x1F, 0x8B)))
+check("it decompresses to the database byte for byte",
+      _gzip.decompress(open(stage, "rb").read()) == expected)
+
+os.environ.pop("BACKUP_STAGE_PATH")
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")
 sys.exit(1 if FAILS else 0)

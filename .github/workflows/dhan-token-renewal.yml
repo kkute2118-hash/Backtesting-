@@ -58,4 +58,14 @@ jobs:
           # would add a multi-megabyte binary blob to main's history every run.
           # Set a DB_BACKUP_BRANCH repository variable to override.
           DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
         run: python daily_job.py token
+
+      # The job stages the database instead of uploading it; git is what
+      # actually stores it. See scripts/push_backup.sh for why.
+      - name: Push the database to the backup branch
+        env:
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+          GH_PUSH_TOKEN: ${{ github.token }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+        run: ./scripts/push_backup.sh
