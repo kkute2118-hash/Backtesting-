@@ -247,3 +247,96 @@ What is left, in order of expected size:
 
 What is exhausted: scoring, allocation throttles, ratchet schedules beyond a
 single late breakeven move.
+
+---
+
+## 5. The liquidity sweep — tested, and it does not survive
+
+The setup as described: price takes out a prior daily swing low, the weekly
+trend is sharply up, it reclaims the low quickly on good volume, then retests
+the 10/20 EMA and that retest is the entry. Coded in `sweep.py`, every step
+point-in-time — a swing low is only usable once confirmed, which takes `k` bars,
+and that delay is respected.
+
+**4,309 setups** across 475 symbols.
+
+### Standalone
+
+| window | exit | n | win % | avg % | PF |
+| --- | --- | --- | --- | --- | --- |
+| full | 2 ATR / 8 ATR | 4,309 | 34.9 | +1.89 | 1.42 |
+| full | breakeven at +15 % | 4,309 | 29.8 | **+2.36** | 1.57 |
+| **last 2 years** | breakeven at +15 % | 1,684 | 21.4 | **−1.33** | **0.72** |
+
+By year: −0.53, −1.28, **+9.57**, +3.50, −1.00, −0.12. The whole full-window
+result is 2023.
+
+### It is not my parameters
+
+54 combinations of pivot width (3/5/10), reclaim window (1/3/5 bars), volume
+threshold (1.0/1.5/2.0×) and which EMA is retested (10/20):
+
+* **54 of 54 positive over the full window**
+* **1 of 54 positive over the last two years**
+
+Every parameterisation agrees. This is regime, not tuning.
+
+### It adds nothing as a filter
+
+GTF 7/7 signals split by whether a sweep-reclaim happened in the previous 20
+bars:
+
+| | n | win % | avg % | PF |
+| --- | --- | --- | --- | --- |
+| after a sweep | 881 | 32.0 | **+2.63** | 1.68 |
+| no sweep | 6,181 | 31.8 | **+2.62** | 1.65 |
+
+Identical. The sweep carries no information the GTF setup does not already have.
+
+### Refining it makes it worse — and this is the useful part
+
+Thresholds taken from pre-2024 data only, then the last two years read once:
+
+| filter | train n | train avg % | train PF | **held out avg %** | **held out PF** |
+| --- | --- | --- | --- | --- | --- |
+| all setups | 1,761 | +3.71 | 1.92 | −1.33 | 0.72 |
+| deep sweep | 881 | +3.84 | 1.96 | −1.53 | 0.68 |
+| steep weekly trend | 705 | +4.97 | 2.15 | −1.69 | 0.67 |
+| deep + steep | 353 | +6.33 | 2.52 | −1.67 | 0.68 |
+| deep + steep + volatility | 214 | +8.09 | 2.84 | **−2.81** | 0.54 |
+| **all four filters** | 148 | **+11.45** | **3.81** | **−2.26** | **0.61** |
+
+**The more it is filtered, the better the training number and the worse the
+held-out number.** That is the signature of fitting noise, and "+11.45 % per
+trade at profit factor 3.81" is exactly the number that would be presented as a
+breakthrough if only the training column were shown.
+
+On the same held-out window and the same exit, GTF 7/7 returns +1.09 % (PF 1.25)
+and S4 returns +1.01 % (PF 1.20). Both hold; the sweep does not.
+
+### What this does and does not settle
+
+It settles that **this reading of the setup** does not work on this data. It does
+not settle the concept: the transcript may define the swing, the reclaim, the
+volume condition or the entry differently — sweeping a *weekly* rather than a
+daily swing, for instance, would be a materially different test, and so would
+entering on the reclaim rather than waiting for the EMA retest. Send it and
+those get tested against the speaker's own definitions rather than mine.
+
+But the shape of the result is worth weighing first. The failure is not narrow —
+54 of 54 parameterisations, no filter value, and zero incremental information
+over a setup we already have.
+
+### The other two additions asked for
+
+* **Volume** — already in the study. It contributes, consistently but slightly:
+  a +0.02 to +0.08 spread top-versus-bottom quintile after controlling for zone
+  width. Worth keeping, not worth building around.
+* **Market trend** — tested in §3. Requiring the index above its 20-day average
+  returns **−2.5 %** and destroys the edge. This family of setups needs the
+  selloff.
+* **Sector support** — **cannot be tested. There is no sector mapping in the
+  candle store**, which the prior audit also recorded under `not_assessed`.
+  Adding a symbol→sector table is a small piece of work and would open up both
+  sector-relative strength and sector-breadth filters. It is the most useful
+  unblocked thing on this list.

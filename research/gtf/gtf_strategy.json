@@ -375,5 +375,57 @@
     "s4_alone_pct": 10.8,
     "together_pct": 10.0,
     "conclusion": "they compete for the same slots and S4 displaces better GTF trades; uncorrelated is not enough when capacity is the constraint - separate books would be needed"
+  },
+  "liquidity_sweep": {
+    "$comment": "Sweep of a prior daily swing low, quick reclaim on volume, weekly trend up, 10/20 EMA retest. See FINDINGS_V3.md section 5.",
+    "verdict": "does not survive",
+    "n_setups": 4309,
+    "full_window": {
+      "avg_pct": 2.36,
+      "pf": 1.57
+    },
+    "last_two_years": {
+      "avg_pct": -1.33,
+      "pf": 0.72
+    },
+    "by_year_avg_pct": [
+      -0.53,
+      -1.28,
+      9.57,
+      3.5,
+      -1.0,
+      -0.12
+    ],
+    "parameter_grid": {
+      "combinations": 54,
+      "positive_full_window": 54,
+      "positive_last_two_years": 1,
+      "note": "regime, not tuning - every parameterisation agrees"
+    },
+    "as_a_filter_on_gtf": {
+      "after_a_sweep_avg_pct": 2.63,
+      "no_sweep_avg_pct": 2.62,
+      "note": "no incremental information"
+    },
+    "refinement_test": {
+      "note": "thresholds from pre-2024 only, last two years read once",
+      "all_setups": {
+        "train_avg_pct": 3.71,
+        "held_out_avg_pct": -1.33
+      },
+      "all_four_filters": {
+        "train_avg_pct": 11.45,
+        "train_pf": 3.81,
+        "held_out_avg_pct": -2.26,
+        "held_out_pf": 0.61
+      },
+      "reading": "the more it is filtered the better the training number and the worse the held-out number, which is the signature of fitting noise"
+    },
+    "caveat": "this tests one reading of the rules; a transcript may define the swing, reclaim, volume or entry differently, and a weekly-swing sweep would be a materially different test"
+  },
+  "sector_support": {
+    "status": "cannot be tested",
+    "reason": "no symbol-to-sector mapping exists in the candle store; the prior audit recorded the same under not_assessed",
+    "recommendation": "adding a sector table is small work and unblocks sector-relative strength and sector-breadth filters - the most useful unblocked item"
   }
 }
