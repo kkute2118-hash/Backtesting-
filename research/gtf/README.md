@@ -80,3 +80,21 @@ results (see FINDINGS_V4.md §2).
     python analysis_liq6.py   # that rule used as a filter, split by period
 
 Result: a small real edge standalone, harmful as a filter. Not deployed.
+
+## Round five — one ranked queue, two trades a week
+
+The allocation problem, which round four showed matters more than which
+strategy generates a signal. Every source is pooled onto identical terms and
+ranked; the marking system is in MARKING.md.
+
+    python build_pool.py --db $DB --out /tmp/gtf/pool.parquet   # 289,924 candidates
+    python analysis_rank.py    # walk-forward expected-R model, decile behaviour
+    python analysis_rank2.py   # why it looked inverted; simple rankers
+    python analysis_rank3.py   # the turnover floor, then re-measure
+    python analysis_rank4.py   # 3 a week, every rule, against random and the index
+    python analysis_rank5.py   # gating, budget sweep, win-probability target
+    python analysis_rank6.py   # the surviving rule, paired against random
+    python weekly.py 2026-08-07                                 # the shortlist
+
+`rank.py` holds the walk-forward scaffolding, `portfolio.py` the one
+simulator everything uses, `weekly.py` the production marking system.
