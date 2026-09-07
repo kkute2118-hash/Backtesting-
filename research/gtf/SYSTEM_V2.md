@@ -119,3 +119,64 @@ Listed so you know these were tested, not overlooked.
   thin sample for any claim about the future.
 * **No sector data**, so sector concentration is unmanaged. You could end up
   with 4 positions in the same sector and not know it.
+
+---
+
+## Appendix: what the mark is made of
+
+**How one is computed.** Every candidate's features go into a gradient-boosted
+classifier trained on whether past candidates ended green. The raw output is a
+probability; the mark is that probability's percentile against the training
+distribution. A mark of 99 means "in the best 1% of what this model has seen",
+not "99% likely to win".
+
+**What the model actually looks at** — permutation importance on 2026Q1, a
+quarter it never trained on:
+
+| feature | importance |
+| --- | --- |
+| 20-day realised volatility | 0.0300 |
+| % above the 52-week low | 0.0201 |
+| turnover | 0.0174 |
+| 50 EMA vs 200 EMA | 0.0115 |
+| 5-day return | 0.0094 |
+| 50-day slope | 0.0087 |
+
+The source that generated the signal (`src_score`, `is_S1` …) barely registers.
+The model is reading the stock's condition, not which strategy flagged it.
+
+**A high-marked candidate is calm, unextended and not a momentum leader** —
+median values, mark ≥ 99 vs mark ≤ 50:
+
+| | mark ≥ 99 | mark ≤ 50 |
+| --- | --- | --- |
+| 20-day volatility | 25.0 | 31.5 |
+| 6-month return | +3.0% | +23.2% |
+| distance above 200 EMA | 1.64 ATR | 3.35 ATR |
+| weekly trend slope | +0.7% | +5.7% |
+
+That is consistent with everything else found here: the edge is in quiet
+laggards near their moving averages, not in strong trending names.
+
+**Calibration, out of sample.** The mark is monotone up to about 95 and then
+flattens and dips:
+
+| mark band | full-window win% | last-2-year win% |
+| --- | --- | --- |
+| 0-50 | 25.7 | 20.9 |
+| 50-75 | 29.7 | 24.4 |
+| 75-90 | 30.7 | 25.4 |
+| 90-95 | 30.8 | 25.7 |
+| 95-99 | 30.5 | 27.1 |
+| **99-100** | **26.7** | **22.5** |
+
+The weekly picks sit at a median mark of 99.4, so this looked like a real
+problem. It was tested: capping the mark and taking the best candidate *below*
+a ceiling made results worse at every ceiling (99: +87.1%, 99.5: +82.4%,
+95: +60.1%, against +88.8% uncapped; and −7.8% to +1.5% CAGR against +5.5%
+over the last two years). Taking the week's best remains correct.
+
+The reconciliation is that the band table ranks candidates against the whole
+quarter while selection ranks them against the same week. A 99 on a week when
+nothing good fired is not the same trade as a 99 in a strong week. **Read the
+mark as a within-week ranking, not as an absolute quality score.**
