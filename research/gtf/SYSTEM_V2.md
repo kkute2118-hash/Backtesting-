@@ -1,0 +1,121 @@
+# The system
+
+One strategy, built only from rules that survived a test that could have
+killed them. Everything that sounded good and failed is listed at the end, so
+you can see what was thrown away and why.
+
+**Run it:** `python system.py [YYYY-MM-DD] [capital]`
+
+---
+
+## The rules
+
+| # | Rule | Evidence |
+| --- | --- | --- |
+| 1 | **Universe**: Nifty 500, 20-day average turnover ≥ Rs 25 Cr | **Strong.** Without the floor, "least liquid" is the best-ranking feature in every period (+1.60 R vs +0.35 pool average). That money is not collectable. |
+| 2 | **Candidates**: any signal from S1-S4, a GTF demand-zone arrival, or a liquidity grab/sweep | **Strong.** GTF arrivals beat a matched placebo by +0.13 R. The others contribute candidates the ranking sorts. |
+| 3 | **Mark** each candidate with P(win) from a model refit every quarter on trades that had already finished | **Strong.** Top fifth beats bottom fifth by **+6.4 points of win rate, positive in 12 of 16 quarters** and **7 of the last 9**. The most consistent result in the project. |
+| 4 | **Take the top 2 marks per week**, one per symbol, on the day they fire | **Good.** Beat random selection from the same pool in 85% of 60 paired orderings over the last two years. 1 and 3 a week were both worse. |
+| 5 | **Entry** at the close of the signal day | **Structural.** No intraday data, so no other entry is honestly testable. |
+| 6 | **Stop** 2 ATR below entry, never widened | **Strong.** The video's tight distal stop stops out 91% of the time on narrow zones. At 2 ATR the GTF score stops being inverted and starts working. |
+| 7 | **Breakeven**: move the stop to entry once price reaches +15% | **Good.** 71% of trades that reach +5% give it all back, but 30% of them go on to +25%. +15% was the point where protecting stopped costing more than it saved. |
+| 8 | **Time exit** at 60 trading days | **Adequate.** Not optimised; it is the horizon everything was measured on. |
+| 9 | **Size** 1% of equity at risk per trade, no position above 25%, gross exposure never above equity | **Strong.** Fixed-fractional sizing is why R and not percent is what compounds. The no-leverage cap matters: without it a 3-a-week book silently runs 5x geared. |
+| 10 | **Breadth tilt**: 4 trades a week when breadth < 30%, 3 when < 40%, else 2 | **THIN — 2 to 3 episodes.** See the warning below. |
+
+## Results
+
+Rs 10,00,000, 1% risk, no leverage, costs of 0.23% per round trip inside every
+trade, median of 40 selection orderings.
+
+| system | period | ROI | CAGR | max DD | Sharpe | worst ordering |
+| --- | --- | --- | --- | --- | --- | --- |
+| **with breadth tilt** | full window | **+97.8%** | **19.5%** | **−11.8%** | **1.36** | +68% |
+| base, 2 a week | full window | +88.8% | 18.0% | −13.8% | 1.31 | +63% |
+| random, 2 a week | full window | +76.3% | 15.9% | −24.6% | 1.05 | +55% |
+| *equal-weight index* | full window | *+158.9%* | *27.5%* | *−21.4%* | | |
+| **with breadth tilt** | last 2 years | **+12.6%** | **6.5%** | **−16.8%** | **0.47** | +1% |
+| base, 2 a week | last 2 years | +10.7% | 5.5% | −19.9% | 0.34 | 0% |
+| random, 2 a week | last 2 years | +0.3% | 0.2% | −24.6% | −0.01 | −8% |
+| *equal-weight index* | last 2 years | *+7.9%* | *3.9%* | *−21.4%* | | |
+
+Year by year, base system: **+6.4%, +29.5%, +19.6%, +7.9%, +15.3%.** No losing
+year, but note 2022 is a partial year and 2026 is not finished.
+
+**The index made more money over the full window and the system did not beat
+it.** 27.5% CAGR against 19.5%. What the system did do is make its return with
+roughly half the drawdown (−11.8% against −21.4%) and beat the index over the
+last two years, when the index stalled. If you want maximum return and can sit
+through a 21% drawdown, an index fund is the honest answer. If you want a
+smaller drawdown and something that works when the index does not, this is
+worth running.
+
+## What to expect
+
+* **Win rate about 33%.** Two out of three trades lose. At that rate **six
+  consecutive losses has a 9% chance of happening in any given stretch** — it
+  is an ordinary event, not a broken system.
+* **Roughly 2 trades a week, 100-120 taken a year.** Not every signal gets a
+  slot; capital and the one-per-symbol rule turn ~400 signals into ~185 trades.
+* **The median trade loses money.** The average is positive because winners run
+  to the 60-day limit while losers are cut at 2 ATR. If you cut winners early
+  to "lock in gains", you will remove the entire edge.
+* **Expect a 15-20% drawdown.** The backtest had one. A live one will feel worse.
+
+## The warning on rule 10
+
+The breadth tilt is the only rule here that is not properly evidenced. It is
+built on **two scored episodes** at breadth under 30% (Feb-May 2025, Mar-Apr
+2026) and three at index-below-200. Every one was positive — and every one was
+a drawdown that bounced within 60 days. **This five-year sample contains no
+sustained bear market.** In a 2008 or a 2000, a rule that says "trade more when
+breadth collapses" is exactly the wrong rule and will do real damage.
+
+Keep it only if you accept that. `python system.py --no-tilt` equivalent: set
+`TILT=False`. It costs about 1.5 points of CAGR.
+
+## Monitoring, and when to stop
+
+Run this every quarter. It is not optional — every other ranking in this
+project inverted eventually, and this one will too.
+
+1. Split the last quarter's candidates into fifths by mark.
+2. Compute the win rate of the top fifth minus the bottom fifth.
+3. **Two consecutive negative quarters: stop trading it.** Not "wait for it to
+   come back". The historical gap is +6.4 points and it was negative in 4 of 16
+   quarters, so one bad quarter is noise and two is a signal.
+4. Refit the model quarterly. It is trained only on trades that had already
+   resolved, so a fresh refit never sees its own future.
+
+Also track your live win rate against 33% and your live average R against
++0.37. If either sits well below for 30+ trades, something has changed that
+the backtest does not cover.
+
+## What was thrown away
+
+Listed so you know these were tested, not overlooked.
+
+| Rejected | Why |
+| --- | --- |
+| Liquidity sweeps (my reading) | +2.36% full window, −1.33% last 2 years; 1 of 54 parameterisations positive recently |
+| Liquidity grabs/sweeps/runs (the course's own rules) | The run returns +4.55% while random entries in the same stock-month return +9.86%. Harmful as a filter on every strategy. |
+| The course's target rule | Nearest opposing pool, −0.40%, worse than no target (+0.11%) |
+| S1-S4 score gates | Post look-ahead fix the score is flat: S1 at score ≥ 85 wins 28.1% vs 28.3% ungated |
+| Expected-return model | Ranks well until 2023, then −0.554 R in the last two years |
+| Trend filters (strongest weekly, calmest, most sources agreeing) | All invert after 2023 |
+| Contrarian filters at 2-3 a week | Best in the extreme top 2%, worse than random once diluted to a weekly budget |
+| Regime filter toward strong markets | Monotonically harmful: −0.148 → −0.219 → −0.250 → −0.315 R as the filter tightens |
+| Taking 3 a week | Worse than 2 in both periods |
+
+## Honest limits
+
+* **Survivorship bias.** Today's Nifty 500 list is applied to the whole
+  history. Delisted and demoted names are missing. This flatters everything
+  here and I cannot size it without a point-in-time constituent list.
+* **No corporate action adjustment** was verified in the source data.
+* **Stop fills** assume the stop price. 6.8% of stop-outs gapped through it, and
+  those averaged −9.74% against −7.00% modelled.
+* **Three and a half years, one bull market and two corrections.** That is a
+  thin sample for any claim about the future.
+* **No sector data**, so sector concentration is unmanaged. You could end up
+  with 4 positions in the same sector and not know it.
