@@ -180,3 +180,64 @@ The reconciliation is that the band table ranks candidates against the whole
 quarter while selection ranks them against the same week. A 99 on a week when
 nothing good fired is not the same trade as a 99 in a strong week. **Read the
 mark as a within-week ranking, not as an absolute quality score.**
+
+---
+
+## Appendix: the review list, and how much your judgement has to add
+
+You want the smallest possible list of names to look at. Two results decide
+how small, and both point the same way.
+
+**Hard screens do not work.** Ten sensible-looking filters were tested on top
+of the turnover floor — not extended above the 200 EMA, calm volatility, not a
+six-month leader, off the 52-week high, RSI above 35, a sane stop width, more
+liquid. **Not one raised average R in both periods.** Each helped one and hurt
+the other. Applied together they kept 39% of the pool and made it worse than
+no screen at all (+0.212 R against +0.258 full window). The reason is visible
+in the permutation test: volatility and distance from the 200 EMA are already
+the model's two strongest inputs. Screening on them again is overriding the
+model with information it has already used.
+
+**A longer list is a worse list.** The "floor" below is what you get if you
+review the shortlist and your choice is no better than a coin toss:
+
+| shortlist / week | names a year | list win% (last 2y) | floor ROI, full | floor ROI, last 2y |
+| --- | --- | --- | --- | --- |
+| **2** | 105 | 25.5 | **+88.8%** | **+10.7%** |
+| 3 | 157 | 26.3 | +45.8% | +2.8% |
+| 5 | 262 | 26.4 | +68.0% | +0.5% |
+| 8 | 420 | 26.4 | +74.6% | −0.1% |
+| 12 | 630 | 27.8 | +77.5% | +0.6% |
+
+The edge is concentrated at the very top. Handing yourself five names to
+choose two from costs about ten points of annual return unless your chart
+reading is genuinely better than chance.
+
+**What a veto costs.** You cannot backtest chart judgement, but you can price
+the substitution — every name skipped is replaced by a worse-ranked one:
+
+| choice | ROI full window | ROI last 2 years |
+| --- | --- | --- |
+| take ranks 1-2 | +88.8% | **+10.7%** |
+| veto rank 1, take 2-3 | +49.3% | −1.7% |
+| veto ranks 1-2, take 3-4 | +30.5% | −0.2% |
+| veto ranks 1-4, take 5-6 | +89.8% | −17.9% |
+
+One veto costs roughly twelve points of annual return. (The full-window column
+is noisy — the +89.8% row is selection-order noise, not a finding. The last-two-year
+column is the one to read.)
+
+### So: `python review.py`
+
+Three names a week. Take the top 2. The third is a reserve for when one is
+disqualified.
+
+**Use your eyes for the model's blind spots, not to re-rank.** It reads price
+and volume only. It cannot see an earnings date, a merger, a split the data
+never adjusted for, a regulatory action, or a broken price series. Those are
+real reasons to skip.
+
+It already knows the chart is choppy, the stock is extended, volatility is
+high, or the trend is weak. Vetoing on those is the twelve-point habit.
+
+**Skip a name only if you can name the fact, and the fact is not on the chart.**
