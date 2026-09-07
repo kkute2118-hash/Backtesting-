@@ -1,0 +1,264 @@
+{
+  "$comment": [
+    "S5 - Confluence Pullback (Champion Reconstruction).",
+    "",
+    "PROPOSAL, NOT A DROP-IN CONFIGURATION, and unlike the strategies in",
+    "strategy_config.proposed.json this one has a complete, look-ahead-tested",
+    "record. That record is negative: -0.318 R per trade across 3,383 signals",
+    "(t = -13.18) over 2024-09-05 to 2026-09-04, negative in every calendar",
+    "year, every market regime, all 48 parameter settings swept and all 7 exit",
+    "readings tested.",
+    "",
+    "'enabled' is therefore false. The specification is kept in full so the",
+    "result is reproducible and so the strategy can be re-tested unchanged when",
+    "intraday data exists - which is the one condition under which it might",
+    "behave differently, because the source strategy is intraday-timed and this",
+    "test is not.",
+    "",
+    "Rule IDs refer to research/PULLBACK_STRATEGY_RULEBOOK.md.",
+    "Method and evidence: research/PULLBACK_BACKTEST_REPORT.md,",
+    "research/PULLBACK_ROBUSTNESS_ABLATION.md, research/PULLBACK_SCANNER_SPEC.md."
+  ],
+
+  "strategy_name": "S5",
+  "display_name": "Confluence Pullback (Champion Reconstruction)",
+  "enabled": false,
+  "reason_disabled": "negative_expectancy_verified",
+  "direction": "long",
+  "source": {
+    "type": "video_transcript",
+    "title": "969% Return in 1 Year: The Winning Pullback Strategy of a Trading Champion",
+    "speaker": "Martin Luk (US Investing Championship 2025)",
+    "market_traded_by_speaker": "US equities, intraday-timed swing trades",
+    "transcript_duration_minutes": 249,
+    "language": "English"
+  },
+
+  "study": {
+    "generated_at": "2026-09-07",
+    "universe": "500 NSE symbols from the repository candle store; 485 with >=260 bars",
+    "window": { "start": "2024-09-05", "end": "2026-09-04", "sessions": 494 },
+    "out_of_sample_window": { "start": "2021-10-01", "end": "2024-09-04" },
+    "cost_model_pct_round_trip": 0.23,
+    "slippage_pct_per_side": 0.05,
+    "starting_capital": 1000000,
+    "benchmark": {
+      "equal_weight_proxy_index_return_pct": 6.9,
+      "equal_weight_proxy_index_max_dd_pct": -21.36,
+      "median_stock_return_pct": -3.81
+    },
+    "known_biases": [
+      "survivorship: today's index membership applied to the whole history",
+      "no corporate-action adjustment table in the candle store",
+      "impact cost not modelled beyond flat slippage"
+    ]
+  },
+
+  "headline": {
+    "run_A_literal_stop_rule": {
+      "note": "stop <= min(5%, 0.5 x ADR20) - rule R-4 applied literally",
+      "trades": 145,
+      "total_return_pct": -22.4,
+      "max_drawdown_pct": -24.87,
+      "win_rate_pct": 18.62,
+      "profit_factor": 0.561,
+      "expectancy_r": -0.427,
+      "t_statistic": -3.0
+    },
+    "run_B_ceiling_only": {
+      "note": "stop <= 5% only; the ADR half-range cap rejects 95.9% of triggers on daily bars",
+      "trades": 489,
+      "total_return_pct": -52.17,
+      "max_drawdown_pct": -52.18,
+      "win_rate_pct": 21.27,
+      "profit_factor": 0.467,
+      "expectancy_r": -0.359,
+      "t_statistic": -6.12
+    },
+    "signal_level_run_B": {
+      "signals": 6329,
+      "traded": 3383,
+      "avg_r": -0.318,
+      "win_rate_pct": 22.35,
+      "profit_factor": 0.55,
+      "t_statistic": -13.18
+    },
+    "out_of_sample_signal_level": {
+      "traded": 5896,
+      "avg_r": -0.016,
+      "t_statistic": -0.6,
+      "portfolio_return_pct": -38.7,
+      "reading": "flat signal, still loses as a portfolio once costs and the trailing exit are applied"
+    }
+  },
+
+  "blocking_defects": [
+    {
+      "id": "intraday_translation_loss",
+      "severity": "invalidating_for_transfer",
+      "detail": "The entry trigger (C-1..C-5), the stop (R-1..R-3) and the no-chase rule (N-1) are all intraday in the source. On daily bars the stop must risk a whole day's range, so the R-multiple denominator is roughly double the speaker's, and the observed average win is 1.67 R where his geometry implies 10-30 R.",
+      "fix": "acquire 5-minute bars and re-run unchanged",
+      "confidence": "high"
+    },
+    {
+      "id": "stop_rules_contradict_on_daily_bars",
+      "severity": "invalidating",
+      "detail": "R-1 (stop at the low of day) and R-4 (stop <= 50% of ADR) are compatible intraday and contradictory on daily bars: median required stop 3.40% against a median cap of 1.73%, rejecting 4,123 of 4,301 triggered signals. The survivors are the narrowest setup bars and 49% of them stop out on the entry bar.",
+      "fix": "no daily-bar fix exists; both readings are reported instead",
+      "confidence": "high"
+    },
+    {
+      "id": "survivorship_bias",
+      "severity": "optimistic",
+      "detail": "Universe is today's membership applied backwards; demoted names absent. Inherited from the candle store, same defect the earlier audit recorded.",
+      "fix": "store membership with effective dates from today forward",
+      "confidence": "high"
+    },
+    {
+      "id": "no_sector_data",
+      "severity": "incomplete",
+      "detail": "Rule U-2 (trade names inside a hot theme) is untestable and unimplemented. It is one of the speaker's primary selection criteria.",
+      "fix": "add an industry mapping table",
+      "confidence": "high"
+    }
+  ],
+
+  "market_filters": [
+    { "id": "M1", "rule": "index_close > index_ema50", "source_rule": "M-1", "status": "proxy", "ablation_delta_avg_r": -0.013 },
+    { "id": "M2", "rule": "index_ema21[t] > index_ema21[t-5]", "source_rule": "M-2", "status": "proxy", "ablation_delta_avg_r": 0.009 },
+    { "id": "M3", "rule": "breadth50 >= 0.40", "source_rule": "M-3", "status": "proxy_threshold_invented", "ablation_delta_avg_r": -0.001 }
+  ],
+
+  "stock_filters": [
+    { "id": "U1", "rule": "median(close*volume, 20) >= 5.0e7", "source_rule": "U-5", "status": "threshold_invented", "ablation_delta_avg_r": 0.0 },
+    { "id": "U2", "rule": "adr20 >= 2.0", "source_rule": "U-1", "status": "threshold_invented", "ablation_delta_avg_r": -0.014 },
+    { "id": "T1", "rule": "ema9 > ema21 > ema50 AND ema21[t] > ema21[t-5]", "source_rule": "T-2,T-3", "status": "objective", "ablation_delta_avg_r": 0.006 },
+    { "id": "T2", "rule": "close > ema150", "source_rule": "T-4", "status": "objective", "ablation_delta_avg_r": 0.0, "note": "inert - changes 1 signal in 3,383" },
+    { "id": "T3", "rule": "w_ema9 > w_ema21 AND w_close > w_ema9 (completed weeks only)", "source_rule": "T-7,T-8", "status": "objective", "ablation_delta_avg_r": -0.008 },
+    { "id": "U3", "rule": "rs_rank_63d >= 70", "source_rule": "U-3", "status": "lookback_and_threshold_invented", "ablation_delta_avg_r": 0.013, "note": "removal improves the result" },
+    { "id": "P4", "rule": "bars_since_high20 <= 15", "source_rule": "P-4", "status": "threshold_invented", "ablation_delta_avg_r": 0.01 },
+    { "id": "T5", "rule": "swing_low > swing_low_prev (3-bar fractals, published 3 bars late)", "source_rule": "T-6", "status": "objective", "ablation_delta_avg_r": 0.026, "note": "most harmful single rule measured" }
+  ],
+
+  "setup_conditions": [
+    {
+      "id": "S1",
+      "rule": "low <= L*1.005 AND close >= L*0.995 for at least one level L",
+      "levels": ["ema9", "ema21", "ema50", "ema150", "avwap", "swing_high_below_close", "unfilled_gap_base"],
+      "source_rule": "P-2,P-3,P-7",
+      "status": "tolerance_invented",
+      "ablation_delta_avg_r": 0.02,
+      "note": "removing the pullback requirement entirely improves the result"
+    },
+    { "id": "S2", "rule": "(close - low) / (high - low) >= 0.50", "source_rule": "P-5", "status": "daily_proxy_for_an_intraday_rule", "ablation_delta_avg_r": -0.017, "note": "best-contributing setup rule" },
+    { "id": "S3", "rule": "low <= high20 - 1.0 * atr14", "source_rule": "P-8", "status": "threshold_invented", "ablation_delta_avg_r": -0.009 }
+  ],
+
+  "confluence": {
+    "definition": "count of the seven levels touched on the same bar",
+    "video_claim": "more levels lining up = higher probability (rule P-3, the central claim of the source)",
+    "measured": {
+      "1_level": { "signals": 1730, "excess_return_20d_pct": 0.444 },
+      "2_levels": { "signals": 1734, "excess_return_20d_pct": -0.456 },
+      "3_levels": { "signals": 691, "excess_return_20d_pct": -0.346 },
+      "4_levels": { "signals": 88, "excess_return_20d_pct": null }
+    },
+    "verdict": "inverted on this data",
+    "scoring_treatment": "displayed, never scored",
+    "confidence": "medium"
+  },
+
+  "entry": {
+    "trigger": "high[t]",
+    "valid_sessions": 1,
+    "fill": "max(open[t+1], trigger) * (1 + slippage)",
+    "reject_if": "(fill - stop)/fill > min(max_stop_pct, 0.5 * adr20)",
+    "source_rule": "C-1",
+    "status": "daily_proxy_for_an_intraday_rule"
+  },
+
+  "stop_loss": {
+    "formula": "low[t]",
+    "max_stop_pct": 5.0,
+    "adr_fraction_cap": 0.5,
+    "gap_handling": "fill at the open when the open is through the stop",
+    "intrabar_assumption": "adverse - the stop is assumed hit before any target",
+    "source_rule": "R-1,R-4",
+    "sensitivity": { "2.5": -0.465, "3.0": -0.425, "4.0": -0.351, "5.0": -0.318, "8.0": -0.278 },
+    "note": "tightening the ceiling makes results worse, inverting the source's central argument"
+  },
+
+  "target": {
+    "formula": null,
+    "source_rule": "X-1",
+    "note": "the video has no price target; none was invented"
+  },
+
+  "position_sizing": {
+    "risk_pct_of_equity": 0.005,
+    "formula": "shares = floor(risk_pct * equity(t) / (fill - stop))",
+    "max_position_pct": 0.30,
+    "max_gross_exposure": 1.0,
+    "max_positions": 8,
+    "max_new_per_day": 4,
+    "source_rule": "Z-1,Z-3,Z-4,Z-6,Z-7",
+    "note": "the speaker runs up to 280% gross; the base run uses none, since Indian cash equities settle differently"
+  },
+
+  "exits": [
+    { "id": "X1", "rule": "sell 15% of the position at +3R", "source_rule": "X-2,X-3", "ablation_delta_avg_r": -0.013 },
+    { "id": "X2", "rule": "sell 15% of the position at +5R", "source_rule": "X-2,X-3" },
+    { "id": "X3", "rule": "close the remainder on the first daily close below the 9 EMA", "source_rule": "X-5", "ablation_delta_avg_r": -0.04, "note": "the single most valuable rule measured, and still trivial against the deficit" },
+    { "id": "X4", "rule": "stop hit", "source_rule": "R-1" }
+  ],
+
+  "signal_score": {
+    "hard_requirements": ["all market_filters", "all stock_filters", "all setup_conditions", "entry"],
+    "confirmation_factors": [
+      { "factor": "close in the top third of the range", "points": 15 },
+      { "factor": "adr20 >= 4.0", "points": 15 },
+      { "factor": "weekly ema9 rising", "points": 10 }
+    ],
+    "ranking_factors": [
+      { "factor": "rs percentile 70->100 mapped to 0->25", "points": 25 },
+      { "factor": "turnover percentile within the passing set", "points": 20 },
+      { "factor": "range contraction vs the last 10 bars", "points": 15 }
+    ],
+    "excluded_from_score": ["confluence"],
+    "ui_caption": "Score orders candidates within this strategy. It is not a probability of profit. Measured expectancy on 2024-2026 Indian daily data: -0.32 R per trade."
+  },
+
+  "not_codable": {
+    "missing_intraday_data": ["C-2", "C-3", "C-4", "C-5", "P-5_true_form", "P-6", "N-1", "R-2", "R-3", "RE-2"],
+    "missing_reference_data": ["U-2 sector", "U-6 market cap", "M-1/M-5/M-6 real index series", "P-12 episodic pivots"],
+    "discretionary_by_nature": ["D-1 anchor fitting", "D-2", "D-3", "D-4", "D-5", "D-6", "D-7", "M-7", "N-8", "N-9", "X-4", "X-7", "Z-2"]
+  },
+
+  "required_data_before_retest": [
+    "5-minute intraday bars for the traded universe",
+    "a real index series (Nifty 500 / Nifty Midcap)",
+    "sector or industry mapping",
+    "point-in-time index membership with effective dates",
+    "market capitalisation"
+  ],
+
+  "recommendation": {
+    "deploy_live": false,
+    "paper_trade": false,
+    "reason": "a signal with t = -13.18 negative expectancy does not need a forward test to disambiguate it",
+    "reusable_findings": [
+      {
+        "finding": "ADR is the strongest single ranking variable found in the sweep",
+        "evidence": "avg R -0.178 at ADR>=4% against -0.318 at ADR>=2%, monotonic across the sweep",
+        "confidence": "medium",
+        "next_step": "test as a universe filter for the existing S1-S4"
+      },
+      {
+        "finding": "the equal-weighted proxy index and breadth series are point-in-time and reusable",
+        "evidence": "research/pullback/features.py :: build_market, passes the truncation test",
+        "confidence": "high",
+        "next_step": "fill the nifty_trend / market_breadth placeholders that core.py has carried as None since Phase 2b"
+      }
+    ]
+  }
+}
