@@ -199,3 +199,67 @@ Two rounds now — my reading and his — have failed to turn liquidity sweeps
 into anything tradeable on this data. I would stop here and spend the effort
 on the **short side**, which is still completely untested and remains the
 largest unexplored thing in this project.
+
+---
+
+## 7. The portfolio numbers you asked for
+
+Per-trade averages are not ROI. What a portfolio earns depends on how many
+signals arrive at once, how long each holds a slot, and whether the filtered
+signals are the ones that would have been taken anyway. `analysis_liq_roi.py`
+runs all five strategies through one simulator: Rs 10,00,000, 1 % risk per
+trade, 10 slots, one position per symbol, no leverage.
+
+**Last 2 years (2024-09-04 onward), median of 40 random selection orders:**
+
+| strategy | ROI | CAGR | ROI with liquidity entries | CAGR |
+| --- | --- | --- | --- | --- |
+| S1 | −6.8 % | −3.5 % | −6.0 % | −3.0 % |
+| S2 | **+18.6 %** | **+8.9 %** | −32.2 % | −17.7 % |
+| S3 | −4.6 % | −2.3 % | −2.8 % | −1.4 % |
+| S4 | −24.4 % | −13.0 % | +0.7 % | +0.3 % |
+| GTF 7/7 | +6.3 % | +3.1 % | +7.1 % | +3.5 % |
+| liquidity entries alone | | | −14.7 % | −7.6 % |
+| liquidity + weekly > 5 % | | | −19.0 % | −10.0 % |
+
+Equal-weight universe over the same span: **+7.9 % ROI, +3.9 % CAGR.**
+
+### Two corrections to my own simulator, made before reading any of this
+
+**The alphabet was doing the work.** The first run broke ties by symbol name
+and reported S1 going +8.2 % → +32.5 % with the filter. Under random ordering
+both are about −6 %. With 36,960 signals competing for 10 slots, 187 get
+taken, and *which* 187 was being decided alphabetically. Every number above
+is now the median of 40 random orderings, with the full spread shown.
+
+**"No leverage" was not enforced.** Gross notional was never capped against
+equity, so a 50-slot run silently geared up about 12× and the slot sweep was
+measuring leverage rather than signal quality. Capped; results now saturate
+above 20 slots because capital binds rather than slots, which is correct.
+
+### Should you add these entry rules? No.
+
+Paired across the same 40 orderings, the filter changed ROI by:
+
+| strategy | median change | helped in |
+| --- | --- | --- |
+| S1 | −0.8 pp | 42 % of orderings |
+| S2 | **−52.0 pp** | 0 % |
+| S3 | +3.8 pp | 55 % |
+| S4 | +26.2 pp | 100 % |
+| GTF 7/7 | +0.9 pp | 57 % |
+
+S4 is the only consistent gain and it is not selection. Filtered S4 takes 51
+trades instead of 128 and uses **61 % less capital-time** (1,254 vs 3,238
+capital-days). It wins by sitting out a losing strategy in a losing period —
+the same result you would get by switching S4 off. Everything else is a coin
+flip or a catastrophe.
+
+### The bigger finding, which is not about liquidity
+
+Only S2 and GTF 7/7 beat a passive index over the last two years, and GTF beat
+it in just 42 % of orderings. S1, S3 and S4 all trail an index that itself
+returned 3.9 % CAGR. And the spread between the best and worst selection order
+is 40 to 60 percentage points — **which signals get your ten slots matters
+more than which strategy generated them.** That allocation problem is worth
+more attention than anything in this transcript.
