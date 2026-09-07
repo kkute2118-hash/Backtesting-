@@ -32,6 +32,26 @@ FEATS = ["src_score", "n_sources", "atr_pct", "rsi14", "relvol", "turnover_cr",
          "vol20d", "slope50", "body_pct", "up_wick_pct", "dn_wick_pct",
          "gap_pct", "w_slope", "m_slope"]
 
+# Volume, in forms that mean different things: today against normal, whether
+# volume is drying up into the pullback or being dumped, whether the 20-day
+# base of volume is rising, and how much of the last month traded on up days.
+VOL_FEATS = ["relvol50", "vol_dryup", "vol_trend", "up_vol_share",
+             "vol_per_move", "max_relvol_20"]
+
+# Where the INDEX is when the signal fires. Distance from its own 20/50 EMA is
+# expressed in index standard deviations as well as percent, so "near the EMA"
+# means the same thing in a calm market and a wild one.
+IDX_FEATS = ["idx_from_ema20", "idx_from_ema50", "idx_from_ema20_sd",
+             "idx_from_ema50_sd", "idx_above_ema20", "idx_above_ema50",
+             "idx_above_60d_low", "breadth_ma20", "idx_above_200",
+             "idx_slope_200", "vol20"]
+
+
+def attach_regime(d, path="/tmp/gtf/regime.parquet"):
+    r = pd.read_parquet(path)
+    keep = [c for c in IDX_FEATS if c in r.columns]
+    return d.join(r[keep], on="date")
+
 
 def prepare(path="/tmp/gtf/pool.parquet"):
     d = pd.read_parquet(path)
@@ -43,12 +63,21 @@ def prepare(path="/tmp/gtf/pool.parquet"):
     for s in sorted(d.source.unique()):
         d[f"is_{s}"] = (d.source == s).astype(float)
     d["week"] = d.date.dt.to_period("W")
+    d = attach_regime(d)
     return d.sort_values("date").reset_index(drop=True)
 
 
 def walkforward(d, target="R", feats=None, min_train=MIN_TRAIN, seed=0):
     """Add a `pred` column scored out of sample, quarter by quarter."""
-    feats = feats or (FEATS + [c for c in d.columns if c.startswith("is_")])
+    # VOL_FEATS are in; IDX_FEATS are deliberately OUT. Index position is
+    # shared by every candidate on a day, so a model given it ranks days as
+    # much as stocks: 86% of its score variance was between-day, against 22%
+    # with volume. It scored the best quarterly gap and the worst portfolio
+    # (-12.9% over the last two years against +23.2%), because separating
+    # good days from bad days is worthless to a rule that must trade every
+    # week anyway.
+    feats = feats or (FEATS + VOL_FEATS
+                      + [c for c in d.columns if c.startswith("is_")])
     d = d.copy()
     d["q"] = d.date.dt.to_period("Q")
     d["pred"] = np.nan

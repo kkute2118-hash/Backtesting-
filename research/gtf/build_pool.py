@@ -65,6 +65,30 @@ def features(df):
             "dn_wick_pct": 100 * (np.minimum(O, C) - L) / np.where(H - L > 0, H - L, np.nan),
             "gap_pct": 100 * (O / np.roll(C, 1) - 1),
         }
+        # --- volume, in the forms that actually mean different things ---
+        v50 = pd.Series(V).rolling(50, min_periods=50).mean().to_numpy()
+        v5 = pd.Series(V).rolling(5, min_periods=5).mean().to_numpy()
+        up = np.where(C >= np.roll(C, 1), V, 0.0); up[0] = 0
+        dn = np.where(C < np.roll(C, 1), V, 0.0); dn[0] = 0
+        up20 = pd.Series(up).rolling(20, min_periods=20).sum().to_numpy()
+        dn20 = pd.Series(dn).rolling(20, min_periods=20).sum().to_numpy()
+        f.update({
+            # today against its own recent normal
+            "relvol50": V / v50,
+            # is volume drying up into this pullback, or is it being dumped?
+            "vol_dryup": v5 / v20,
+            # is the 20-day base of volume rising or falling
+            "vol_trend": v20 / v50,
+            # accumulation: how much of the last month's volume came on up days
+            "up_vol_share": 100 * up20 / np.where(up20 + dn20 > 0, up20 + dn20, np.nan),
+            # today's move per unit of volume - effort against result
+            "vol_per_move": np.where(np.abs(C / np.roll(C, 1) - 1) > 0,
+                                     (V / v20) / (100 * np.abs(C / np.roll(C, 1) - 1)),
+                                     np.nan),
+            # the biggest volume day of the last 20, and how long ago
+            "max_relvol_20": pd.Series(V / v20).rolling(20, min_periods=20).max().to_numpy(),
+        })
+        f["vol_per_move"][0] = np.nan
     f["gap_pct"][0] = np.nan
     for freq, tag in (("W", "w"), ("M", "m")):
         b, _, last = G.aggregate(df, freq)

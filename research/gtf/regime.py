@@ -44,7 +44,23 @@ def build(db, min_names=100):
     # compare against the past only, never a full-sample median
     vol_med = vol20.expanding(min_periods=250).median()
 
+    ema20 = idx.ewm(span=20, adjust=False).mean()
+    ema50 = idx.ewm(span=50, adjust=False).mean()
+    # distance of the index from its own 20/50 EMA, in percent and in units of
+    # the index's own daily volatility, so "near" means the same thing in a
+    # calm market and a wild one
+    isd = idx.pct_change().rolling(20).std() * 100
+    swing_low = idx.rolling(60, min_periods=60).min()
+
     r = pd.DataFrame({
+        "idx_from_ema20": 100 * (idx / ema20 - 1),
+        "idx_from_ema50": 100 * (idx / ema50 - 1),
+        "idx_from_ema20_sd": (100 * (idx / ema20 - 1)) / isd,
+        "idx_from_ema50_sd": (100 * (idx / ema50 - 1)) / isd,
+        "idx_above_ema20": (idx > ema20).astype(float),
+        "idx_above_ema50": (idx > ema50).astype(float),
+        # how far above the last 60-day low the index is - "at support" means small
+        "idx_above_60d_low": 100 * (idx / swing_low - 1),
         "idx": idx,
         "idx_above_200": (idx > sma200).astype(float),
         "idx_above_50": (idx > sma50).astype(float),

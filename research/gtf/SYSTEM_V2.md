@@ -14,7 +14,7 @@ you can see what was thrown away and why.
 | --- | --- | --- |
 | 1 | **Universe**: Nifty 500, 20-day average turnover ≥ Rs 25 Cr | **Strong.** Without the floor, "least liquid" is the best-ranking feature in every period (+1.60 R vs +0.35 pool average). That money is not collectable. |
 | 2 | **Candidates**: any signal from S1-S4, a GTF demand-zone arrival, or a liquidity grab/sweep | **Strong.** GTF arrivals beat a matched placebo by +0.13 R. The others contribute candidates the ranking sorts. |
-| 3 | **Mark** each candidate with P(win) from a model refit every quarter on trades that had already finished | **Strong.** Top fifth beats bottom fifth by **+6.4 points of win rate, positive in 12 of 16 quarters** and **7 of the last 9**. The most consistent result in the project. |
+| 3 | **Mark** each candidate with P(win) from a model refit every quarter on trades that had already finished, **including six volume features** | **Strong.** Top fifth beats bottom fifth by **+7.2 points of win rate, positive in 15 of 16 quarters and 9 of the last 9**. Adding volume took the last two years from +10.7% to **+23.2%** and halved the drawdown. |
 | 4 | **Take the top 2 marks per week**, one per symbol, on the day they fire | **Good.** Beat random selection from the same pool in 85% of 60 paired orderings over the last two years. 1 and 3 a week were both worse. |
 | 5 | **Entry** at the close of the signal day | **Structural.** No intraday data, so no other entry is honestly testable. |
 | 6 | **Stop** 2 ATR below entry, never widened | **Strong.** The video's tight distal stop stops out 91% of the time on narrow zones. At 2 ATR the GTF score stops being inverted and starts working. |
@@ -241,3 +241,81 @@ It already knows the chart is choppy, the stock is extended, volatility is
 high, or the trend is weak. Vetoing on those is the twelve-point habit.
 
 **Skip a name only if you can name the fact, and the fact is not on the chart.**
+
+---
+
+## Appendix: volume in, index timing out
+
+Two ideas were tested together: score on volume, and only signal when the
+index is near its 20/50 EMA or at support. One worked and one failed for an
+instructive reason.
+
+### Volume works — adopted
+
+Six features, each measuring something genuinely different: today's volume
+against its own 50-day normal, whether volume is drying up into the pullback
+or being dumped, whether the 20-day base of volume is rising, how much of the
+last month traded on up days, effort against result, and the largest recent
+spike.
+
+The pattern is the same in both periods: **moderate volume expansion is good,
+extreme volume is bad.**
+
+| relative volume vs 50-day | full window | last 2 years |
+| --- | --- | --- |
+| under 0.7× | +0.204 R | −0.181 R |
+| 1.0-1.5× | +0.328 R | −0.084 R |
+| 1.5-2.5× | **+0.353 R** | −0.112 R |
+| over 2.5× | +0.101 R | **−0.272 R** |
+
+Effect on the system, 2 a week:
+
+| | mean quarterly gap | positive quarters | last 2y ROI | last 2y maxDD | win% |
+| --- | --- | --- | --- | --- | --- |
+| without volume | +6.4 pts | 12/16, 7 of last 9 | +10.7% | −19.9% | 25.5 |
+| **with volume** | **+7.2 pts** | **15/16, 9 of last 9** | **+23.2%** | **−11.8%** | **32.5** |
+
+Over the last two years it more than doubles the return, halves the drawdown,
+and every one of 40 selection orderings was positive (worst +14%). Full-window
+ROI is lower (+67.2% against +88.8%), so this is not free — but 9 of 9 recent
+quarters and a halved drawdown outweigh a better number in the period that has
+already been mined.
+
+### Index timing fails — rejected
+
+The idea was to only signal when the Nifty sits near its 20/50 EMA or at
+support. The data says the opposite, consistently in both periods:
+
+| index % above its 60-day low | full window | last 2 years |
+| --- | --- | --- |
+| 0-2% (**at support**) | −0.021 R | **−0.255 R** |
+| 2-5% | −0.060 R | −0.141 R |
+| 5-10% | −0.003 R | −0.434 R |
+| 10-15% | **+0.639 R** | **+0.150 R** |
+| over 15% | +0.403 R | +0.103 R |
+
+Signals fired when the index is *near* its recent low are the worst; signals
+fired when the index has already rallied 10%+ off it are the best. Buying
+these setups while the index is at support is buying a falling market.
+
+**And giving the model index features actively damaged it.** The quarterly gap
+looked spectacular — +14.1 points over the last two years against +5.8 — while
+the portfolio returned **−12.9%** against +10.7%, with a −26.4% drawdown.
+
+The diagnostic explains it. Index position is shared by every candidate on a
+given day, so a model given it ranks *days* as much as *stocks*:
+
+| feature set | share of score variance that is between-day |
+| --- | --- |
+| original | 24.8% |
+| + volume | **21.5%** |
+| + index position | **86.3%** |
+
+At 86% between-day the model is timing the market, not choosing stocks. Its
+quarterly gap is large because within a quarter it separates good days from
+bad ones — which is worthless to a rule that must trade two names every week
+regardless. Volume is genuinely stock-level (21.5%, lower than the original),
+which is why it helps.
+
+This is the fourth time in this project that a market-timing rule has looked
+excellent and failed in the portfolio. Index features stay out.

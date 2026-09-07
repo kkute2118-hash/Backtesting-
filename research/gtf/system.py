@@ -60,7 +60,8 @@ def fit_mark(pool, asof):
     train = pool[pool.date < asof - pd.Timedelta(days=RESOLVE_DAYS)]
     if len(train) < RK.MIN_TRAIN:
         raise ValueError(f"only {len(train)} resolved candidates before {asof.date()}")
-    feats = [f for f in RK.FEATS + [c for c in pool.columns if c.startswith("is_")]
+    feats = [f for f in RK.FEATS + RK.VOL_FEATS
+             + [c for c in pool.columns if c.startswith("is_")]
              if f in train.columns and train[f].notna().sum() > 100
              and train[f].nunique() > 1]
     m = HistGradientBoostingClassifier(
