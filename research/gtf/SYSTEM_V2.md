@@ -319,3 +319,34 @@ which is why it helps.
 
 This is the fourth time in this project that a market-timing rule has looked
 excellent and failed in the portfolio. Index features stay out.
+
+### Index timing as a gate — also rejected
+
+The feature test above put index position *inside* the model. A fair question
+is whether it works as a plain gate instead: only trade when the index is in a
+good place. Tested on the shipped system, 2 a week:
+
+| gate | full-window ROI | last-2y ROI | last-2y trades | max DD |
+| --- | --- | --- | --- | --- |
+| **no gate (the system)** | **+67.2%** | **+23.2%** | 108 | −11.8% |
+| index > 5% above its 60d low | −1.7% | **−20.7%** | 89 | −29.2% |
+| index > 10% above its 60d low | +45.8% | +10.2% | 35 | −4.3% |
+| index > 15% above its 60d low | +57.6% | +22.1% | **16** | −1.7% |
+| index above its 20 EMA | +32.2% | −1.4% | 81 | −22.6% |
+| index above its 50 EMA | +38.2% | −2.9% | 88 | −20.0% |
+| index within 1 SD of its 20 EMA | +10.4% | −16.4% | 77 | −24.9% |
+
+**No gate wins.** And look at the shape of the 60-day-low family: 5% is a
+disaster (−20.7%), 10% is mediocre (+10.2%), 15% looks excellent (+22.1%).
+A real effect strengthens smoothly as the gate tightens. This jumps around,
+which is the signature of noise — and the best-looking cell rests on **16
+trades in two years**, about eight a year. That is not a system, it is a
+sample too small to distinguish from luck.
+
+The one thing that is consistently true: every tight gate lowers drawdown,
+because it keeps you out of the market. That is not skill, and **if drawdown
+is the worry, position size is the honest lever, not market timing.** Halving
+the risk per trade halves the drawdown without needing to predict anything.
+
+Index timing has now failed in three separate forms — as model features, as a
+strength gate, and as a distance-from-the-low gate. It stays out.
