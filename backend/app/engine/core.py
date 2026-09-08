@@ -381,21 +381,42 @@ def db_row_count(path=None):
         return -1
 
 
-def restore_db_from_github():
-    """Call once at app startup, before any _db() call. If the local DB file
-    is missing or holds no rows, pulls the last backup from GitHub so learning
-    data survives a container reboot. Never raises - a failed restore just
-    means the app starts fresh, same as today's behavior without this patch."""
+def restore_db_from_github(force=False):
+    """Pull the last backup from GitHub into the local database.
+
+    Called once at startup, before any _db() call, so learning data survives a
+    container reboot. By default it declines when the local store already holds
+    rows — a boot must never clobber live data.
+
+    `force=True` is for an explicit, user-initiated restore, and it is the whole
+    reason this parameter exists. On a host whose database file outlives its
+    deploys, the store can be BEHIND the backup: the scheduled job syncs the
+    market and pushes a fresh backup, while the app keeps serving a snapshot it
+    took days ago and reports "nothing to restore" forever. Without a way to
+    overwrite, that app can never catch up. The displaced file is kept beside
+    the database rather than deleted, so a forced restore is always reversible.
+    """
     global _GITHUB_LAST_ERROR
     if not _github_configured():
         return False
-    # Restore whenever the local file carries no actual rows, not merely when it
-    # is absent or zero bytes. An empty-but-schema-full database - which is what
-    # a stray committed market_data.sqlite3, an interrupted first run, or a
-    # corrupt file all look like - used to be mistaken for live data and
-    # silently suppressed the restore on every single reboot.
     if os.path.exists(DATA_DB) and db_row_count(DATA_DB) > 0:
-        return False  # local file already holds data this container session
+        # Restore whenever the local file carries no actual rows, not merely when
+        # it is absent or zero bytes. An empty-but-schema-full database - which is
+        # what a stray committed market_data.sqlite3, an interrupted first run, or
+        # a corrupt file all look like - used to be mistaken for live data and
+        # silently suppressed the restore on every single reboot.
+        if not force:
+            return False
+        try:
+            keep = f"{DATA_DB}.replaced-{datetime.now():%Y%m%d-%H%M%S}"
+            shutil.copy2(DATA_DB, keep)
+            log_msg = f"kept the replaced database at {keep}"
+        except Exception as exc:
+            # Better to refuse than to overwrite something we could not preserve.
+            _GITHUB_LAST_ERROR = (f"Refusing to force a restore: the current database could "
+                                  f"not be set aside first ({exc}).")
+            return False
+        _GITHUB_LAST_ERROR = ""
     try:
         repo = _github_setting("GITHUB_REPO")
         branch = _github_backup_branch()
