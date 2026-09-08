@@ -29,7 +29,7 @@ def _history(symbol: str, lookback_days: int = 1400) -> pd.DataFrame:
     con = core._db()
     try:
         df = core._read_cache(con, _normalise(symbol),
-                              date.today() - timedelta(days=lookback_days), date.today())
+                              core.market_today() - timedelta(days=lookback_days), core.market_today())
     finally:
         con.close()
     if df is None or df.empty:

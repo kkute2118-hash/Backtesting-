@@ -112,7 +112,7 @@ def _breadth_from_signals(days: int = 30) -> dict[str, Any]:
     strategy is finding anything - not an invented advance/decline line. The
     engine never computes A/D, so the dashboard does not claim to show one.
     """
-    since = (date.today() - timedelta(days=days)).isoformat()
+    since = (core.market_today() - timedelta(days=days)).isoformat()
     con = core._db()
     try:
         rows = con.execute(

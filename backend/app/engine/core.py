@@ -31,7 +31,7 @@ import threading
 import queue
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 import math
 import bisect
@@ -1317,6 +1317,49 @@ def dhan_map():
         if q.any():m=m[q]
     return dict(zip(m.symbol,m.security_id.astype(str)))
 
+# ========================= MARKET CLOCK =========================
+# Every session-date rule below is written against IST wall-clock. They all used
+# to read datetime.now() / date.today() — the HOST clock — which is correct only
+# on a machine set to IST. GitHub Actions runners and the web host both run on
+# UTC, and IST is UTC+05:30, so 13:30 UTC (19:00 IST, well after the 15:30
+# close) read as *before* the close: latest_completed_nse_session() rolled back
+# a day, the weekend rule then walked Sunday back to Friday, and the daily job
+# concluded the market had not traded since. It asked Dhan for a range it
+# already held, reported "0 stocks advanced", and called the store current —
+# silently, every single run.
+MARKET_TZ_NAME = "Asia/Kolkata"
+# India has never observed daylight saving and IST has been a fixed UTC+05:30
+# since 1945, so a fixed offset is exact here — and unlike a named zone it needs
+# no tzdata package, which a slim container image may not ship.
+MARKET_UTC_OFFSET = timedelta(hours=5, minutes=30)
+MARKET_TZ = timezone(MARKET_UTC_OFFSET, "IST")
+
+# pandas resolves the zone by name; kept as the original constant so the Dhan
+# candle-labelling path and its regression test are untouched.
+DHAN_MARKET_TZ = MARKET_TZ_NAME
+
+
+def market_now(now=None):
+    """Current market wall-clock time as a NAIVE datetime in IST.
+
+    Naive in, naive out: a naive `now` is taken to already be IST wall-clock, so
+    the injected datetimes in tests and callers keep meaning exactly what the
+    docstrings say. An aware `now` is converted to IST first.
+    """
+    if now is None:
+        return datetime.now(MARKET_TZ).replace(tzinfo=None)
+    if getattr(now, "tzinfo", None) is not None:
+        return now.astimezone(MARKET_TZ).replace(tzinfo=None)
+    return now
+
+
+def market_today(day=None):
+    """Today's date in market time, not in the host's timezone."""
+    if day is not None:
+        return pd.Timestamp(day).date()
+    return market_now().date()
+
+
 def last_expected_nse_session(day=None):
     """Return the most recent weekday NSE cash-market session date.
 
@@ -1324,16 +1367,15 @@ def last_expected_nse_session(day=None):
     current request (e.g. Saturday 29-Aug-2026) therefore targets Friday
     28-Aug-2026, which is the latest expected equity trading session.
     """
-    d = pd.Timestamp(day or date.today()).date()
+    d = market_today(day)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
 
 
-# NSE cash-market close, IST wall-clock. The whole app already treats
-# datetime.now()/date.today() as local wall-clock time (see the Dhan token
-# cache above), so this follows the same convention rather than introducing
-# timezone-aware datetimes into a codebase that has none.
+# NSE cash-market close, IST wall-clock. Read these against market_now(), never
+# against datetime.now(): the host clock is UTC on both the runners and the web
+# host, and comparing a UTC time to a 15:30 IST close is what froze the data.
 NSE_MARKET_CLOSE_HOUR = 15
 NSE_MARKET_CLOSE_MINUTE = 30
 
@@ -1344,9 +1386,9 @@ def latest_completed_nse_session(now=None):
     last_expected_nse_session(), which is date-only and used for sync/backtest
     date-range bounds where an off-by-one before market close is harmless.
 
-    `now` is an injectable datetime for testing; defaults to wall-clock now.
+    `now` is an injectable datetime for testing; defaults to market time now.
     """
-    now = now if now is not None else datetime.now()
+    now = market_now(now)
     close_today = now.replace(hour=NSE_MARKET_CLOSE_HOUR, minute=NSE_MARKET_CLOSE_MINUTE,
                                second=0, microsecond=0)
     d = now.date()
@@ -1363,7 +1405,7 @@ def nse_market_is_open(now=None):
     """True while the NSE cash session is actually trading (weekday, 09:15-15:30
     IST wall-clock). Used to decide whether a live intraday price is meaningful;
     outside the session the last completed daily candle IS the current price."""
-    now = now if now is not None else datetime.now()
+    now = market_now(now)
     if now.weekday() >= 5:
         return False
     open_t = now.replace(hour=NSE_MARKET_OPEN_HOUR, minute=NSE_MARKET_OPEN_MINUTE,
@@ -1376,7 +1418,7 @@ def nse_market_is_open(now=None):
 def current_session_date(now=None):
     """The trading date a live price belongs to. During a live session that is
     today; otherwise it is the most recently completed session."""
-    now = now if now is not None else datetime.now()
+    now = market_now(now)
     if nse_market_is_open(now):
         return now.date()
     return latest_completed_nse_session(now)
@@ -1475,9 +1517,6 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
 # midnight-UTC timestamp instead: 00:00 UTC becomes 05:30 IST on the same date,
 # so the date is unchanged. There is no input for which UTC is right and IST is
 # wrong.
-DHAN_MARKET_TZ = "Asia/Kolkata"
-
-
 def _dhan_session_index(timestamps):
     """Session dates from Dhan's epoch seconds, read in market time."""
     idx = pd.to_datetime(timestamps, unit="s", errors="coerce", utc=True)
@@ -1849,7 +1888,7 @@ def build_live_daily_bars(symbols):
         quotes = dhan_quote_snapshot(symbols)
     except Exception:
         return {}
-    session = date.today()
+    session = market_today()
     bars = {}
     for sym, q in quotes.items():
         ltp = float(q["ltp"])
@@ -1981,7 +2020,7 @@ def dhan_connection_diagnostic():
         result["details"].append(f"LTP API failed: {exc}")
 
     try:
-        d=dhan_history("RELIANCE",date.today()-timedelta(days=7),date.today())
+        d=dhan_history("RELIANCE",market_today()-timedelta(days=7),market_today())
         if d is not None and not d.empty:
             result["historical_api"]=True
             result["details"].append(f"Historical API returned {len(d)} candles.")
@@ -2823,7 +2862,7 @@ def add_fundamental_forward_candidates(results_df):
         return 0
     con = _db(); added = 0
     try:
-        today = str(date.today())
+        today = str(market_today())
         for _, r in passed.iterrows():
             symbol = str(r.get("Ticker", "")).upper()
             strategy = "FUND" + str(r.get("Screen", "")).upper()
@@ -2836,7 +2875,7 @@ def add_fundamental_forward_candidates(results_df):
             if exists:
                 continue
 
-            d = _read_cache(con, symbol, date.today()-timedelta(days=30), date.today())
+            d = _read_cache(con, symbol, market_today()-timedelta(days=30), market_today())
             if d is None or d.empty:
                 continue  # no local Dhan price to anchor entry — skip rather than insert a NULL price row
             entry = float(d.close.iloc[-1])
@@ -3555,7 +3594,7 @@ def add_smc_forward_candidates(candidates):
         return 0
     con = _db(); added = 0
     try:
-        today = str(date.today())
+        today = str(market_today())
         for _, r in valid.iterrows():
             symbol = str(r.get("Pair", "")).upper()
             entry = float(r.get("entry", np.nan)); sl = float(r.get("stop", np.nan)); target = float(r.get("target", np.nan))
@@ -5643,7 +5682,7 @@ def _frame_ends_on_open_session(df):
     if df is None or len(df) == 0:
         return False
     try:
-        return pd.Timestamp(df.index[-1]).date() >= date.today() and nse_market_is_open()
+        return pd.Timestamp(df.index[-1]).date() >= market_today() and nse_market_is_open()
     except Exception:
         return False
 
@@ -8534,7 +8573,7 @@ def load_scan_dataset(tickers, min_bars=260, lookback_days=1000):
     try:
         for ticker in tickers:
             clean = str(ticker).upper().replace(".NS", "")
-            d = _read_cache(con, clean, date.today() - timedelta(days=lookback_days), date.today())
+            d = _read_cache(con, clean, market_today() - timedelta(days=lookback_days), market_today())
             if d is not None and len(d) >= min_bars:
                 data[ticker] = d
     finally:
@@ -8674,7 +8713,7 @@ def persist_scanner_signals(result, min_score, signal_date=None):
     a scan on the same day updates rows instead of duplicating them."""
     if result is None or result.empty:
         return 0
-    signal_date = str(signal_date or date.today())
+    signal_date = str(signal_date or market_today())
     now = datetime.now().isoformat(timespec="seconds")
     con = _db()
     try:
@@ -8713,7 +8752,7 @@ def add_forward_candidates(candidates):
         return 0
     con=_db(); added=0
     try:
-        today=str(date.today())
+        today=str(market_today())
         for _,r in candidates.iterrows():
             symbol=str(r.get("Ticker","")).upper().replace(".NS","")
             strategy=str(r.get("Strategy","")).upper()
@@ -8910,7 +8949,7 @@ def forward_positions_view(use_live=True):
     ft["Progress to Target %"] = ((cur - entry) / reward * 100).clip(lower=-100, upper=100)
 
     signal_dt = pd.to_datetime(ft["signal_date"].fillna(ft["created_at"]), errors="coerce")
-    ft["Days Held"] = (pd.Timestamp(date.today()) - signal_dt.dt.normalize()).dt.days
+    ft["Days Held"] = (pd.Timestamp(market_today()) - signal_dt.dt.normalize()).dt.days
 
     # Vectorised, so no reliance on itertuples' renaming of columns whose names
     # are not valid Python identifiers ("Gain/Loss %" and friends).
