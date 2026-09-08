@@ -163,7 +163,7 @@ def _quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
             f"""SELECT symbol, dt, close FROM candles
                  WHERE symbol IN ({placeholders}) AND dt >= ?
               ORDER BY symbol, dt""",
-            con, params=[*symbols, (date.today() - timedelta(days=15)).isoformat()])
+            con, params=[*symbols, (core.market_today() - timedelta(days=15)).isoformat()])
         signals = pd.read_sql_query(
             f"""SELECT symbol, strategy, score, signal_date, safety_status
                   FROM scanner_signals WHERE symbol IN ({placeholders})

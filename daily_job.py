@@ -407,12 +407,15 @@ def run_token_only():
 
 
 def run_daily():
-    summary = {"date": str(date.today()), "traded": None, "added": 0, "resolved": 0}
+    # Market time throughout, never the runner's clock. GitHub runners are UTC,
+    # and after 18:30 UTC it is already tomorrow in India — dating a run by the
+    # host would put it on the wrong session.
+    summary = {"date": str(core.market_today()), "traded": None, "added": 0, "resolved": 0}
     step_restore()
     step_token(force=True)
 
     session = core.latest_completed_nse_session()
-    if session != core.last_expected_nse_session(date.today()):
+    if session != core.last_expected_nse_session(core.market_today()):
         # Runs before today's close (or on a weekend) target the previous
         # session, which has already been processed.
         log("guard", f"no new completed session to process (latest is {session}); "
