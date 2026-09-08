@@ -49,6 +49,7 @@ export function DataPage() {
   const smokeTest = useSmokeTest();
 
   const dhanConfigured = config?.providers.dhan.configured ?? false;
+  const dhanVariables = config?.providers.dhan.variables ?? null;
 
   async function launch(
     action: () => Promise<{ id: string }>,
@@ -77,6 +78,21 @@ export function DataPage() {
           Set DHAN_CLIENT_ID plus DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) in the
           backend environment. Without them the app can still scan, backtest and learn from
           whatever history is already stored, but it cannot fetch anything new.
+          {dhanVariables ? (
+            <>
+              {" "}
+              This server can see:{" "}
+              {Object.entries(dhanVariables).map(([name, present], i) => (
+                <span key={name}>
+                  {i > 0 ? ", " : ""}
+                  <code>{name}</code>{" "}
+                  <strong>{present ? "set" : "missing"}</strong>
+                </span>
+              ))}
+              . A variable you have set but that reads as missing here is on a different
+              service, saved empty, or was added before the last deploy.
+            </>
+          ) : null}
         </Banner>
       ) : null}
 
