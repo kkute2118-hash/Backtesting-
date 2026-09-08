@@ -212,6 +212,9 @@ def provider_status() -> dict[str, Any]:
             "configured": bool(core.dhan_configured()),
             "auto_renew": bool(core._dhan_pin_totp_configured()),
             "token_issued_at": token_issued,
+            # Presence per variable, never a value: which one is missing is the
+            # whole question when the credentials are supposedly already set.
+            "variables": core.credential_presence(core.DHAN_CREDENTIAL_NAMES),
         },
         "twelvedata": {"configured": bool(core.twelvedata_configured())},
         "anthropic": {"configured": bool(core._anthropic_configured())},

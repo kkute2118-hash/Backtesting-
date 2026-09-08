@@ -115,7 +115,14 @@ export interface Freshness {
 }
 
 export interface ProviderStatus {
-  dhan: { configured: boolean; auto_renew: boolean; token_issued_at: string | null };
+  dhan: {
+    configured: boolean;
+    auto_renew: boolean;
+    token_issued_at: string | null;
+    /** Presence per variable, never a value. Which one is missing is the whole
+     * question when the credentials are supposedly already set. */
+    variables?: Record<string, boolean>;
+  };
   twelvedata: { configured: boolean };
   anthropic: { configured: boolean };
   github_backup: { configured: boolean };

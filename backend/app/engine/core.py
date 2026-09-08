@@ -981,6 +981,28 @@ def _dhan_manual_token_configured():
     except Exception:
         return False
 
+def credential_presence(names):
+    """Which of `names` this process can actually see. Never a value.
+
+    "Dhan is not configured" is true but useless when the credentials have been
+    set: it cannot distinguish a variable put on the wrong service, one saved
+    with an empty value, one whose name has a typo, and a service that has not
+    restarted since. Reporting the names individually turns a guess into a
+    reading.
+    """
+    out = {}
+    for name in names:
+        try:
+            val = _secret(name)
+        except Exception:
+            val = None
+        out[name] = bool(val not in (None, ""))
+    return out
+
+
+DHAN_CREDENTIAL_NAMES = ("DHAN_CLIENT_ID", "DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN")
+
+
 def dhan_configured():
     try:
         if not _secret("DHAN_CLIENT_ID"):
