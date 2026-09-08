@@ -208,10 +208,27 @@ def backup_now() -> dict[str, Any]:
 
 
 def restore_now() -> dict[str, Any]:
-    restored = core.restore_db_from_github()
-    return {"ok": bool(restored),
-            "message": "Database restored from the GitHub backup."
-                       if restored else "No backup was restored — see the diagnostic."}
+    """Pull the backup over the local store, on purpose.
+
+    This is an explicit user action, so it forces. The unforced path declines
+    whenever the store holds rows, which is right for a boot and wrong here: on
+    a host whose database outlives its deploys, the scheduled job pushes a fresh
+    backup every session while the app keeps serving an older snapshot and
+    answers "nothing to restore" forever. The row counts are reported so the
+    result is visible rather than asserted, and the replaced file is kept beside
+    the database.
+    """
+    before = core.db_row_count(core.DATA_DB)
+    restored = core.restore_db_from_github(force=True)
+    after = core.db_row_count(core.DATA_DB)
+    if not restored:
+        raise ApiError(core._GITHUB_LAST_ERROR
+                       or "No backup was restored — run the backup diagnostic.")
+    moved = after - before
+    return {"ok": True,
+            "rows_before": before, "rows_after": after,
+            "message": (f"Restored from the GitHub backup: {before:,} rows replaced by "
+                        f"{after:,} ({moved:+,}). The previous database was kept beside it.")}
 
 
 def backup_diagnostic() -> dict[str, Any]:
