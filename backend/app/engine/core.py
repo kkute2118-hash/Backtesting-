@@ -8789,13 +8789,21 @@ def persist_scanner_signals(result, min_score, signal_date=None):
     return len(result)
 
 
-def add_forward_candidates(candidates):
-    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them."""
+def add_forward_candidates(candidates, signal_date=None):
+    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them.
+
+    `signal_date` is the SESSION the setups were read from, which is not always
+    the day the job runs: when the data provider publishes a daily candle late,
+    the scan happens the following day against the previous session's close.
+    Dating those signals by the run date would file them under a session whose
+    prices they were never computed from, and would defeat the dedupe below —
+    the same setup would be recorded again under each new run date.
+    """
     if candidates is None or len(candidates)==0:
         return 0
     con=_db(); added=0
     try:
-        today=str(market_today())
+        today=str(signal_date or market_today())
         for _,r in candidates.iterrows():
             symbol=str(r.get("Ticker","")).upper().replace(".NS","")
             strategy=str(r.get("Strategy","")).upper()
