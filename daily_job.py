@@ -64,6 +64,11 @@ from app.engine import core  # noqa: E402
 from app.services import bootstrap  # noqa: E402
 
 
+# The session the scan last covered, so a second run in the same day is a
+# no-op rather than repeated work.
+LAST_SCANNED_SESSION_KEY = "daily_job_last_scanned_session"
+
+
 def log(step, message):
     print(f"[{datetime.now().isoformat(timespec='seconds')}] {step:<8} {message}", flush=True)
 
@@ -221,14 +226,29 @@ def step_token(force=False):
             "No Dhan credentials. Set DHAN_CLIENT_ID plus DHAN_PIN and DHAN_TOTP_SECRET "
             "(preferred), or DHAN_ACCESS_TOKEN."
         )
-    if force:
-        core._dhan_generate_fresh_token()
-        log("token", "forced a fresh token via PIN+TOTP")
-    else:
+    if not force:
         core._dhan_ensure_fresh_token()
         _tok, issued = core._read_cached_dhan_token()
         log("token", f"token valid (issued {issued})")
-    return True
+        return True
+
+    # A forced renewal must not be able to lose the whole run. Dhan's token
+    # endpoint returned a 500 on 8 Sep and the job died on the spot — no sync,
+    # no scan, no backup — while a perfectly usable token was sitting in the
+    # cache. Mint a fresh one when we can; fall back to the cached one when the
+    # provider is having a moment, and only fail when there is nothing to use.
+    try:
+        core._dhan_generate_fresh_token()
+        log("token", "forced a fresh token via PIN+TOTP")
+        return True
+    except Exception as exc:
+        cached, issued = core._read_cached_dhan_token()
+        if not cached:
+            raise
+        age_note = f"issued {issued}" if issued else "age unknown"
+        log("token", f"renewal failed ({exc}); continuing on the cached token ({age_note})")
+        log("token", "  a cached Dhan token lasts 24h, so this is only a problem if it repeats")
+        return False
 
 
 def step_sync(tickers, tail_days):
@@ -250,7 +270,7 @@ def step_resolve():
     return checked, closed
 
 
-def step_scan(tickers, strategies, min_score):
+def step_scan(tickers, strategies, min_score, session_date=None):
     data = core.load_scan_dataset(tickers)
     if not data:
         raise RuntimeError(
@@ -269,12 +289,12 @@ def step_scan(tickers, strategies, min_score):
     # Deliberately scanned AFTER the close, on the finished daily candle. An
     # intraday scan can show a signal at 11:00 that is gone by 15:30, which
     # would record forward tests against setups that never actually existed.
-    core.persist_scanner_signals(result, min_score)
-    log("scan", f"{len(result):,} qualified setup(s) persisted")
+    core.persist_scanner_signals(result, min_score, signal_date=session_date)
+    log("scan", f"{len(result):,} qualified setup(s) persisted for session {session_date}")
     return result, regime
 
 
-def step_add(result, min_score):
+def step_add(result, min_score, session_date=None):
     if result is None or result.empty:
         log("add", "no qualified setups today; nothing added")
         return 0
@@ -282,7 +302,7 @@ def step_add(result, min_score):
     if selected.empty:
         log("add", f"no setup reached the >={min_score} gate; nothing added")
         return 0
-    added = core.add_forward_candidates(selected)
+    added = core.add_forward_candidates(selected, signal_date=session_date)
     names = ", ".join(f"{r.Ticker}/{r.Strategy}" for r in selected.itertuples())
     log("add", f"{added} new forward-test candidate(s) from {len(selected)} at/above the gate")
     if added:
@@ -428,28 +448,53 @@ def run_daily():
     step_sync(tickers, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
 
     freshness = core.data_freshness_status(tickers)
-    log("fresh", f"stored candles end {freshness['latest']}, expected {freshness['expected']}")
+    stored = freshness["latest"]
+    log("fresh", f"stored candles end {stored}, expected {freshness['expected']}")
     summary["traded"] = bool(freshness["current"])
-
-    if not freshness["current"]:
-        # Dhan sometimes publishes the daily candle late. Scanning on a stale
-        # cache would record forward tests against yesterday's prices, which is
-        # exactly the late-entry problem this job exists to avoid.
-        log("guard", "candles are not current for the latest expected session — "
-                     "SKIPPING the scan so no candidate is recorded from stale prices")
-        checked, closed = step_resolve()
-        summary["resolved"] = closed
-        backup_or_fail()
-        return summary
+    summary["session"] = str(stored) if stored else None
 
     checked, closed = step_resolve()
     summary["resolved"] = closed
 
+    # Scan the newest session the store actually HOLDS, not the newest one the
+    # calendar expects.
+    #
+    # This used to refuse unless the two matched, to avoid recording candidates
+    # from stale prices. That reasoning was right but the test was wrong: a
+    # stored daily candle IS a completed session, whatever the calendar says.
+    # Dhan does not reliably publish a session's candle the same evening — on
+    # 8 Sep the 17:01 and 19:06 IST runs both found nothing — so the store sits
+    # one session behind "expected" for most of a day, and the old test skipped
+    # the scan every single time. The forward test recorded nothing at all on a
+    # schedule; the only scan that ever landed was one run by hand at an hour
+    # when the two happened to agree.
+    #
+    # Signals are dated by that session rather than by the run, so a scan that
+    # happens the next morning still files under the close it was computed
+    # from, and re-running is a no-op instead of a duplicate.
+    if stored is None:
+        log("guard", "the candle store is empty — nothing to scan. Run `daily_job.py bootstrap` "
+                     "once to build the history.")
+        backup_or_fail()
+        return summary
+
+    last_scanned = core._metric_get(LAST_SCANNED_SESSION_KEY)
+    if last_scanned == str(stored) and not _env_flag("FORCE_RESCAN"):
+        log("guard", f"session {stored} has already been scanned; nothing new to do. "
+                     "Set FORCE_RESCAN=1 to scan it again.")
+        backup_or_fail()
+        return summary
+
+    if not freshness["current"]:
+        log("scan", f"the provider has not published {freshness['expected']} yet; scanning the "
+                    f"newest session actually stored ({stored}) instead of skipping the day.")
+
     min_score = _env_int("SCAN_MIN_SCORE", 85)
-    result, regime = step_scan(tickers, _selected_strategies(), min_score)
-    summary["added"] = step_add(result, min_score)
+    result, regime = step_scan(tickers, _selected_strategies(), min_score, session_date=stored)
+    summary["added"] = step_add(result, min_score, session_date=stored)
     summary["regime"] = regime
     summary["qualified"] = int(len(result))
+    core._metric_set(LAST_SCANNED_SESSION_KEY, str(stored))
 
     backup_or_fail()
     return summary
