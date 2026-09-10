@@ -80,6 +80,13 @@ def _env_int(name, default):
         return default
 
 
+def _env_float(name, default):
+    try:
+        return float(str(os.environ.get(name, "")).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _env_flag(name):
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -688,7 +695,42 @@ def _study_s4_recovery(data, tickers, start, end):
             "metrics": {str(k): v for k, v in (metrics or {}).items()}}
 
 
+def _study_win_probability(data, tickers, start, end):
+    """Check whether the scanner's Win Probability actually ranks outcomes.
+
+    Reads the already-captured signals rather than re-simulating: they carry the
+    features AND what each one went on to do, so this is a fit-and-measure over
+    stored evidence, not another walk-forward.
+    """
+    res = core.win_probability_validation(
+        train_frac=_env_float("WINPROB_TRAIN_FRAC", 0.5),
+        buckets=_env_int("WINPROB_BUCKETS", 10),
+    )
+    if not res.get("ok"):
+        log("study", f"could not validate: {res.get('reason')}")
+        return res
+
+    log("study", f"{res['n_total']:,} signals with outcomes — fit on {res['n_train']:,} "
+                 f"({res['train_window'][0]} → {res['train_window'][1]}), "
+                 f"tested on {res['n_test']:,} it never saw "
+                 f"({res['test_window'][0]} → {res['test_window'][1]})")
+    log("study", f"AUC {res['auc']} (0.5 = no better than chance), Brier {res['brier']}, "
+                 f"base rate {res['baseline_win_pct']}% wins")
+    log("study", "bucket  signals  predicted%  actual%   avg R    total R")
+    for b in res["buckets"]:
+        log("study", f"  {b['bucket']:>2}   {b['signals']:>7,}   {b['predicted_win_pct']:>8.2f}"
+                     f"   {b['actual_win_pct']:>6.2f}  {b['avg_r']:>7.4f}  {b['total_r']:>9.2f}")
+    verdict = ("the top bucket is PROFITABLE out of sample"
+               if res.get("top_bucket_profitable") else
+               "even the highest-probability bucket LOSES money out of sample")
+    log("study", f"spread top-minus-bottom {res['spread_r']} R; {verdict}")
+    if not res.get("monotonic"):
+        log("study", "buckets are not monotonic — the ranking is not clean even where it helps")
+    return res
+
+
 STUDIES = {
+    "win_probability": _study_win_probability,
     "raw_signals": _study_raw_signals,
     "sl_calibration": _study_sl_calibration,
     "s4_extension": _study_s4_extension,

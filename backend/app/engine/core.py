@@ -7258,6 +7258,133 @@ def current_candidate_edge(market, strategy, score):
     conf = "HIGH" if int(row.iloc[0]["Samples"]) >= 100 else "MEDIUM"
     return r, conf
 
+def win_probability_validation(train_frac=0.5, buckets=10, min_train=200, run_id=None):
+    """Does the Win Probability number actually rank outcomes?
+
+    The scanner shows a Win Probability %, but nothing has ever checked whether
+    it separates winners from losers on data the model has not seen. Without
+    that, a confident-looking 78% is a number, not a probability.
+
+    Method, on the captured raw signals (features AND realised R, so no
+    re-simulation and no look-ahead):
+      1. sort every signal by its date and cut chronologically, never randomly —
+         a random split lets the model learn from the future of the same market
+      2. fit on the earlier part only
+      3. predict on the later part, which it has never seen
+      4. bucket those predictions and report what each bucket actually returned
+
+    A model that works shows avg R rising across buckets and the top bucket
+    positive after costs. A flat or inverted profile means the number carries no
+    information, whatever its AUC.
+
+    Returns a dict; never raises for want of data — it says what is missing.
+    """
+    out = {"ok": False, "reason": "", "n_total": 0, "n_train": 0, "n_test": 0,
+           "buckets": [], "auc": None, "brier": None, "baseline_win_pct": None,
+           "top_bucket": None, "spread_r": None}
+
+    ensure_raw_fingerprint_table()
+    con = _db()
+    try:
+        where = "WHERE r_multiple IS NOT NULL"
+        params = []
+        if run_id is not None:
+            where += " AND run_id=?"
+            params.append(int(run_id))
+        q = pd.read_sql_query(
+            f"""SELECT signal_date, strategy, market_regime, r_multiple, outcome,
+                       score, score_htf, score_footprint, score_entry_quality,
+                       score_relative_strength, safety_score
+                FROM raw_signal_fingerprints {where} ORDER BY signal_date""",
+            con, params=params or None)
+    finally:
+        con.close()
+
+    if q.empty:
+        out["reason"] = ("No captured signals with an outcome yet. Run the raw_signals study "
+                         "first — it is what records the features and what each signal did.")
+        return out
+
+    q["r_multiple"] = pd.to_numeric(q["r_multiple"], errors="coerce")
+    q = q.dropna(subset=["r_multiple"])
+    q["signal_date"] = pd.to_datetime(q["signal_date"], errors="coerce")
+    q = q.dropna(subset=["signal_date"]).sort_values("signal_date").reset_index(drop=True)
+    out["n_total"] = int(len(q))
+    if len(q) < min_train * 2:
+        out["reason"] = f"Only {len(q):,} signals with outcomes; need {min_train*2:,} to split."
+        return out
+
+    try:
+        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.metrics import roc_auc_score, brier_score_loss
+    except ImportError:
+        out["reason"] = "scikit-learn is not installed."
+        return out
+
+    # The same feature set the live Win Probability uses, so this validates the
+    # number actually shown rather than a different model that happens to agree.
+    num = q[["score", "score_htf", "score_footprint", "score_entry_quality",
+             "score_relative_strength", "safety_score"]].apply(pd.to_numeric, errors="coerce")
+    X = pd.concat([
+        num,
+        pd.get_dummies(q["strategy"].astype(str).str.upper(), prefix="strategy"),
+        pd.get_dummies(q["market_regime"].astype(str), prefix="regime"),
+    ], axis=1).fillna(0.0)
+    y = (q["r_multiple"] > 0).astype(int).to_numpy()
+
+    cut = int(len(q) * float(train_frac))
+    X_tr, X_te = X.iloc[:cut], X.iloc[cut:]
+    y_tr, y_te = y[:cut], y[cut:]
+    out["n_train"], out["n_test"] = int(len(X_tr)), int(len(X_te))
+    out["train_window"] = [str(q.signal_date.iloc[0].date()), str(q.signal_date.iloc[cut-1].date())]
+    out["test_window"] = [str(q.signal_date.iloc[cut].date()), str(q.signal_date.iloc[-1].date())]
+
+    if y_tr.sum() < 20 or (len(y_tr) - y_tr.sum()) < 20:
+        out["reason"] = "The training half does not contain enough of both outcomes."
+        return out
+
+    model = GradientBoostingClassifier(random_state=42)
+    model.fit(X_tr, y_tr)
+    p = model.predict_proba(X_te)[:, 1]
+
+    try:
+        out["auc"] = round(float(roc_auc_score(y_te, p)), 4)
+    except ValueError:
+        out["auc"] = None
+    out["brier"] = round(float(brier_score_loss(y_te, p)), 4)
+    out["baseline_win_pct"] = round(float(y_te.mean() * 100), 2)
+
+    test = q.iloc[cut:].copy()
+    test["p"] = p
+    # Rank-based buckets, so an unevenly spread predictor still splits evenly.
+    try:
+        test["bucket"] = pd.qcut(test["p"].rank(method="first"), int(buckets), labels=False)
+    except ValueError:
+        out["reason"] = "Predictions do not vary enough to bucket."
+        return out
+
+    rows = []
+    for b, g in test.groupby("bucket", sort=True):
+        rows.append({
+            "bucket": int(b) + 1,
+            "signals": int(len(g)),
+            "predicted_win_pct": round(float(g["p"].mean() * 100), 2),
+            "actual_win_pct": round(float((g["r_multiple"] > 0).mean() * 100), 2),
+            "avg_r": round(float(g["r_multiple"].mean()), 4),
+            "total_r": round(float(g["r_multiple"].sum()), 2),
+        })
+    out["buckets"] = rows
+    if rows:
+        out["top_bucket"] = rows[-1]
+        out["spread_r"] = round(rows[-1]["avg_r"] - rows[0]["avg_r"], 4)
+        # The question behind the question: if you traded only the top bucket,
+        # would you have made money out of sample?
+        out["top_bucket_profitable"] = bool(rows[-1]["avg_r"] > 0)
+        out["monotonic"] = all(rows[i]["avg_r"] <= rows[i + 1]["avg_r"] for i in range(len(rows) - 1))
+    out["ok"] = True
+    return out
+
+
 def fallback_win_probability(market, strategy, score):
     """Score-band historical win rate (adaptive_edge_table), used as the
     Win Probability % estimate whenever the ML classifier isn't trained yet."""
