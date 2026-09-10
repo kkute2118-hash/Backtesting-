@@ -16,6 +16,12 @@ on:
   schedule:
     # NSE closes 15:30 IST (10:00 UTC). Dhan publishes the finished daily
     # candle some time after that, so the first attempt allows ~1h20m.
+    # Dhan's historical API does not publish a session's daily candle the same
+    # evening — 9 Sep's candle was still absent at 22:07 IST that night and only
+    # appeared the next morning. This run is the one that actually catches it,
+    # about 90 minutes before the next open, so a session is scanned and its
+    # forward tests recorded before the market it will be traded in starts.
+    - cron: "30 3 * * 2-6"      # 09:00 IST, Tue-Sat = Mon-Fri sessions
     - cron: "20 11 * * 1-5"     # 16:50 IST
     # Second attempt in case Dhan was still late. The job is idempotent, and
     # add_forward_candidates() refuses a duplicate for the same
