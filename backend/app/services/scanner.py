@@ -61,9 +61,22 @@ def _load(handle: JobHandle, tickers: list[str], use_live_prices: bool) -> tuple
             )
         handle.progress(0.12, "Overlaying today's forming candle from the Dhan quote feed")
         try:
-            data = core.attach_live_bars(data)
+            # attach_live_bars returns (frames, bars). Binding both to `data`
+            # made it a tuple, and the very next line — max(data.values()) —
+            # died with AttributeError, so switching the live overlay on failed
+            # the whole scan instead of using live prices.
+            data, live_bars = core.attach_live_bars(data)
         except Exception as exc:
             raise ApiError(f"Could not fetch live intraday prices: {exc}") from exc
+        if not live_bars:
+            # The overlay is the reason this scan was asked for; silently falling
+            # back to yesterday's close would answer a different question.
+            raise ApiError(
+                "The Dhan quote feed returned no live prices. Outside market hours the last "
+                "stored close already is the current price — turn the live overlay off to "
+                "scan against it."
+            )
+        handle.progress(0.15, f"Live prices for {len(live_bars):,} of {len(data):,} stocks")
 
     handle.progress(0.18, "Reading market regime")
     proxy = max(data.values(), key=len)
