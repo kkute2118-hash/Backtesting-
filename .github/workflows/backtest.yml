@@ -45,6 +45,7 @@ on:
         type: choice
         options:
           - 'none — run the backtest'
+          - 'win_probability'
           - 'raw_signals'
           - 'sl_calibration'
           - 's4_extension'
