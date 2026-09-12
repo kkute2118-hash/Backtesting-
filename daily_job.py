@@ -710,6 +710,11 @@ def _study_win_probability(data, tickers, start, end):
         log("study", f"could not validate: {res.get('reason')}")
         return res
 
+    log("study", f"capture run {res.get('run_id')} — one run only, never the union: earlier "
+                 "runs repeat signals and predate the point-in-time fix")
+    if res.get("duplicate_rows"):
+        log("study", f"WARNING {res['duplicate_rows']:,} duplicate signals inside this run; "
+                     "a duplicate across the cut scores the model on rows it was fitted on")
     log("study", f"{res['n_total']:,} signals with outcomes — fit on {res['n_train']:,} "
                  f"({res['train_window'][0]} → {res['train_window'][1]}), "
                  f"tested on {res['n_test']:,} it never saw "

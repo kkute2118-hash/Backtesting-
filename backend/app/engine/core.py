@@ -7281,18 +7281,34 @@ def win_probability_validation(train_frac=0.5, buckets=10, min_train=200, run_id
     """
     out = {"ok": False, "reason": "", "n_total": 0, "n_train": 0, "n_test": 0,
            "buckets": [], "auc": None, "brier": None, "baseline_win_pct": None,
-           "top_bucket": None, "spread_r": None}
+           "top_bucket": None, "spread_r": None, "run_id": None, "duplicate_rows": 0}
 
     ensure_raw_fingerprint_table()
     con = _db()
     try:
+        # ONE capture run, never the union of all of them. The table accumulates
+        # a row set per run, and those runs are neither independent nor
+        # comparable: an early study was recorded twice, so the same signal
+        # appears more than once, and the runs before the point-in-time fix
+        # carry look-ahead in their features. Concatenating them puts duplicate
+        # rows on both sides of the train/test cut — the model is then scored on
+        # signals it was fitted on — and mixes leaked features with clean ones.
+        # The first version of this function did exactly that and read
+        # 273,688 signals where the newest run holds 95,798.
+        if run_id is None:
+            row = con.execute(
+                "SELECT run_id, COUNT(*) FROM raw_signal_fingerprints "
+                "WHERE r_multiple IS NOT NULL AND run_id IS NOT NULL "
+                "GROUP BY run_id ORDER BY run_id DESC LIMIT 1").fetchone()
+            if row:
+                run_id = int(row[0])
         where = "WHERE r_multiple IS NOT NULL"
         params = []
         if run_id is not None:
             where += " AND run_id=?"
             params.append(int(run_id))
         q = pd.read_sql_query(
-            f"""SELECT signal_date, strategy, market_regime, r_multiple, outcome,
+            f"""SELECT signal_date, ticker, strategy, market_regime, r_multiple, outcome,
                        score, score_htf, score_footprint, score_entry_quality,
                        score_relative_strength, safety_score
                 FROM raw_signal_fingerprints {where} ORDER BY signal_date""",
@@ -7309,6 +7325,13 @@ def win_probability_validation(train_frac=0.5, buckets=10, min_train=200, run_id
     q = q.dropna(subset=["r_multiple"])
     q["signal_date"] = pd.to_datetime(q["signal_date"], errors="coerce")
     q = q.dropna(subset=["signal_date"]).sort_values("signal_date").reset_index(drop=True)
+    out["run_id"] = int(run_id) if run_id is not None else None
+    # Say it out loud if the chosen run still repeats a signal: a duplicate that
+    # straddles the cut is the difference between a measurement and a mirror.
+    keys = ["signal_date", "strategy"]
+    if "ticker" in q.columns:
+        keys.append("ticker")
+    out["duplicate_rows"] = int(len(q) - len(q.drop_duplicates(subset=keys)))
     out["n_total"] = int(len(q))
     if len(q) < min_train * 2:
         out["reason"] = f"Only {len(q):,} signals with outcomes; need {min_train*2:,} to split."
