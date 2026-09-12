@@ -7258,6 +7258,179 @@ def current_candidate_edge(market, strategy, score):
     conf = "HIGH" if int(row.iloc[0]["Samples"]) >= 100 else "MEDIUM"
     return r, conf
 
+TARGET_CALIBRATION_MULTIPLES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+
+
+def target_calibration(multiples=TARGET_CALIBRATION_MULTIPLES, cost_pct_round_trip=0.23,
+                       run_id=None, min_signals=500):
+    """What a different profit target would have returned, on the same signals.
+
+    Every study so far varied the entry and the stop. None has ever varied the
+    target, and the headline numbers say that is where the money went: a 3R
+    target on a 7% stop needs roughly a 21% move, average favourable excursion
+    is about 9%, and 18% of trades resolved as neither win nor loss — they ran
+    out of time reaching for a level most of them never approached.
+
+    Reconstruction, from the stored maximum favourable excursion:
+      - MFE is the best the trade ever did before it exited. If MFE in R
+        reaches a smaller target T, then T was touched BEFORE that exit, so the
+        trade would have closed at +T.
+      - Otherwise nothing changes: it stopped out or timed out exactly as
+        recorded.
+    This is only valid for targets at or below the one actually traded, which is
+    the direction the evidence points; a larger target cannot be reconstructed
+    this way because MFE says nothing about what came after the exit.
+
+    Assumes the target is a resting limit filled at its level, and charges
+    `cost_pct_round_trip` converted into R by each trade's own stop distance.
+    """
+    out = {"ok": False, "reason": "", "run_id": None, "n": 0, "rows": [],
+           "baseline": None, "best": None, "cost_pct_round_trip": cost_pct_round_trip}
+
+    ensure_raw_fingerprint_table()
+    con = _db()
+    try:
+        if run_id is None:
+            row = con.execute(
+                "SELECT run_id FROM raw_signal_fingerprints "
+                "WHERE r_multiple IS NOT NULL AND run_id IS NOT NULL "
+                "GROUP BY run_id ORDER BY run_id DESC LIMIT 1").fetchone()
+            if row:
+                run_id = int(row[0])
+        where, params = "WHERE r_multiple IS NOT NULL", []
+        if run_id is not None:
+            where += " AND run_id=?"
+            params.append(int(run_id))
+        q = pd.read_sql_query(
+            f"""SELECT signal_date, strategy, outcome, r_multiple, mfe_pct,
+                       stop_distance_pct, target_distance_pct
+                FROM raw_signal_fingerprints {where}""", con, params=params or None)
+    finally:
+        con.close()
+
+    out["run_id"] = int(run_id) if run_id is not None else None
+    if q.empty:
+        out["reason"] = "No captured signals with an outcome. Run the raw_signals study first."
+        return out
+
+    for c in ("r_multiple", "mfe_pct", "stop_distance_pct", "target_distance_pct"):
+        q[c] = pd.to_numeric(q[c], errors="coerce")
+    # A zero or missing stop distance cannot be converted into R at all.
+    q = q[(q["stop_distance_pct"] > 0) & q["r_multiple"].notna() & q["mfe_pct"].notna()]
+    out["n"] = int(len(q))
+    if len(q) < min_signals:
+        out["reason"] = (f"Only {len(q):,} signals carry the stop distance and excursion this "
+                         f"needs; {min_signals:,} required.")
+        return out
+
+    # Excursion and costs, both in units of the trade's own risk.
+    mfe_r = q["mfe_pct"] / q["stop_distance_pct"]
+    cost_r = float(cost_pct_round_trip) / q["stop_distance_pct"]
+    traded_rr = (q["target_distance_pct"] / q["stop_distance_pct"]).median()
+    out["traded_target_r"] = None if not np.isfinite(traded_rr) else round(float(traded_rr), 2)
+
+    rows = []
+    for t in multiples:
+        hit = mfe_r >= float(t)
+        r = np.where(hit, float(t), q["r_multiple"]) - cost_r
+        r = pd.Series(r, index=q.index)
+        rows.append({
+            "target_r": float(t),
+            "hit_pct": round(float(hit.mean() * 100), 2),
+            "avg_r": round(float(r.mean()), 4),
+            "total_r": round(float(r.sum()), 1),
+            "median_r": round(float(r.median()), 4),
+            "profit_factor": (round(float(r[r > 0].sum() / -r[r < 0].sum()), 3)
+                              if (r < 0).any() and r[r < 0].sum() != 0 else None),
+        })
+    out["rows"] = rows
+    # The baseline is the target actually traded, so the comparison is like for like.
+    out["baseline"] = max(rows, key=lambda x: x["target_r"])
+    out["best"] = max(rows, key=lambda x: x["avg_r"])
+    out["improvement_r"] = round(out["best"]["avg_r"] - out["baseline"]["avg_r"], 4)
+    out["ok"] = True
+    return out
+
+
+def target_calibration_holdout(split_date=None, **kwargs):
+    """The same sweep, fitted on the first half and checked on the second.
+
+    Picking the best target over all the data is how a curve gets fitted. The
+    honest question is whether the target that looked best on the earlier period
+    still leads on a period chosen before seeing it.
+    """
+    res_all = target_calibration(**kwargs)
+    if not res_all.get("ok"):
+        return res_all
+
+    ensure_raw_fingerprint_table()
+    con = _db()
+    try:
+        run_id = res_all["run_id"]
+        where, params = "WHERE r_multiple IS NOT NULL", []
+        if run_id is not None:
+            where += " AND run_id=?"
+            params.append(int(run_id))
+        q = pd.read_sql_query(
+            f"SELECT signal_date FROM raw_signal_fingerprints {where} ORDER BY signal_date",
+            con, params=params or None)
+    finally:
+        con.close()
+    dates = pd.to_datetime(q["signal_date"], errors="coerce").dropna()
+    if dates.empty:
+        res_all["holdout"] = {"ok": False, "reason": "no usable dates"}
+        return res_all
+    cut = split_date or dates.iloc[len(dates) // 2]
+
+    def _half(lo, hi):
+        con = _db()
+        try:
+            where, params = "WHERE r_multiple IS NOT NULL", []
+            if run_id is not None:
+                where += " AND run_id=?"; params.append(int(run_id))
+            where += " AND signal_date>=? AND signal_date<?"
+            params += [str(lo), str(hi)]
+            return pd.read_sql_query(
+                f"""SELECT outcome, r_multiple, mfe_pct, stop_distance_pct
+                    FROM raw_signal_fingerprints {where}""", con, params=params)
+        finally:
+            con.close()
+
+    def _sweep(df):
+        for c in ("r_multiple", "mfe_pct", "stop_distance_pct"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df[(df["stop_distance_pct"] > 0) & df["r_multiple"].notna() & df["mfe_pct"].notna()]
+        if df.empty:
+            return []
+        mfe_r = df["mfe_pct"] / df["stop_distance_pct"]
+        cost_r = float(kwargs.get("cost_pct_round_trip", 0.23)) / df["stop_distance_pct"]
+        got = []
+        for t in kwargs.get("multiples", TARGET_CALIBRATION_MULTIPLES):
+            r = pd.Series(np.where(mfe_r >= float(t), float(t), df["r_multiple"]),
+                          index=df.index) - cost_r
+            got.append({"target_r": float(t), "avg_r": round(float(r.mean()), 4), "n": int(len(r))})
+        return got
+
+    first = _sweep(_half("1900-01-01", cut))
+    second = _sweep(_half(cut, "2999-01-01"))
+    res_all["holdout"] = {
+        "ok": bool(first and second),
+        "split_at": str(pd.Timestamp(cut).date()),
+        "first_half": first,
+        "second_half": second,
+        "best_first": max(first, key=lambda x: x["avg_r"]) if first else None,
+        "best_second": max(second, key=lambda x: x["avg_r"]) if second else None,
+    }
+    h = res_all["holdout"]
+    if h["ok"]:
+        pick = h["best_first"]["target_r"]
+        got = next((r for r in second if r["target_r"] == pick), None)
+        h["chosen_on_first"] = pick
+        h["its_result_on_second"] = got
+        h["holds_up"] = bool(got and got["avg_r"] > 0)
+    return res_all
+
+
 def win_probability_validation(train_frac=0.5, buckets=10, min_train=200, run_id=None):
     """Does the Win Probability number actually rank outcomes?
 

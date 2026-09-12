@@ -734,7 +734,48 @@ def _study_win_probability(data, tickers, start, end):
     return res
 
 
+def _study_target_calibration(data, tickers, start, end):
+    """What a different profit target would have returned on the same signals.
+
+    Stated before running, so the result cannot be rationalised after: the
+    system targets 3R on a 7% stop, which needs about a 21% move, while average
+    favourable excursion is about 9% and 18% of trades resolve as neither win
+    nor loss. If that is the binding constraint, a nearer target should lift
+    expectancy without touching entries at all.
+    """
+    res = core.target_calibration_holdout()
+    if not res.get("ok"):
+        log("study", f"could not calibrate: {res.get('reason')}")
+        return res
+
+    log("study", f"capture run {res['run_id']} — {res['n']:,} signals, "
+                 f"target actually traded {res.get('traded_target_r')}R, "
+                 f"costs {res['cost_pct_round_trip']}% round trip")
+    log("study", "target   hit%     avg R    median R    total R   profit factor")
+    for r in res["rows"]:
+        pf = "—" if r["profit_factor"] is None else f"{r['profit_factor']:.3f}"
+        log("study", f"  {r['target_r']:>4.2f}R  {r['hit_pct']:>6.2f}  {r['avg_r']:>8.4f}  "
+                     f"{r['median_r']:>9.4f}  {r['total_r']:>10.1f}   {pf:>8}")
+    b, base = res["best"], res["baseline"]
+    log("study", f"best {b['target_r']}R at {b['avg_r']:+.4f} R/trade vs "
+                 f"{base['target_r']}R at {base['avg_r']:+.4f} "
+                 f"({res['improvement_r']:+.4f} R per trade)")
+
+    h = res.get("holdout") or {}
+    if h.get("ok"):
+        log("study", f"hold-out split {h['split_at']}: best on the first half was "
+                     f"{h['chosen_on_first']}R")
+        got = h.get("its_result_on_second") or {}
+        log("study", f"  that same target on the second half: {got.get('avg_r')} R/trade "
+                     f"over {got.get('n')} signals — "
+                     + ("it holds up" if h.get("holds_up") else "it does NOT hold up"))
+        log("study", f"  (best on the second half in hindsight was "
+                     f"{(h.get('best_second') or {}).get('target_r')}R)")
+    return res
+
+
 STUDIES = {
+    "target_calibration": _study_target_calibration,
     "win_probability": _study_win_probability,
     "raw_signals": _study_raw_signals,
     "sl_calibration": _study_sl_calibration,
