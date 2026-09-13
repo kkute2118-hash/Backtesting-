@@ -767,8 +767,13 @@ def _study_target_calibration(data, tickers, start, end):
                      f"{h['chosen_on_first']}R")
         got = h.get("its_result_on_second") or {}
         log("study", f"  that same target on the second half: {got.get('avg_r')} R/trade "
-                     f"over {got.get('n')} signals — "
-                     + ("it holds up" if h.get("holds_up") else "it does NOT hold up"))
+                     f"over {got.get('n')} signals")
+        log("study", "  ranking generalises: "
+                     + ("YES — the same target leads in both halves"
+                        if h.get("ranking_generalises") else "no — a different target leads"))
+        log("study", "  profitable out of sample: "
+                     + ("YES" if h.get("profitable_on_second")
+                        else "NO — the better target is still a smaller loss, not a gain"))
         log("study", f"  (best on the second half in hindsight was "
                      f"{(h.get('best_second') or {}).get('target_r')}R)")
     return res

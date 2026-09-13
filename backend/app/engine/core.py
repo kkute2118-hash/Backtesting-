@@ -7427,7 +7427,12 @@ def target_calibration_holdout(split_date=None, **kwargs):
         got = next((r for r in second if r["target_r"] == pick), None)
         h["chosen_on_first"] = pick
         h["its_result_on_second"] = got
-        h["holds_up"] = bool(got and got["avg_r"] > 0)
+        # Two different questions, and conflating them hides which one failed.
+        # A choice can generalise perfectly and still lose money: that is what
+        # a real ranking over a system with no edge looks like.
+        h["ranking_generalises"] = bool(h["best_second"] and h["best_second"]["target_r"] == pick)
+        h["profitable_on_second"] = bool(got and got["avg_r"] > 0)
+        h["holds_up"] = h["profitable_on_second"]
     return res_all
 
 
