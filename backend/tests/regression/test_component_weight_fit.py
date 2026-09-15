@@ -197,6 +197,32 @@ check("and is not given a coefficient",
       "Trend" not in {c["component"] for c in s1["components"]},
       str([c["component"] for c in s1["components"]]))
 
+# --------------- 7. one absent component must not empty the whole fit
+# A build older than a column writes NULL for it. Requiring every component to
+# be present then drops every row and reports "0 rows with a complete component
+# breakdown" — which reads as no data at all, rather than as one column needing
+# a backfill. This happened for real with `trend`.
+wipe()
+plant(1200, effect_on="footprint", effect=0.06)
+con = core._db()
+try:
+    con.execute("UPDATE learning_observations SET trend=NULL")
+    con.commit()
+finally:
+    con.close()
+rep = core.fit_component_weights()
+s1 = rep["strategies"]["S1"]
+check("the fit still runs when one component was never recorded",
+      s1.get("fitted") is True, str(s1.get("reason")))
+check("the absent component is named", "Trend" in (s1.get("missing_components") or []),
+      str(s1.get("missing_components")))
+check("and the remaining components are still fitted",
+      {"Footprint", "HTF Demand"} <= {c["component"] for c in s1["components"]},
+      str([c["component"] for c in s1["components"]]))
+check("the planted effect survives the missing column",
+      any(c["component"] == "Footprint" and c["significant"] for c in s1["components"]),
+      str([(c["component"], c["p_value"]) for c in s1["components"]]))
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")
 sys.exit(1 if FAILS else 0)

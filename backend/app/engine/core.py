@@ -6039,6 +6039,20 @@ def fit_component_weights(market="INDIA", source=None,
 
         Xdf = g[available].apply(pd.to_numeric, errors="coerce")
         y_r = pd.to_numeric(g["result_r"], errors="coerce")
+        # A component that is entirely absent — written by a build older than
+        # the column, say — must be named and set aside, not allowed to empty
+        # the whole fit. Requiring every column to be present dropped all 2,371
+        # rows when `trend` was missing and reported it as "0 rows with a
+        # complete component breakdown", which reads like there is no data at
+        # all rather than like one column needs backfilling.
+        missing = [COMPONENT_FIT_COLUMNS[c] for c in Xdf.columns if Xdf[c].notna().sum() == 0]
+        entry["missing_components"] = missing
+        Xdf = Xdf[[c for c in Xdf.columns if Xdf[c].notna().sum() > 0]]
+        if Xdf.shape[1] == 0:
+            entry["reason"] = ("No component values recorded on these observations at all. "
+                               "Re-run the backtest to populate them.")
+            report["strategies"][strategy] = entry
+            continue
         keep = Xdf.notna().all(axis=1) & y_r.notna()
         Xdf, y_r = Xdf[keep], y_r[keep]
         # A component that never varies cannot be fitted and must be named, not
@@ -6050,6 +6064,8 @@ def fit_component_weights(market="INDIA", source=None,
         if len(Xdf) < min_samples or not varying:
             entry["reason"] = (
                 f"{len(Xdf)} row(s) with a complete component breakdown"
+                + (f"; {', '.join(entry['missing_components'])} not recorded"
+                   if entry.get("missing_components") else "")
                 + (f"; {', '.join(constant)} never varied" if constant else "")
                 + ". Not fitted.")
             report["strategies"][strategy] = entry
