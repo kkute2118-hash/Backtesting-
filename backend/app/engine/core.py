@@ -5636,7 +5636,7 @@ def ensure_learning_tables():
         for col,typ in {
             "learned_score":"REAL", "holding_bars":"INTEGER",
             "entry":"REAL", "exit_price":"REAL", "result_r":"REAL",
-            "source":"TEXT", "engine_version":"TEXT"
+            "source":"TEXT", "engine_version":"TEXT", "trend":"REAL"
         }.items():
             if col not in cols:
                 con.execute(f"ALTER TABLE learning_observations ADD COLUMN {col} {typ}")
@@ -5717,8 +5717,8 @@ def _record_learning_trade(market, row, source="forward"):
                 created_at,market,symbol,strategy,signal_time,score,regime,
                 htf,footprint,strategy_score,entry_quality,relative_strength,
                 safety_score,entry,exit_price,result_r,outcome,holding_minutes,source,
-                engine_version
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                engine_version,trend
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now().isoformat(timespec="seconds"),
             market,
@@ -5739,7 +5739,8 @@ def _record_learning_trade(market, row, source="forward"):
             str(row.get("outcome", row.get("Outcome", ""))),
             float(row.get("holding_minutes", np.nan)),
             source,
-            ENGINE_VERSION
+            ENGINE_VERSION,
+            float(row.get("trend", row.get("Trend", np.nan)))
         ))
         con.commit()
         maybe_backup_db()
@@ -5807,6 +5808,19 @@ def learning_snapshot(market="INDIA", source=None, engine_version="current",
     return q
 
 
+def _in_signal_order(q):
+    """Oldest signal first. Any hold-out that claims to be chronological needs it."""
+    if q is None or q.empty:
+        return q
+    out = q.copy()
+    out["_ts"] = pd.to_datetime(out.get("signal_time"), errors="coerce")
+    # Rows with an unparseable signal_time fall back to insertion order, which
+    # is the best available proxy and still monotonic in time.
+    out["_id"] = pd.to_numeric(out.get("id"), errors="coerce")
+    out = out.sort_values(["_ts", "_id"], na_position="first").drop(columns=["_ts", "_id"])
+    return out.reset_index(drop=True)
+
+
 def learning_evidence_counts(market="INDIA"):
     """How many usable observations exist, per strategy and per source.
 
@@ -5855,87 +5869,343 @@ def learning_evidence_counts(market="INDIA"):
         "last_write": _LAST_LEARNING_WRITE,
     }
 
+# ------------------------------------------------------ component weight fit --
+# Where the weights are supposed to come from.
+#
+# The previous answer was adaptive_component_weights(): split each component at
+# its median, compare mean R of the high half against the low half, and nudge
+# the weight by np.clip(1.0 + edge*0.25, 0.70, 1.35). That has no significance
+# test, no handling of correlated components, and a median split throws away
+# most of the ordering inside each half. It also reported "Samples" as the size
+# of the whole strategy group rather than of the split the number came from, so
+# a weight computed on five observations advertised several thousand.
+#
+# This replaces it with an ordinary regression that reports its own uncertainty:
+#
+#   - linear (OLS) on result_r, and logistic on win/loss
+#   - standardised coefficients, so components on 11- and 33-point scales are
+#     comparable
+#   - a standard error and p-value per coefficient
+#   - variance inflation factors, because the components are NOT orthogonal
+#     (strategy_score against footprint measured -0.52 before the restructure)
+#   - a hard refusal below a stated sample size, per strategy, reported rather
+#     than silently degraded
+#
+# A component that does not clear the significance bar keeps its existing
+# weight, and the output says which ones those were. The whole point is to be
+# able to answer "what do winning trades share?" with "on this evidence,
+# nothing that clears p<0.05" when that is the true answer.
+# How far a fitted effect of 1R may move a 0-100 score. Deliberately small: the
+# score and the R-multiple are different units, and this is a nudge on top of a
+# deterministic score, not a replacement for it.
+ADAPTIVE_SCORE_R_SCALE = 5.0
+
+COMPONENT_FIT_MIN_SAMPLES = 200
+COMPONENT_FIT_ALPHA = 0.05
+COMPONENT_FIT_COLUMNS = {
+    "strategy_score": "Strategy",
+    "htf": "HTF Demand",
+    "footprint": "Footprint",
+    "entry_quality": "Entry Quality",
+    "trend": "Trend",
+}
+
+
+def _ols_with_pvalues(X, y):
+    """Coefficients, standard errors and two-sided p-values for OLS.
+
+    Written out rather than pulled from statsmodels, which is not a dependency.
+    Returns None when the design matrix is singular - which is itself a finding
+    (two components perfectly collinear), not something to paper over.
+    """
+    from scipy import stats
+
+    n, k = X.shape
+    Xd = np.column_stack([np.ones(n), X])
+    try:
+        xtx_inv = np.linalg.inv(Xd.T @ Xd)
+    except np.linalg.LinAlgError:
+        return None
+    beta = xtx_inv @ Xd.T @ y
+    resid = y - Xd @ beta
+    dof = n - k - 1
+    if dof <= 0:
+        return None
+    sigma2 = float(resid @ resid) / dof
+    se = np.sqrt(np.maximum(np.diag(xtx_inv) * sigma2, 0.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(se > 0, beta / se, 0.0)
+    p = 2 * (1 - stats.t.cdf(np.abs(t), dof))
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = 1 - float(resid @ resid) / ss_tot if ss_tot > 0 else 0.0
+    return {"beta": beta[1:], "se": se[1:], "t": t[1:], "p": p[1:], "r2": r2, "dof": dof}
+
+
+def _logit_with_pvalues(X, y):
+    """Logistic coefficients with Wald standard errors from the Fisher information."""
+    from scipy import stats
+    try:
+        from sklearn.linear_model import LogisticRegression
+    except ImportError:
+        return None
+
+    n = X.shape[0]
+    try:
+        # Unregularised: Wald standard errors below assume a maximum-likelihood
+        # fit, and a penalty shrinks coefficients toward zero, which would make
+        # the p-values wrong in the direction that matters here. C=inf rather
+        # than penalty=None, which sklearn 1.8 deprecates.
+        model = LogisticRegression(C=np.inf, max_iter=2000)
+        model.fit(X, y)
+    except Exception:
+        return None
+    Xd = np.column_stack([np.ones(n), X])
+    beta = np.concatenate([model.intercept_, model.coef_[0]])
+    pr = 1.0 / (1.0 + np.exp(-(Xd @ beta)))
+    W = np.clip(pr * (1 - pr), 1e-9, None)
+    try:
+        cov = np.linalg.inv((Xd * W[:, None]).T @ Xd)
+    except np.linalg.LinAlgError:
+        return None
+    se = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = np.where(se > 0, beta / se, 0.0)
+    p = 2 * (1 - stats.norm.cdf(np.abs(z)))
+    return {"beta": beta[1:], "se": se[1:], "z": z[1:], "p": p[1:]}
+
+
+def _variance_inflation(X):
+    """VIF per column. >5 is usually called concerning, >10 severe."""
+    out = []
+    for j in range(X.shape[1]):
+        others = np.delete(X, j, axis=1)
+        if others.shape[1] == 0:
+            out.append(1.0)
+            continue
+        fit = _ols_with_pvalues(others, X[:, j])
+        r2 = fit["r2"] if fit else 0.0
+        out.append(float("inf") if r2 >= 1.0 else round(1.0 / (1.0 - r2), 2))
+    return out
+
+
+def fit_component_weights(market="INDIA", source=None,
+                          min_samples=COMPONENT_FIT_MIN_SAMPLES,
+                          alpha=COMPONENT_FIT_ALPHA):
+    """Regress the scoring components against outcome, per strategy.
+
+    Reads only current-engine observations (learning_snapshot does the
+    filtering). `source` separates in-sample backtest replay from forward
+    tests; pooled by default, but the caller can and should look at them apart,
+    because a fit dominated by the data the rules were built from is measuring
+    fit, not edge.
+
+    Never returns a weight it cannot defend. Below `min_samples` for a strategy
+    it refuses and says so; above it, a component whose coefficient does not
+    clear `alpha` keeps its current weight and is listed under
+    `neutral_components`.
+    """
+    report = {
+        "engine_version": ENGINE_VERSION,
+        "market": market,
+        "source": source or "all",
+        "min_samples": int(min_samples),
+        "alpha": float(alpha),
+        "current_weights": dict(SCORE_COMPONENT_WEIGHTS),
+        "weights_are_fitted": False,
+        "strategies": {},
+        "evidence": learning_evidence_counts(market),
+    }
+
+    q = learning_snapshot(market, source=source)
+    if q is None or q.empty:
+        report["reason"] = (
+            f"No observations from the current engine ({ENGINE_VERSION}). "
+            "Nothing can be fitted, and the published weights stay as they are.")
+        return report
+
+    q = _in_signal_order(q.dropna(subset=["result_r"]).copy())
+    available = [c for c in COMPONENT_FIT_COLUMNS if c in q.columns]
+
+    for strategy, g in q.groupby(q["strategy"].astype(str).str.upper()):
+        entry = {"n": int(len(g)), "fitted": False, "components": [],
+                 "neutral_components": [], "collinearity": {}}
+        if len(g) < min_samples:
+            entry["reason"] = (
+                f"{len(g)} usable observation(s); {min_samples} required. "
+                "No weight is reported for this strategy — the sample does not "
+                "support a conclusion.")
+            report["strategies"][strategy] = entry
+            continue
+
+        Xdf = g[available].apply(pd.to_numeric, errors="coerce")
+        y_r = pd.to_numeric(g["result_r"], errors="coerce")
+        keep = Xdf.notna().all(axis=1) & y_r.notna()
+        Xdf, y_r = Xdf[keep], y_r[keep]
+        # A component that never varies cannot be fitted and must be named, not
+        # silently dropped: a constant column is exactly what the restructure
+        # removed three of.
+        constant = [COMPONENT_FIT_COLUMNS[c] for c in Xdf.columns if Xdf[c].std(ddof=0) == 0]
+        varying = [c for c in Xdf.columns if Xdf[c].std(ddof=0) > 0]
+        entry["constant_components"] = constant
+        if len(Xdf) < min_samples or not varying:
+            entry["reason"] = (
+                f"{len(Xdf)} row(s) with a complete component breakdown"
+                + (f"; {', '.join(constant)} never varied" if constant else "")
+                + ". Not fitted.")
+            report["strategies"][strategy] = entry
+            continue
+
+        Xdf = Xdf[varying]
+        labels = [COMPONENT_FIT_COLUMNS[c] for c in varying]
+        Xs = ((Xdf - Xdf.mean()) / Xdf.std(ddof=0)).to_numpy(dtype=float)
+        yv = y_r.to_numpy(dtype=float)
+        win = (yv > 0).astype(int)
+
+        vif = _variance_inflation(Xs)
+        entry["collinearity"] = {
+            "vif": {lab: v for lab, v in zip(labels, vif)},
+            "correlation": Xdf.corr().round(3).to_dict(),
+            "note": ("Components with VIF above 5 are close to duplicates of each "
+                     "other; a weight split between them is arbitrary. If that "
+                     "happens after the independence work, it is a bug in the "
+                     "components, not something to weight around."),
+        }
+
+        lin = _ols_with_pvalues(Xs, yv)
+        log = (_logit_with_pvalues(Xs, win)
+               if 0 < win.sum() < len(win) else None)
+        if lin is None:
+            entry["reason"] = "The design matrix is singular — two components are collinear."
+            report["strategies"][strategy] = entry
+            continue
+
+        entry["fitted"] = True
+        entry["r2_linear"] = round(lin["r2"], 4)
+        entry["win_rate"] = round(float(win.mean()), 4)
+        entry["mean_r"] = round(float(yv.mean()), 4)
+        for i, lab in enumerate(labels):
+            row = {
+                "component": lab,
+                "n": int(len(Xdf)),
+                "coef_r_per_sd": round(float(lin["beta"][i]), 4),
+                "se": round(float(lin["se"][i]), 4),
+                "p_value": round(float(lin["p"][i]), 4),
+                "ci95": [round(float(lin["beta"][i] - 1.96 * lin["se"][i]), 4),
+                         round(float(lin["beta"][i] + 1.96 * lin["se"][i]), 4)],
+                "vif": vif[i],
+                "significant": bool(lin["p"][i] < alpha),
+            }
+            if log is not None:
+                row["logit_coef"] = round(float(log["beta"][i]), 4)
+                row["logit_p_value"] = round(float(log["p"][i]), 4)
+                row["significant_logit"] = bool(log["p"][i] < alpha)
+            entry["components"].append(row)
+            if not row["significant"]:
+                entry["neutral_components"].append(lab)
+
+        qualifying = [c for c in entry["components"] if c["significant"]]
+        if not qualifying:
+            entry["verdict"] = (
+                f"No component clears p<{alpha} on {len(Xdf)} observations. "
+                "Every weight stays where it was; the sample does not support "
+                "any re-weighting.")
+        else:
+            entry["verdict"] = (
+                f"{len(qualifying)} component(s) clear p<{alpha}: "
+                + ", ".join(c["component"] for c in qualifying)
+                + ". The rest keep their current weight.")
+        report["strategies"][strategy] = entry
+
+    fitted_any = [s for s, e in report["strategies"].items()
+                  if e.get("fitted") and any(c["significant"] for c in e["components"])]
+    report["weights_are_fitted"] = bool(fitted_any)
+    if not fitted_any:
+        report["reason"] = (
+            "No strategy produced a component that clears the significance bar, "
+            "so SCORE_COMPONENT_WEIGHTS is unchanged and still unfitted.")
+    return report
+
+
 def adaptive_component_weights(market="INDIA", strategy=None):
-    """
-    Data-driven weights from completed observations.
-    This does not alter raw strategy qualification.
-    Components with insufficient evidence retain neutral weights.
-    """
-    q = learning_snapshot(market)
-    if q.empty:
-        return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
+    """Per-component evidence, as a table. Thin view over fit_component_weights().
 
-    if strategy is not None:
-        q = q[q.strategy == f"S{strategy}"]
-    if q.empty:
-        return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
-
-    # relative_strength and safety_score were dropped: measured across 6,608
-    # real signals they had standard deviations of 0.00 and 0.18, so a weight
-    # fitted on them is a weight fitted on a constant.
-    components = [
-        ("score", "Score"), ("htf", "HTF"), ("footprint", "Footprint"),
-        ("strategy_score", "Strategy Score"), ("entry_quality", "Entry Quality"),
-    ]
+    This used to BE the weighting method: median-split each component, compare
+    mean R of the halves, and nudge the weight by clip(1 + edge*0.25, 0.70,
+    1.35). No significance test, no collinearity handling, and the Samples
+    column reported the size of the whole strategy group rather than of the
+    split the number came from — so a nudge computed on five observations
+    advertised several thousand. It is now a presentation layer over the real
+    fit, and it reports the honest sample size and p-value.
+    """
+    report = fit_component_weights(market)
     rows = []
-    for s, sg in q.groupby("strategy"):
-        base = sg.result_r.mean()
-        for col, label in components:
-            if col not in sg:
-                continue
-            med = sg[col].median()
-            hi = sg[sg[col] >= med]
-            lo = sg[sg[col] < med]
-            if len(hi) < 5 or len(lo) < 5:
-                weight = 1.0
-            else:
-                edge = float(hi.result_r.mean() - lo.result_r.mean())
-                weight = float(np.clip(1.0 + edge * 0.25, 0.70, 1.35))
+    for strat, entry in report["strategies"].items():
+        if strategy is not None and strat != f"S{strategy}":
+            continue
+        if not entry.get("fitted"):
             rows.append({
-                "Strategy": s, "Component": label, "Weight": round(weight, 3),
-                "Samples": len(sg), "Avg R": round(float(base), 3),
-                "Win %": round(float((sg.result_r > 0).mean() * 100), 1)
+                "Strategy": strat, "Component": "(not fitted)",
+                "Weight": 1.0, "Samples": entry.get("n", 0),
+                "p-value": None, "Avg R": None, "Win %": None,
+                "Note": entry.get("reason", "insufficient evidence"),
+            })
+            continue
+        for comp in entry["components"]:
+            rows.append({
+                "Strategy": strat,
+                "Component": comp["component"],
+                # Only a component that clears the bar moves off neutral.
+                "Weight": 1.0,
+                "Samples": comp["n"],
+                "p-value": comp["p_value"],
+                "Avg R": entry.get("mean_r"),
+                "Win %": round((entry.get("win_rate") or 0) * 100, 1),
+                "Note": ("clears p<%.2f" % report["alpha"]) if comp["significant"]
+                        else "not significant — weight unchanged",
             })
     return pd.DataFrame(rows)
+
 
 def adaptive_candidate_score(base_score, market="INDIA", strategy="S1", parts=None):
     """
     Learning overlay only. Raw strategy rules remain authoritative.
     With <20 observations, return the original score.
     """
-    q = learning_snapshot(market)
-    if q.empty or len(q) < 20 or parts is None:
+    if parts is None:
         return float(base_score)
 
-    q = q[q.strategy == strategy]
-    if len(q) < 20:
+    report = fit_component_weights(market)
+    entry = report["strategies"].get(str(strategy).upper())
+    if not entry or not entry.get("fitted"):
         return float(base_score)
 
-    weights = adaptive_component_weights(market, int(strategy[-1]))
-    if weights.empty:
+    qualifying = [c for c in entry["components"] if c["significant"]]
+    if not qualifying:
+        # The fit ran and found nothing that clears the bar. Returning the base
+        # score is the honest answer; re-weighting on coefficients that could
+        # not be told apart from zero would be the confident-looking number
+        # this whole exercise exists to stop producing.
         return float(base_score)
 
     vals = {
-        "Score": float(base_score),
-        "HTF": float(parts.get("HTF Demand", 0)),
+        "HTF Demand": float(parts.get("HTF Demand", 0)),
         "Footprint": float(parts.get("Footprint", 0)),
-        "Strategy Score": float(parts.get("Strategy", 0)),
+        "Strategy": float(parts.get("Strategy", 0)),
         "Entry Quality": float(parts.get("Entry Quality", 0)),
         "Trend": float(parts.get("Trend", 0)),
     }
-    total = 0.0
-    wsum = 0.0
-    for _, r in weights.iterrows():
-        comp = r["Component"]
-        if comp in vals:
-            w = float(r["Weight"])
-            total += vals[comp] * w
-            wsum += w
-    if not wsum:
-        return float(base_score)
-    # Blend gently so the learned overlay cannot overpower the deterministic score.
-    learned = total / wsum
-    return float(np.clip(base_score * 0.70 + learned * 0.30, 0, 100))
+    # Shift the score by each significant component's fitted effect, in R per
+    # standard deviation, expressed back on the 0-100 scale. Only components
+    # that earned it move anything.
+    adjustment = 0.0
+    for comp in qualifying:
+        name = comp["component"]
+        if name not in vals:
+            continue
+        weight = float(SCORE_COMPONENT_WEIGHTS.get(name, 0)) or 1.0
+        centred = (vals[name] - weight / 2.0) / max(weight / 2.0, 1.0)
+        adjustment += centred * float(comp["coef_r_per_sd"])
+    return float(np.clip(base_score + adjustment * ADAPTIVE_SCORE_R_SCALE, 0, 100))
 
 def _fast_historical_candidates(data, strategies):
     """Vectorized candidate discovery: features once, then boolean signals."""
@@ -7654,14 +7924,15 @@ def _learn_from_backtest(bt):
                 con.execute("""INSERT OR REPLACE INTO learning_observations(
                     created_at,market,symbol,strategy,signal_time,score,regime,htf,footprint,
                     strategy_score,entry_quality,relative_strength,safety_score,entry,exit_price,
-                    result_r,outcome,holding_minutes,source,engine_version)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                    result_r,outcome,holding_minutes,source,engine_version,trend)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
                     datetime.now().isoformat(timespec='seconds'),'INDIA',str(r.get('Ticker','')),str(r.get('Strategy','')),
                     str(r.get('Date','')),float(r.get('Score',np.nan)),str(r.get('Regime','')),float(r.get('HTF',np.nan)),
                     float(r.get('Footprint',np.nan)),float(r.get('Strategy Score',np.nan)),float(r.get('Entry Quality',np.nan)),
                     float(r.get('Relative Strength',np.nan)),float(r.get('Safety',np.nan)),float(r.get('Entry',np.nan)),
                     float(r.get('Exit',np.nan)),float(r.get('R',np.nan)),str(r.get('Outcome','')),
-                    float(r.get('Holding Bars',0))*390.0,'backtest',ENGINE_VERSION))
+                    float(r.get('Holding Bars',0))*390.0,'backtest',ENGINE_VERSION,
+                    float(r.get('Trend',np.nan))))
                 n += 1
             except Exception:continue
         con.commit()
@@ -8953,6 +9224,11 @@ def train_win_probability_model(market="INDIA"):
     if q.empty or "result_r" not in q.columns:
         return result
     q = q.dropna(subset=["result_r"]).copy()
+    # learning_snapshot() returns NEWEST FIRST. The chronological split below
+    # slices the head as the training period, so without this the model would
+    # train on the most recent trades and be "held out" on the oldest — the same
+    # leak the random split had, in reverse.
+    q = _in_signal_order(q)
     result["n_samples"] = len(q)
     if len(q) < ML_MIN_SAMPLES:
         return result
@@ -8977,12 +9253,20 @@ def train_win_probability_model(market="INDIA"):
     X = pd.concat([x_num, strat_dummies, regime_dummies], axis=1).fillna(0.0)
     y = q["win"].to_numpy()
 
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.25, random_state=42, stratify=y
-        )
-    except ValueError:
+    # Chronological, never random. train_test_split(random_state=42, stratify=y)
+    # shuffles, so the training set contained trades that happened AFTER the
+    # test set: the model was scored on a period it had already been shown,
+    # under market conditions it had already learned. Every AUC and Brier score
+    # produced that way flatters the model, and for a trading system the only
+    # question worth asking is how it does on data that came later.
+    cut = int(len(X) * 0.75)
+    if cut < 1 or cut >= len(X):
         X_train, X_test, y_train, y_test = X, X, y, y
+        result["split"] = "degenerate — too few rows to hold anything out"
+    else:
+        X_train, X_test = X[:cut], X[cut:]
+        y_train, y_test = y[:cut], y[cut:]
+        result["split"] = "chronological 75/25 (train on the earlier period only)"
 
     gbc = GradientBoostingClassifier(random_state=42)
     gbc.fit(X_train, y_train)

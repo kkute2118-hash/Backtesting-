@@ -59,8 +59,26 @@ def edge_table(market: str = "INDIA") -> dict[str, Any]:
 
 
 def component_weights(market: str = "INDIA", strategy: int | None = None) -> dict[str, Any]:
+    """The per-component table, with the full fit attached.
+
+    `fit` carries the coefficients, p-values, confidence intervals, sample
+    sizes and VIFs, plus the refusal reason for any strategy that did not meet
+    the minimum. The UI needs all of it: a weight without its uncertainty is
+    the thing this replaced.
+    """
     df = core.adaptive_component_weights(market, strategy)
-    return {"market": market, "strategy": strategy, "rows": frame_to_records(df)}
+    return {"market": market, "strategy": strategy, "rows": frame_to_records(df),
+            "fit": core.fit_component_weights(market)}
+
+
+def component_fit(market: str = "INDIA", source: str | None = None) -> dict[str, Any]:
+    """Regression of scoring components against outcome, per strategy.
+
+    `source` is "backtest", "forward", or None for both. Worth asking for
+    separately: a fit dominated by in-sample replay measures how well the rules
+    match the data they were built from, not whether they have an edge.
+    """
+    return core.fit_component_weights(market, source=source)
 
 
 def leaderboard() -> dict[str, Any]:
