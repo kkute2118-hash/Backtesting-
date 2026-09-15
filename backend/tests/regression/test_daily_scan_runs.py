@@ -81,9 +81,13 @@ def install_stubs(daily_job):
     core.market_today = lambda *a, **k: STATE["expected"]
     core.sync_latest_sessions = lambda t, **k: (CALLS.append("sync") or
         {"advanced": 0, "symbols": 5, "latest": str(STATE["stored"]), "errors": []})
+    # Mirrors the real contract, including the two keys added when the NSE
+    # holiday calendar landed: a store that is behind the newest *completed*
+    # session is not necessarily behind the newest *published* one.
     core.data_freshness_status = lambda t, **k: {
         "latest": STATE["stored"], "expected": STATE["expected"],
-        "current": STATE["stored"] == STATE["expected"], "days_behind": 1}
+        "published": STATE["stored"], "current": STATE["stored"] == STATE["expected"],
+        "days_behind": 1, "awaiting_publication": False, "expected_note": None}
     core.refresh_forward_positions = lambda: (CALLS.append("resolve") or (12, 0))
     core.load_scan_dataset = lambda t, **k: {f"S{i}.NS": pd.DataFrame({"close": [1] * 300})
                                              for i in range(1, 6)}

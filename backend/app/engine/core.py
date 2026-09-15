@@ -1404,16 +1404,226 @@ def market_today(day=None):
 
 
 def last_expected_nse_session(day=None):
-    """Return the most recent weekday NSE cash-market session date.
+    """Return the most recent WEEKDAY NSE cash-market session date.
 
     This intentionally does not invent a candle for Saturday/Sunday.  The
     current request (e.g. Saturday 29-Aug-2026) therefore targets Friday
     28-Aug-2026, which is the latest expected equity trading session.
+
+    Deliberately holiday-BLIND, and every caller of it is a Dhan request bound
+    (sync windows, backtest ranges). Over-reaching by a day there costs one
+    empty response; under-reaching loses a session's candles for good. Anything
+    that reports on or reasons about sessions wants the holiday-aware
+    last_expected_trading_session() / latest_completed_nse_session() instead.
     """
     d = market_today(day)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
+
+
+# ------------------------------------------------------------ NSE calendar ---
+# The NSE closes for weekends AND for roughly fifteen declared trading holidays
+# a year. Every session rule above knew only about weekends, so a holiday was
+# indistinguishable from a data outage. On Monday 2026-09-14 (Ganesh Chaturthi)
+# the exchange did not trade, Dhan therefore published no candle, and the daily
+# job reported this for three days running:
+#
+#     sync   0/501 stocks advanced; newest stored session 2026-09-11
+#     fresh  stored candles end 2026-09-11, expected 2026-09-15
+#
+# and the app showed a red "Stale data - top up before scanning" banner. The
+# store was completely current. Worse, a genuine outage produces the identical
+# message, so the one line that should raise the alarm had already cried wolf.
+#
+# Two sources answer "was this date a session?", in this order:
+#
+#   1. The candle store. It is ground truth and it maintains itself: a weekday
+#      inside the stored range with no candles for the whole universe was not a
+#      session whatever any table claims, and a weekday WITH candles was one
+#      even if the table below is wrong about it.
+#   2. The table below, consulted only at the frontier - the newest day or two,
+#      where nothing is stored yet and the store cannot answer. A wrong entry
+#      there is overridden by rule 1 the moment the data arrives.
+#
+# The table is a convenience, never an authority. The request ranges that drive
+# the sync deliberately keep using last_expected_nse_session() (weekday-only),
+# so a mistaken holiday entry can never stop the job asking Dhan for a day that
+# actually traded: asking for a holiday costs one empty response, not asking
+# for a real session loses the data permanently.
+NSE_TRADING_HOLIDAYS = {
+    date(2026, 1, 26): "Republic Day",
+    date(2026, 3, 3): "Holi",
+    date(2026, 3, 26): "Shri Ram Navami",
+    date(2026, 3, 31): "Shri Mahavir Jayanti",
+    date(2026, 4, 3): "Good Friday",
+    date(2026, 4, 14): "Dr. Baba Saheb Ambedkar Jayanti",
+    date(2026, 5, 1): "Maharashtra Day",
+    date(2026, 8, 15): "Independence Day",
+    date(2026, 9, 14): "Ganesh Chaturthi",
+    date(2026, 10, 2): "Mahatma Gandhi Jayanti",
+    date(2026, 10, 20): "Dussehra",
+    date(2026, 11, 8): "Diwali Laxmi Pujan",
+    date(2026, 11, 10): "Diwali Balipratipada",
+    date(2026, 11, 24): "Guru Nanak Jayanti",
+    date(2026, 12, 25): "Christmas",
+}
+
+# Years the table above actually claims to cover. Outside them it abstains and
+# the frontier falls back to weekday-only, which is what shipped before - an
+# out-of-date table must degrade to the old behaviour, never invent holidays.
+NSE_HOLIDAY_TABLE_YEARS = frozenset({2026})
+
+# Dhan publishes a session's daily candle the following morning, not at the
+# close: the 16:50 and 19:00 IST runs on a trading day consistently found
+# nothing new, and the 09:00 IST run the next day found it. So between the
+# close and the next morning the store is SUPPOSED to be one session behind,
+# and calling that "stale" is the second false alarm. Held deliberately late
+# (09:00 IST, the time the catch-up run already uses) so the honest answer is
+# "not published yet" rather than a premature accusation.
+DHAN_PUBLICATION_HOUR = 9
+DHAN_PUBLICATION_MINUTE = 0
+
+# The derived half of the calendar is a GROUP BY over every stored candle, so
+# it is cached. Both the daily job and the freshness banner ask for it several
+# times per run, and it only changes when a sync writes new candles.
+SESSION_CALENDAR_TTL_SECONDS = 300.0
+_SESSION_CALENDAR = {"at": 0.0, "newest": None, "blank": frozenset()}
+_SESSION_CALENDAR_LOCK = threading.Lock()
+
+
+def invalidate_session_calendar():
+    """Drop the cached store-derived calendar. Called after a sync writes."""
+    with _SESSION_CALENDAR_LOCK:
+        _SESSION_CALENDAR["at"] = 0.0
+
+
+def observed_session_calendar():
+    """(newest stored session, weekdays inside the stored range with no data).
+
+    A weekday the exchange was closed on has no candles for ANY symbol, which
+    is starkly different from a partially-synced day, so the threshold only has
+    to separate "nothing at all" from "hundreds of stocks". It is set at a
+    tenth of the median day's coverage rather than at zero so a day that holds
+    a stray hand-synced symbol still reads as closed.
+    """
+    now = time.monotonic()
+    with _SESSION_CALENDAR_LOCK:
+        if _SESSION_CALENDAR["at"] and now - _SESSION_CALENDAR["at"] < SESSION_CALENDAR_TTL_SECONDS:
+            return _SESSION_CALENDAR["newest"], _SESSION_CALENDAR["blank"]
+
+    newest, blank = None, frozenset()
+    try:
+        con = _db()
+        try:
+            rows = con.execute("SELECT dt, COUNT(*) FROM candles GROUP BY dt").fetchall()
+        finally:
+            con.close()
+    except Exception:
+        rows = []
+
+    counts = {}
+    for raw_dt, count in rows or []:
+        if not raw_dt:
+            continue
+        try:
+            counts[pd.Timestamp(raw_dt).date()] = int(count)
+        except Exception:
+            continue
+    if counts:
+        newest, oldest = max(counts), min(counts)
+        ordered = sorted(counts.values())
+        median = ordered[len(ordered) // 2]
+        floor = max(3, int(median * 0.10))
+        blanks = set()
+        day = oldest
+        while day <= newest:
+            if day.weekday() < 5 and counts.get(day, 0) < floor:
+                blanks.add(day)
+            day += timedelta(days=1)
+        blank = frozenset(blanks)
+
+    with _SESSION_CALENDAR_LOCK:
+        _SESSION_CALENDAR.update({"at": time.monotonic(), "newest": newest, "blank": blank})
+    return newest, blank
+
+
+def is_nse_session(day, calendar=None):
+    """Did (or will) the NSE cash market trade on this date?
+
+    `calendar` is the pair from observed_session_calendar(), passed in by the
+    loops below so walking back a week does not re-read the cache each step.
+    """
+    day = pd.Timestamp(day).date()
+    if day.weekday() >= 5:
+        return False
+    newest, blank = calendar if calendar is not None else observed_session_calendar()
+    if newest is not None and day <= newest:
+        return day not in blank
+    if day.year in NSE_HOLIDAY_TABLE_YEARS:
+        return day not in NSE_TRADING_HOLIDAYS
+    return True
+
+
+def nse_session_note(day):
+    """Why this date is not a session, in words, or None if it is one.
+
+    The whole point of the calendar is that the daily job and the freshness
+    banner can say "Ganesh Chaturthi" instead of "you are two sessions behind".
+    """
+    day = pd.Timestamp(day).date()
+    if day.weekday() >= 5:
+        return "weekend"
+    newest, blank = observed_session_calendar()
+    if newest is not None and day <= newest and day in blank:
+        named = NSE_TRADING_HOLIDAYS.get(day)
+        return f"NSE holiday: {named}" if named else "no candles published for any stock — the exchange was closed"
+    if (newest is None or day > newest) and day in NSE_TRADING_HOLIDAYS \
+            and day.year in NSE_HOLIDAY_TABLE_YEARS:
+        return f"NSE holiday: {NSE_TRADING_HOLIDAYS[day]}"
+    return None
+
+
+def previous_nse_session(day):
+    """The session strictly before `day`. Diwali can close two days in a row,
+    so the walk-back is generous rather than assuming a single-day gap."""
+    calendar = observed_session_calendar()
+    probe = pd.Timestamp(day).date() - timedelta(days=1)
+    for _ in range(30):
+        if is_nse_session(probe, calendar=calendar):
+            return probe
+        probe -= timedelta(days=1)
+    return probe
+
+
+def last_expected_trading_session(day=None):
+    """Newest date on or before `day` that the NSE actually traded.
+
+    Holiday-aware counterpart of last_expected_nse_session(). That one stays
+    weekday-only on purpose: it bounds Dhan REQUEST ranges, where being a day
+    too generous is free and being a day too tight loses candles.
+    """
+    calendar = observed_session_calendar()
+    probe = market_today(day)
+    for _ in range(30):
+        if is_nse_session(probe, calendar=calendar):
+            return probe
+        probe -= timedelta(days=1)
+    return probe
+
+
+def sessions_between(start, end):
+    """Number of trading sessions in (start, end] — the honest unit for "behind"."""
+    start, end = pd.Timestamp(start).date(), pd.Timestamp(end).date()
+    if end <= start:
+        return 0
+    calendar = observed_session_calendar()
+    count, probe = 0, start + timedelta(days=1)
+    while probe <= end:
+        if is_nse_session(probe, calendar=calendar):
+            count += 1
+        probe += timedelta(days=1)
+    return count
 
 
 # NSE cash-market close, IST wall-clock. Read these against market_now(), never
@@ -1425,9 +1635,11 @@ NSE_MARKET_CLOSE_MINUTE = 30
 def latest_completed_nse_session(now=None):
     """Most recently *completed* NSE cash session: weekday-aware (via
     last_expected_nse_session) AND time-of-day aware (rolls back one more
-    day before today's 15:30 IST close). Distinct from
-    last_expected_nse_session(), which is date-only and used for sync/backtest
-    date-range bounds where an off-by-one before market close is harmless.
+    day before today's 15:30 IST close) AND holiday-aware (via
+    last_expected_trading_session, so Ganesh Chaturthi is not mistaken for a
+    missed download). Distinct from last_expected_nse_session(), which is
+    date-only and used for sync/backtest date-range bounds where an off-by-one
+    before market close is harmless.
 
     `now` is an injectable datetime for testing; defaults to market time now.
     """
@@ -1437,7 +1649,7 @@ def latest_completed_nse_session(now=None):
     d = now.date()
     if now < close_today:
         d -= timedelta(days=1)
-    return last_expected_nse_session(d)
+    return last_expected_trading_session(d)
 
 
 NSE_MARKET_OPEN_HOUR = 9
@@ -1445,11 +1657,11 @@ NSE_MARKET_OPEN_MINUTE = 15
 
 
 def nse_market_is_open(now=None):
-    """True while the NSE cash session is actually trading (weekday, 09:15-15:30
-    IST wall-clock). Used to decide whether a live intraday price is meaningful;
+    """True while the NSE cash session is actually trading (a trading day,
+    09:15-15:30 IST wall-clock). Used to decide whether a live intraday price is meaningful;
     outside the session the last completed daily candle IS the current price."""
     now = market_now(now)
-    if now.weekday() >= 5:
+    if not is_nse_session(now.date()):
         return False
     open_t = now.replace(hour=NSE_MARKET_OPEN_HOUR, minute=NSE_MARKET_OPEN_MINUTE,
                          second=0, microsecond=0)
@@ -1467,10 +1679,48 @@ def current_session_date(now=None):
     return latest_completed_nse_session(now)
 
 
+def last_published_session(now=None):
+    """Newest session whose daily candle Dhan should already have published.
+
+    Not the same as the newest completed session. Dhan publishes a session's
+    daily bar the NEXT morning, so between the 15:30 IST close and roughly
+    09:00 IST tomorrow there is nothing to download and the store is correctly
+    one session behind. Measuring staleness against the completed session
+    instead of this one is what turned every weekday evening into a red
+    "top up before scanning" banner.
+    """
+    now = market_now(now)
+    day = latest_completed_nse_session(now)
+    for _ in range(30):
+        nxt = day + timedelta(days=1)
+        deadline = datetime(nxt.year, nxt.month, nxt.day,
+                            DHAN_PUBLICATION_HOUR, DHAN_PUBLICATION_MINUTE)
+        if now >= deadline:
+            return day
+        day = previous_nse_session(day)
+    return day
+
+
 def data_freshness_status(tickers, now=None):
-    """Compare the MAX cached candle date across `tickers` against the most
-    recently completed NSE session. Read-only diagnostics — never syncs."""
+    """Compare the MAX cached candle date across `tickers` against the newest
+    session Dhan should have published by now. Read-only — never syncs.
+
+    Three states, not two. "Behind" used to cover both a real download failure
+    and the two entirely normal cases below, which is why a healthy store spent
+    most of its life flagged as stale:
+
+      current              - the store holds everything downloadable
+      awaiting_publication - today's session has closed but Dhan has not
+                             published its candle yet; nothing to do but wait
+      stale                - sessions that SHOULD be downloadable are missing;
+                             this is the only one worth an alarm
+
+    `expected` stays the newest completed session so the UI can still say which
+    close it is talking about, but `current` and `days_behind` are measured
+    against `published`, which is the only gap anyone can act on.
+    """
     expected = latest_completed_nse_session(now)
+    published = last_published_session(now)
     symbols = sorted({str(t).upper().replace(".NS", "") for t in tickers}) if tickers else []
     latest = None
     if symbols:
@@ -1483,12 +1733,21 @@ def data_freshness_status(tickers, now=None):
         if row and row[0]:
             latest = pd.Timestamp(row[0]).date()
     if latest is None:
-        return {"expected": expected, "latest": None, "current": False, "days_behind": None}
-    if latest >= expected:
-        days_behind = 0
-    else:
-        days_behind = len(pd.bdate_range(start=latest + timedelta(days=1), end=expected))
-    return {"expected": expected, "latest": latest, "current": latest >= expected, "days_behind": int(days_behind)}
+        return {"expected": expected, "published": published, "latest": None,
+                "current": False, "days_behind": None,
+                "awaiting_publication": False, "expected_note": nse_session_note(expected)}
+    days_behind = sessions_between(latest, published)
+    return {
+        "expected": expected,
+        "published": published,
+        "latest": latest,
+        "current": days_behind == 0,
+        "days_behind": int(days_behind),
+        # The store is current AND the exchange has traded since — the gap is
+        # Dhan's publication lag, not a fault.
+        "awaiting_publication": days_behind == 0 and expected > latest,
+        "expected_note": nse_session_note(expected),
+    }
 
 
 DHAN_RETRY_STATUSES = (429, 500, 502, 503, 504)
@@ -6812,6 +7071,10 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
             symbols).fetchall()}
     finally:
         con.close()
+
+    # A sync is the only thing that adds sessions, so the store-derived half of
+    # the NSE calendar is stale from here on; the freshness check runs next.
+    invalidate_session_calendar()
 
     newest = max((v for v in post.values() if v), default=None)
     advanced = sum(1 for s in symbols if post.get(s) and pre.get(s) != post.get(s))

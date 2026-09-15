@@ -442,11 +442,15 @@ def run_daily():
     step_token(force=True)
 
     session = core.latest_completed_nse_session()
-    if session != core.last_expected_nse_session(core.market_today()):
-        # Runs before today's close (or on a weekend) target the previous
-        # session, which has already been processed.
-        log("guard", f"no new completed session to process (latest is {session}); "
-                     "syncing and backing up only")
+    today = core.market_today()
+    if session != today:
+        # Runs before today's close, at a weekend, or on a trading holiday all
+        # target an earlier session. Say WHICH of the three it is: "no new
+        # session" on its own reads like a fault, and on 2026-09-14 (Ganesh
+        # Chaturthi) three runs in a row said it about a perfectly healthy store.
+        why = core.nse_session_note(today) or "today's close has not happened yet"
+        log("guard", f"{today} is not a completed session ({why}); "
+                     f"working against {session}")
 
     universes = _universes()
     tickers = core.resolve_universes(universes)
@@ -456,7 +460,14 @@ def run_daily():
 
     freshness = core.data_freshness_status(tickers)
     stored = freshness["latest"]
-    log("fresh", f"stored candles end {stored}, expected {freshness['expected']}")
+    if freshness["awaiting_publication"]:
+        log("fresh", f"stored candles end {stored} — current. {freshness['expected']} has "
+                     f"closed but Dhan publishes daily candles the next morning.")
+    elif freshness["current"]:
+        log("fresh", f"stored candles end {stored} — current")
+    else:
+        log("fresh", f"stored candles end {stored}, but {freshness['published']} is published "
+                     f"and downloadable ({freshness['days_behind']} session(s) behind)")
     summary["traded"] = bool(freshness["current"])
     summary["session"] = str(stored) if stored else None
 
