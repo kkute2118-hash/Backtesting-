@@ -5353,21 +5353,52 @@ def footprint_score(x):
         elif close_location >= .60:
             score += 1
 
-    # Controlled distance from EMA20, avoiding extreme extension.
-    extension = float(z.close / z.ema20 - 1) if pd.notna(z.ema20) else np.nan
-    if np.isfinite(extension) and 0 <= extension <= .04:
-        score += 3
+    # EMA20 extension used to add 3 points here and relative strength another
+    # 3. Both were moved out: extension is Entry Quality's condition and
+    # close>ema50 is Relative Strength's, and a condition that scores in two
+    # components is counted twice in the total. What is left is what only this
+    # component measures - how the base compressed and how the move expanded.
+    return _scaled_component(score, FOOTPRINT_RAW_MAX, 20)
 
-    # Relative-strength proxy versus own 50-day trend.
-    if pd.notna(z.ema50) and z.close > z.ema50:
-        score += 3
 
-    return int(min(20, score))
+# Raw maxima, before each component is scaled onto its published weight.
+# Stated as constants because the scaling is only correct while they match the
+# points actually awarded above.
+FOOTPRINT_RAW_MAX = 4 + 3 + 4 + 3          # compression, dry-up, expansion, close location
+TREND_RAW_MAX = 3 + 3                      # close>ema200, rsi14>=50
+ENTRY_RAW_MAX = 10                         # EMA20 extension
+
+
+def _scaled_component(earned, raw_max, weight):
+    """Put a component's raw points onto its published weight.
+
+    Removing a double-counted condition removes its points too, so a component
+    that used to reach 20 might now only reach 14. Scaling rather than leaving
+    it short keeps the published weights meaning what they say: without this,
+    de-duplicating would silently re-weight every component that lost a term.
+    """
+    if raw_max <= 0:
+        return 0
+    return int(round(max(0.0, min(float(earned), float(raw_max))) / float(raw_max) * float(weight)))
 
 def strategy_quality_score(x, s):
-    """30-point strategy-specific quality score. Does not apply other strategies."""
+    """30-point strategy-specific quality. Only conditions THIS component owns.
+
+    Three sub-criteria were removed because they belong to other components and
+    scoring them here counted them twice in the total:
+
+      S2  relvol            -> Footprint owns volume expansion
+      S3  close > ema200    -> Trend owns the long-term trend
+      S4  close <= ema20*k  -> Entry Quality owns EMA20 extension
+
+    Removing them leaves S2/S3/S4 with two criteria against S1's three, so the
+    result is scaled by each strategy's own maximum. Without that, dropping a
+    duplicate would quietly penalise those three strategies against S1 in any
+    cross-strategy ranking - a scoring change disguised as a cleanup.
+    """
     z = x.iloc[-1]
-    p = 0
+    p = 0.0
+    raw_max = 30.0
     if s == 1:
         p += 10 if z.wrsi14 >= 60 else 7 if z.wrsi14 >= 55 else 4 if z.wrsi14 >= 50 else 0
         p += 10 if z.mrsi14 >= 60 else 7 if z.mrsi14 >= 55 else 4 if z.mrsi14 >= 50 else 0
@@ -5375,50 +5406,112 @@ def strategy_quality_score(x, s):
     elif s == 2:
         p += 10 if z.ema20 > z.ema50 else 0
         p += 10 if z.ema50 > z.ema200 else 0
-        p += 10 if z.relvol >= 1.2 else 5 if z.relvol >= 1 else 0
+        raw_max = 20.0
     elif s == 3:
         dist = abs(z.close / z.ema50 - 1)
         p += 10 if dist <= .015 else 7 if dist <= .025 else 4 if dist <= .04 else 0
-        p += 10 if z.close > z.ema200 else 0
         p += 10 if z.wrsi14 >= 55 else 6 if z.wrsi14 >= 45 else 0
+        raw_max = 20.0
     elif s == 4:
         p += 10 if z.mmom >= 30 else 7 if z.mmom >= 25 else 4 if z.mmom >= 20 else 0
         p += 10 if z.mema10 > z.mema20 else 0
-        p += 10 if z.close <= z.ema20 * 1.02 else 5 if z.close <= z.ema20 * 1.03 else 0
-    return int(min(30, p))
+        raw_max = 20.0
+    return _scaled_component(p, raw_max, 30)
+
+# Published component weights. Hand-chosen, NOT fitted - the relative weighting
+# among the surviving components is carried over unchanged from the 30/20/20/
+# 10/10/5/5/5 split precisely so that de-duplicating the components is not also
+# a silent re-weighting. Deriving these from the trade record is a separate
+# piece of work with its own evidence bar; until that lands, these are a guess
+# and the code says so rather than implying otherwise.
+# The forward-test gate, recalibrated for the new scale.
+#
+# Removing 15 points that every candidate scored identically, and scaling each
+# surviving component onto its published weight, moves the whole distribution
+# down. Measured over the 480-symbol store on session 2026-09-11, across the
+# 225 signals that qualified (the signal set itself is unchanged - 1,920
+# verdicts compared, 0 differences):
+#
+#     old   mean 68.1  sd 10.8   max 88   >=85 admitted   9 signals (4.0%)
+#     new   mean 56.9  sd  8.0   max 78   >=85 admits     0
+#
+# Leaving the gate at 85 would forward-test nothing at all, silently, which is
+# the "scanner quietly returns different stocks" failure in its worst form: not
+# different stocks, no stocks. 71 is the new-scale quantile that admits the same
+# 4.0% share, so the gate keeps meaning what it meant. It is a translation of
+# the old threshold, NOT a new opinion about where the cut belongs - the score
+# has no demonstrated relationship to outcome, so there is no evidence on which
+# to place a better one.
+DEFAULT_MIN_SCORE = 71
+LEGACY_MIN_SCORE = 85
+
+SCORE_COMPONENT_WEIGHTS = {
+    "Strategy": 33,
+    "HTF Demand": 22,
+    "Footprint": 22,
+    "Trend": 12,
+    "Entry Quality": 11,
+}
+SCORE_WEIGHTS_ARE_FITTED = False
+
 
 def final_setup_score(x, s, regime, safety_score):
-    """100-point ranking score. Most components rank quality rather than hard-reject."""
+    """100-point ranking score over five independent components.
+
+    Each underlying condition now contributes to exactly one component. Three
+    conditions used to be counted more than once, the worst of them three times:
+
+      close > ema50        Trend +4, Relative Strength +5, Footprint +3  = 12
+      EMA20 extension      Footprint +3, Entry Quality +10, S4 quality +10
+      close > ema200       Trend +3, S3 quality +10
+      relvol               Footprint +4, S2 quality +10
+
+    Three components were also removed outright, because measurement on 6,608
+    real qualified signals showed they cannot separate one candidate from
+    another:
+
+      Relative Strength  sd 0.00 - every single candidate scored 5 of 5.
+                         close > ema50 is already implied by qualification,
+                         which is also why triple-counting it was invisible.
+      Safety             sd 0.18, two distinct values. The safety gate has
+                         already rejected the outliers before scoring; it stays
+                         a gate and a displayed flag, not a ranking term.
+      Market Regime      constant by construction - regime is computed once per
+                         scan and handed to every candidate in it, so it shifts
+                         the whole column and orders nothing. It remains in the
+                         Regime column, and belongs to position sizing or a
+                         scan-level gate rather than to a ranking score.
+
+    That removed 15 points that every candidate received identically. `regime`
+    and `safety_score` stay in the signature: both are still reported, and
+    callers pass them.
+    """
     z = x.iloc[-1]
-    strategy = strategy_quality_score(x, s)       # 30
-    htf = htf_confluence(x)                       # 20
-    footprint = footprint_score(x)                # 20
+    strategy = strategy_quality_score(x, s)
+    htf = _scaled_component(htf_confluence(x), 20, SCORE_COMPONENT_WEIGHTS["HTF Demand"])
+    footprint = _scaled_component(footprint_score(x), 20, SCORE_COMPONENT_WEIGHTS["Footprint"])
 
-    trend = 0
-    trend += 4 if z.close > z.ema50 else 0
-    trend += 3 if z.close > z.ema200 else 0
-    trend += 3 if z.rsi14 >= 50 else 0             # 10
+    # Trend keeps close>ema200 and rsi14>=50. close>ema50 moved out entirely
+    # with the Relative Strength component that owned it.
+    trend_raw = 0
+    trend_raw += 3 if z.close > z.ema200 else 0
+    trend_raw += 3 if z.rsi14 >= 50 else 0
+    trend = _scaled_component(trend_raw, TREND_RAW_MAX, SCORE_COMPONENT_WEIGHTS["Trend"])
 
-    entry = 0
+    # Entry Quality is the sole owner of EMA20 extension.
     ext = z.close / z.ema20 - 1 if pd.notna(z.ema20) else np.nan
+    entry_raw = 0
     if np.isfinite(ext):
-        entry = 10 if 0 <= ext <= .025 else 7 if ext <= .04 else 3 if ext <= .07 else 0
+        entry_raw = 10 if 0 <= ext <= .025 else 7 if ext <= .04 else 3 if ext <= .07 else 0
+    entry = _scaled_component(entry_raw, ENTRY_RAW_MAX, SCORE_COMPONENT_WEIGHTS["Entry Quality"])
 
-    rel = 5 if (pd.notna(z.ema50) and z.close > z.ema50) else 0
-
-    market = 5 if regime == "STRONG BULL" else 4 if regime == "BULL" else 2 if regime == "RECOVERY / SIDEWAYS" else 0
-    safety_points = 5 if safety_score >= 90 else 4 if safety_score >= 80 else 3 if safety_score >= 70 else 0
-
-    total = strategy + htf + footprint + trend + entry + rel + market + safety_points
+    total = strategy + htf + footprint + trend + entry
     return int(max(0, min(100, total))), {
         "Strategy": strategy,
         "HTF Demand": htf,
         "Footprint": footprint,
         "Trend": trend,
         "Entry Quality": entry,
-        "Relative Strength": rel,
-        "Market Regime": market,
-        "Safety": safety_points
     }
 
 # The ~100-point setup_score() stood here: a second, differently-weighted
@@ -5777,10 +5870,12 @@ def adaptive_component_weights(market="INDIA", strategy=None):
     if q.empty:
         return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
 
+    # relative_strength and safety_score were dropped: measured across 6,608
+    # real signals they had standard deviations of 0.00 and 0.18, so a weight
+    # fitted on them is a weight fitted on a constant.
     components = [
         ("score", "Score"), ("htf", "HTF"), ("footprint", "Footprint"),
         ("strategy_score", "Strategy Score"), ("entry_quality", "Entry Quality"),
-        ("relative_strength", "Relative Strength"), ("safety_score", "Safety")
     ]
     rows = []
     for s, sg in q.groupby("strategy"):
@@ -5826,8 +5921,7 @@ def adaptive_candidate_score(base_score, market="INDIA", strategy="S1", parts=No
         "Footprint": float(parts.get("Footprint", 0)),
         "Strategy Score": float(parts.get("Strategy", 0)),
         "Entry Quality": float(parts.get("Entry Quality", 0)),
-        "Relative Strength": float(parts.get("Relative Strength", 0)),
-        "Safety": float(parts.get("Safety", 0)),
+        "Trend": float(parts.get("Trend", 0)),
     }
     total = 0.0
     wsum = 0.0
@@ -5941,7 +6035,16 @@ def save_scan_state(market, universe_size, elapsed):
 # ASOF_PIT_FIX: weekly and monthly features are now genuinely point-in-time.
 # Everything cached before this was built by the leaking resample and must not
 # be reused, or the fix would appear to do nothing.
-ENGINE_VERSION = "FINAL-3_ASOF_PIT"
+# Bumped when scoring components were made independent: each condition now
+# contributes to exactly one component, three zero-variance components were
+# removed, and every component is scaled onto its published weight. Component
+# values recorded under FINAL-3_ASOF_PIT therefore mean something different from
+# values recorded now, and pooling them would fit a weight across two different
+# definitions of the same column. The version is what keeps them apart.
+# "PIT" stays in the name deliberately: the point-in-time guarantee from
+# PR#47 still holds, and a version string that dropped it would read as if
+# the property had been abandoned. test_point_in_time.py asserts this.
+ENGINE_VERSION = "FINAL-4_PIT_INDEPENDENT_COMPONENTS"
 
 def ensure_engine_tables():
     con = _db()
@@ -6434,7 +6537,7 @@ def compute_signal_fingerprint(df, f, i, entry, stop, target, regime, safe, safe
         "safety_score": safe, "safety_flags": ", ".join(safety_flags) if safety_flags else "",
 
         "score_htf": parts.get("HTF Demand", 0), "score_footprint": parts.get("Footprint", 0),
-        "score_entry_quality": parts.get("Entry Quality", 0), "score_relative_strength": parts.get("Relative Strength", 0),
+        "score_entry_quality": parts.get("Entry Quality", 0), "score_trend": parts.get("Trend", 0),
     }
 
 
@@ -7531,7 +7634,7 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                         "HTF": parts["HTF Demand"],
                         "Footprint": parts["Footprint"],
                         "Entry Quality": parts["Entry Quality"],
-                        "Relative Strength": parts["Relative Strength"],
+                        "Trend": parts["Trend"],
                         "Regime": regime,
                         "Safety": safe
                     })
@@ -9424,7 +9527,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 "Footprint Score": parts["Footprint"],
                 "Strategy Score": parts["Strategy"],
                 "Entry Quality": parts["Entry Quality"],
-                "Relative Strength": parts["Relative Strength"],
+                "Trend Score": parts["Trend"],
                 "Safety Score": safe,
                 "Safety Flags": ", ".join(flags),
             }

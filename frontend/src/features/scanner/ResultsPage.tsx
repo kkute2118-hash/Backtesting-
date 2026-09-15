@@ -205,9 +205,13 @@ export function ResultsPage({ runId }: { runId: string }) {
         value: (row) => n(row, "Entry Quality"),
       },
       {
-        key: "Relative Strength", header: "Rel strength", align: "right", optional: true,
-        render: (row) => num(n(row, "Relative Strength"), 0),
-        value: (row) => n(row, "Relative Strength"),
+        // Relative Strength was removed from the score: measured across 6,608
+        // real signals it was 5/5 for every candidate (sd 0.00), because
+        // close > ema50 is already implied by qualification. Trend is the
+        // component that replaced it in the breakdown.
+        key: "Trend Score", header: "Trend", align: "right", optional: true,
+        render: (row) => num(n(row, "Trend Score"), 0),
+        value: (row) => n(row, "Trend Score"),
       },
       {
         key: "Safety Flags", header: "Flags", optional: true, sortable: false,

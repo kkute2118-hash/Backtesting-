@@ -37,7 +37,8 @@ Configuration comes from environment variables (see core._secret):
                                  core.UNIVERSE_CHOICES, including
                                  "NSE All Cash (~2000)" for the full list
                SCAN_STRATEGIES   default "1,2,3,4"
-               SCAN_MIN_SCORE    default "85"
+               SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
+                                 gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
 
 GitHub refuses to create secrets or variables whose NAME starts with "GITHUB_",
@@ -507,7 +508,7 @@ def run_daily():
         log("scan", f"the provider has not published {freshness['expected']} yet; scanning the "
                     f"newest session actually stored ({stored}) instead of skipping the day.")
 
-    min_score = _env_int("SCAN_MIN_SCORE", 85)
+    min_score = _env_int("SCAN_MIN_SCORE", core.DEFAULT_MIN_SCORE)
     result, regime = step_scan(tickers, _selected_strategies(), min_score, session_date=stored)
     summary["added"] = step_add(result, min_score, session_date=stored)
     summary["regime"] = regime
