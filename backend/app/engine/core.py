@@ -5421,50 +5421,9 @@ def final_setup_score(x, s, regime, safety_score):
         "Safety": safety_points
     }
 
-# ========================= SCORE =========================
-
-def setup_score(x, s, regime, safety_score):
-    """Strategy-specific quality score. This does NOT add other strategy rules."""
-    z = x.iloc[-1]
-    score = 0
-
-    # Market regime support: 15
-    score += 15 if regime == "STRONG BULL" else 12 if regime == "BULL" else 7 if regime == "RECOVERY / SIDEWAYS" else 2
-
-    # MTF alignment: 25
-    score += 5 if z.close > z.ema50 else 0
-    score += 5 if z.close > z.ema200 else 0
-    score += 5 if z.wrsi14 >= 50 else 0
-    score += 5 if z.mrsi14 >= 50 else 0
-    score += 5 if z.mema10 >= z.mema20 else 0
-
-    # Technical quality: 25
-    score += 5 if z.rsi14 >= 50 else 0
-    score += 5 if z.relvol >= 1.0 else 0
-    score += 5 if z.relvol >= 1.5 else 0
-    score += 5 if z.close >= z.ema20 else 0
-    score += 5 if z.close >= z.ema50 else 0
-
-    # Safety: 15
-    score += 15 if safety_score >= 90 else 12 if safety_score >= 80 else 8 if safety_score >= 70 else 0
-
-    # Strategy-specific signal quality: 20.
-    # These are conditions belonging to the selected strategy only.
-    if s == 1:
-        score += 10 if z.wrsi14 >= 55 else 5 if z.wrsi14 >= 50 else 0
-        score += 10 if z.mrsi14 >= 55 else 5 if z.mrsi14 >= 50 else 0
-    elif s == 2:
-        score += 10 if z.ema20 > z.ema50 else 0
-        score += 10 if z.ema50 > z.ema200 else 0
-    elif s == 3:
-        dist = abs(z.close / z.ema50 - 1)
-        score += 10 if dist <= .02 else 5 if dist <= .04 else 0
-        score += 10 if z.close > z.ema200 else 0
-    elif s == 4:
-        score += 10 if z.mmom >= 25 else 5 if z.mmom >= 20 else 0
-        score += 10 if z.mema10 > z.mema20 else 0
-
-    return int(max(0, min(100, score)))
+# The ~100-point setup_score() stood here: a second, differently-weighted
+# scorer that no caller ever reached. final_setup_score() is the live one.
+# Keeping a dead duplicate of the scoring maths invites edits to the wrong copy.
 
 # ========================= FUNDAMENTAL SCORING =========================
 
@@ -5518,16 +5477,38 @@ def model_b(info):
 
 FEATURE_CACHE_VERSION = "FINAL_ASOF_1"
 
-def _feature_cache_key(symbol, df):
-    if df is None or df.empty:
-        return None
-    last = pd.Timestamp(df.index[-1])
-    return f"{FEATURE_CACHE_VERSION}:{str(symbol).upper()}:{last.isoformat()}:{len(df)}"
-
 @st.cache_data(ttl=86400, show_spinner=False)
-def features_cached(symbol, df):
-    """Expensive feature calculation is cached by symbol + last candle + length."""
+def _features_cached_versioned(cache_version, symbol, df):
+    """Do not call directly - go through features_cached() so the version binds."""
     return features(df)
+
+
+def features_cached(symbol, df):
+    """Expensive feature calculation, cached by version + symbol + frame content.
+
+    FEATURE_CACHE_VERSION used to be decorative. It was referenced only by
+    _feature_cache_key(), which nothing ever called, while the cache itself was
+    keyed on (symbol, df) by the memoising decorator - so bumping the constant
+    invalidated nothing at all. PR#47 corrected the features themselves, which
+    is exactly the situation the constant exists for.
+
+    Passing the version as an argument puts it in the key, so a bump now really
+    does force recomputation. The durable cache (feature_snapshots) was already
+    keyed on ENGINE_VERSION and was never at risk.
+    """
+    return _features_cached_versioned(FEATURE_CACHE_VERSION, symbol, df)
+
+# Stamped on rows written before observations carried an engine version. They
+# may predate the PR#47 look-ahead fix, so they are evidence of nothing; kept
+# for audit, excluded from every fit.
+LEGACY_ENGINE_VERSION = "PRE_PIT_UNVERSIONED"
+
+_LEARNING_INDEX_WARNING = None
+
+# What the most recent _learn_from_backtest() call actually did, so a rerun that
+# legitimately adds nothing is distinguishable from a write that failed.
+_LAST_LEARNING_WRITE = None
+
 
 def ensure_learning_tables():
     con = _db()
@@ -5562,10 +5543,47 @@ def ensure_learning_tables():
         for col,typ in {
             "learned_score":"REAL", "holding_bars":"INTEGER",
             "entry":"REAL", "exit_price":"REAL", "result_r":"REAL",
-            "source":"TEXT"
+            "source":"TEXT", "engine_version":"TEXT"
         }.items():
             if col not in cols:
                 con.execute(f"ALTER TABLE learning_observations ADD COLUMN {col} {typ}")
+
+        # Everything already in the table was written before observations were
+        # stamped, so it may have come from the pre-PR#47 engine that read future
+        # period closes. Those rows are not deleted - they are marked, and every
+        # read filters them out by default. An unmarked row cannot be told apart
+        # from a clean one, which is the whole defect.
+        con.execute("UPDATE learning_observations SET engine_version=? "
+                    "WHERE engine_version IS NULL", (LEGACY_ENGINE_VERSION,))
+
+        # Re-running a backtest used to insert every row again, silently
+        # inflating the sample counts that the >=20 and >=100 confidence gates
+        # are checked against - so contamination did not merely add noise, it
+        # manufactured confidence. This index makes a repeat write a no-op.
+        #
+        # Partial, for two reasons that both protect existing data:
+        #   - legacy rows are exempt, so their duplicates are preserved rather
+        #     than collapsed (they are excluded from reads anyway)
+        #   - rows with no signal_time are exempt, because they would all
+        #     collide on the empty string and REPLACE would fold unrelated
+        #     trades into one
+        global _LEARNING_INDEX_WARNING
+        try:
+            con.execute(f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_observation_identity
+                ON learning_observations(market,symbol,strategy,signal_time,source,engine_version)
+                WHERE engine_version IS NOT NULL
+                  AND engine_version <> '{LEGACY_ENGINE_VERSION}'
+                  AND signal_time IS NOT NULL AND signal_time <> ''
+            """)
+            _LEARNING_INDEX_WARNING = None
+        except Exception as exc:
+            # Never silent: this surfaces in learning_evidence_counts() so a
+            # deployment where dedupe is not in force is visible rather than
+            # quietly reporting inflated samples.
+            _LEARNING_INDEX_WARNING = (
+                f"Duplicate suppression is NOT active on learning_observations: {exc}. "
+                "Sample counts may be inflated.")
 
         con.execute("""
             CREATE TABLE IF NOT EXISTS model_weights(
@@ -5598,12 +5616,16 @@ def _record_learning_trade(market, row, source="forward"):
     """Persist one completed trade without changing the trading rules."""
     try:
         con = _db()
+        # OR REPLACE against idx_learning_observation_identity: re-recording the
+        # same completed trade corrects it in place instead of adding a second
+        # vote for the same outcome.
         con.execute("""
-            INSERT INTO learning_observations(
+            INSERT OR REPLACE INTO learning_observations(
                 created_at,market,symbol,strategy,signal_time,score,regime,
                 htf,footprint,strategy_score,entry_quality,relative_strength,
-                safety_score,entry,exit_price,result_r,outcome,holding_minutes,source
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                safety_score,entry,exit_price,result_r,outcome,holding_minutes,source,
+                engine_version
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now().isoformat(timespec="seconds"),
             market,
@@ -5623,7 +5645,8 @@ def _record_learning_trade(market, row, source="forward"):
             float(row.get("result_r", row.get("R", np.nan))),
             str(row.get("outcome", row.get("Outcome", ""))),
             float(row.get("holding_minutes", np.nan)),
-            source
+            source,
+            ENGINE_VERSION
         ))
         con.commit()
         maybe_backup_db()
@@ -5636,15 +5659,44 @@ def _record_learning_trade(market, row, source="forward"):
         except Exception:
             pass
 
-def learning_snapshot(market="INDIA"):
+def learning_snapshot(market="INDIA", source=None, engine_version="current",
+                     include_legacy=False):
+    """Completed observations available as evidence. Filtered by default.
+
+    This is the single read path for every fit, edge table and coach report, so
+    the filtering lives here rather than in six callers that could each forget.
+
+    PR#47 fixed a look-ahead bug: weekly/monthly features were reading future
+    period closes. Every row recorded before ENGINE_VERSION advanced to
+    FINAL-3_ASOF_PIT is therefore evidence about an engine that could see the
+    future, and pooling it with clean rows produces a confident number measuring
+    nothing. Those rows are kept and marked, never deleted, and excluded here.
+
+      engine_version="current"  - only rows from the running engine (default)
+      engine_version=None       - every version, legacy included
+      engine_version="X"        - that version only
+      source="backtest"/"forward" - in-sample replay vs the reality check;
+                                    pooled only when the caller says so
+    """
     ensure_learning_tables()
+    where, params = ["market=?"], [market]
+    if engine_version == "current":
+        where.append("engine_version=?")
+        params.append(ENGINE_VERSION)
+    elif engine_version is not None:
+        where.append("engine_version=?")
+        params.append(str(engine_version))
+    if not include_legacy and engine_version is None:
+        where.append("COALESCE(engine_version,?) <> ?")
+        params.extend([LEGACY_ENGINE_VERSION, LEGACY_ENGINE_VERSION])
+    if source is not None:
+        where.append("source=?")
+        params.append(str(source))
     con = _db()
     try:
-        q = pd.read_sql_query("""
-            SELECT * FROM learning_observations
-            WHERE market=?
-            ORDER BY id DESC
-        """, con, params=(market,))
+        q = pd.read_sql_query(
+            f"SELECT * FROM learning_observations WHERE {' AND '.join(where)} ORDER BY id DESC",
+            con, params=tuple(params))
     finally:
         con.close()
     # learned_score/holding_bars are legacy columns added via ALTER TABLE
@@ -5660,6 +5712,55 @@ def learning_snapshot(market="INDIA"):
         if _col in q.columns:
             q[_col] = pd.to_numeric(q[_col], errors="coerce")
     return q
+
+
+def learning_evidence_counts(market="INDIA"):
+    """How many usable observations exist, per strategy and per source.
+
+    The honest denominator behind every learned number in the app. "40 usable
+    trades or 4" is the difference between a weight and a coin flip, and until
+    now nothing reported it: adaptive_component_weights() prints a Samples
+    column, but it is the size of the whole strategy group rather than of the
+    split the weight was computed from.
+
+    Legacy (pre-PR#47) rows are counted separately so they are visibly present
+    and visibly excluded, rather than appearing to have vanished.
+    """
+    ensure_learning_tables()
+    con = _db()
+    try:
+        rows = con.execute(
+            """SELECT COALESCE(engine_version,?) AS ver, COALESCE(strategy,'') AS strat,
+                      COALESCE(source,'') AS src, COUNT(*) AS n
+               FROM learning_observations WHERE market=?
+               GROUP BY ver, strat, src""",
+            (LEGACY_ENGINE_VERSION, market)).fetchall()
+    finally:
+        con.close()
+
+    per_strategy, legacy_total, clean_total = {}, 0, 0
+    for ver, strat, src, n in rows:
+        n = int(n)
+        if ver != ENGINE_VERSION:
+            legacy_total += n
+            continue
+        clean_total += n
+        bucket = per_strategy.setdefault(strat, {"backtest": 0, "forward": 0, "total": 0})
+        if src in bucket:
+            bucket[src] += n
+        bucket["total"] += n
+
+    return {
+        "market": market,
+        "engine_version": ENGINE_VERSION,
+        "legacy_version": LEGACY_ENGINE_VERSION,
+        "usable_total": clean_total,
+        "excluded_pre_pit": legacy_total,
+        "per_strategy": per_strategy,
+        "duplicate_suppression_active": _LEARNING_INDEX_WARNING is None,
+        "warning": _LEARNING_INDEX_WARNING,
+        "last_write": _LAST_LEARNING_WRITE,
+    }
 
 def adaptive_component_weights(market="INDIA", strategy=None):
     """
@@ -5868,29 +5969,15 @@ def ensure_engine_tables():
                 UNIQUE(market,symbol,strategy,signal_dt)
             )
         """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS learning_observations(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                market TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                strategy TEXT NOT NULL,
-                signal_dt TEXT NOT NULL,
-                score REAL,
-                learned_score REAL,
-                result_r REAL,
-                outcome TEXT,
-                holding_bars INTEGER,
-                regime TEXT,
-                htf REAL,
-                footprint REAL,
-                strategy_score REAL,
-                entry_quality REAL,
-                relative_strength REAL,
-                safety_score REAL,
-                source TEXT
-            )
-        """)
+        # learning_observations is owned by ensure_learning_tables(), which runs
+        # first at import. A second CREATE TABLE IF NOT EXISTS used to sit here
+        # declaring a DIFFERENT shape - signal_dt instead of signal_time, and no
+        # entry/exit_price/holding_minutes. Whichever ran first on a fresh
+        # database won, and if this one had, every learning write would have
+        # raised on the missing column and been swallowed by the bare `except
+        # Exception: continue` in _learn_from_backtest - a store that silently
+        # learned nothing. Nothing reads signal_dt from this table, so the
+        # divergent copy is gone rather than reconciled.
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_learning_market_strategy
             ON learning_observations(market,strategy)
@@ -7456,28 +7543,40 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
 def _learn_from_backtest(bt):
     """Persist completed backtest observations for long-term learning."""
     if bt is None or bt.empty:return 0
-    ensure_learning_tables();n=0;con=_db()
+    ensure_learning_tables();n=0;added=0;con=_db()
     try:
+        before_rows = int(con.execute("SELECT COUNT(*) FROM learning_observations").fetchone()[0])
         for _,r in bt.iterrows():
             try:
-                before=con.total_changes
-                con.execute("""INSERT INTO learning_observations(
+                con.execute("""INSERT OR REPLACE INTO learning_observations(
                     created_at,market,symbol,strategy,signal_time,score,regime,htf,footprint,
                     strategy_score,entry_quality,relative_strength,safety_score,entry,exit_price,
-                    result_r,outcome,holding_minutes,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                    result_r,outcome,holding_minutes,source,engine_version)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
                     datetime.now().isoformat(timespec='seconds'),'INDIA',str(r.get('Ticker','')),str(r.get('Strategy','')),
                     str(r.get('Date','')),float(r.get('Score',np.nan)),str(r.get('Regime','')),float(r.get('HTF',np.nan)),
                     float(r.get('Footprint',np.nan)),float(r.get('Strategy Score',np.nan)),float(r.get('Entry Quality',np.nan)),
                     float(r.get('Relative Strength',np.nan)),float(r.get('Safety',np.nan)),float(r.get('Entry',np.nan)),
                     float(r.get('Exit',np.nan)),float(r.get('R',np.nan)),str(r.get('Outcome','')),
-                    float(r.get('Holding Bars',0))*390.0,'backtest'))
-                n += 1 if con.total_changes>before else 0
+                    float(r.get('Holding Bars',0))*390.0,'backtest',ENGINE_VERSION))
+                n += 1
             except Exception:continue
         con.commit()
+        # Rows ATTEMPTED vs rows the table actually gained. Re-running the same
+        # backtest now writes the same keys again and the count does not move,
+        # which is the point: the difference is duplicates suppressed, not work
+        # lost. Recorded rather than hidden so an operator can tell a harmless
+        # rerun apart from a write that failed.
+        after_rows = int(con.execute("SELECT COUNT(*) FROM learning_observations").fetchone()[0])
+        added = after_rows - before_rows
     finally:con.close()
-    if n:
+    global _LAST_LEARNING_WRITE
+    _LAST_LEARNING_WRITE = {"attempted": int(n), "added": int(added),
+                            "duplicates_suppressed": int(n - added),
+                            "engine_version": ENGINE_VERSION}
+    if added:
         maybe_backup_db()
-    return n
+    return added
 
 def adaptive_edge_table(market="INDIA"):
     q = learning_snapshot(market)

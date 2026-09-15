@@ -17,6 +17,12 @@ from app.services.serialization import clean_value, frame_to_records
 
 
 def snapshot(market: str = "INDIA", limit: int = 500) -> dict[str, Any]:
+    """Usable observations only — see core.learning_snapshot for what is excluded.
+
+    `evidence` travels with the rows on purpose. A table of 40 observations and
+    a table of 4 look identical in a UI that only renders rows, and the whole
+    point of this layer is that its numbers are worth exactly their sample size.
+    """
     df = core.learning_snapshot(market)
     total = 0 if df is None else len(df)
     return {
@@ -24,7 +30,27 @@ def snapshot(market: str = "INDIA", limit: int = 500) -> dict[str, Any]:
         "total": total,
         "rows": frame_to_records(df, limit=limit),
         "columns": [str(c) for c in (df.columns if df is not None else [])],
+        "evidence": evidence(market),
     }
+
+
+def evidence(market: str = "INDIA") -> dict[str, Any]:
+    """Per-strategy usable sample sizes, and what was excluded and why."""
+    counts = core.learning_evidence_counts(market)
+    per_strategy = counts.get("per_strategy") or {}
+    if counts.get("usable_total", 0) == 0:
+        note = (
+            f"No observations from the current engine ({counts['engine_version']}). "
+            f"{counts['excluded_pre_pit']:,} row(s) predate the PR#47 look-ahead fix and are "
+            "excluded as evidence about an engine that could read future prices. "
+            "Re-run the backtest to rebuild the record on corrected features."
+        )
+    else:
+        note = (
+            f"{counts['usable_total']:,} usable observation(s) from {counts['engine_version']}; "
+            f"{counts['excluded_pre_pit']:,} pre-fix row(s) retained but excluded."
+        )
+    return {**counts, "per_strategy": per_strategy, "note": note}
 
 
 def edge_table(market: str = "INDIA") -> dict[str, Any]:
