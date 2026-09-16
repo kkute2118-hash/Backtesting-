@@ -221,19 +221,33 @@ def test_s5_never_qualifies_on_all_nan_features():
     assert not core.strategy_signal(empty, 5).any()
 
 
-def test_s5_is_implemented_but_not_selected_by_default():
-    """Checklist item 5: backtest before any forward-test auto-tracking."""
+def test_s5_is_live_but_still_unscored():
+    """S5 went live once its evidence run existed. It is in the default scan and
+    forward-tracked, and it still has no quality component — those were always
+    separate decisions."""
     assert 5 in core.IMPLEMENTED_STRATEGIES
-    assert 5 not in core.DEFAULT_STRATEGIES
+    assert 5 in core.DEFAULT_STRATEGIES
+    assert 5 in core.STRATEGIES_WITHOUT_QUALITY_COMPONENT
+    assert "S5_POCKETPIVOT" in core.FORWARD_TRACKED_STRATEGIES
 
 
-def test_an_s5_row_can_never_become_a_forward_test(frames, seeded_db):
-    """add_forward_candidates() whitelists labels; S5_POCKETPIVOT is not one."""
+def test_an_s5_row_is_forward_tracked_without_a_target(frames, seeded_db):
+    """S5 trails until the stop breaks, so it has no target. A missing one is a
+    fact about the strategy, not a malformed row — but only for a strategy whose
+    exit is actually a trailing rule."""
+    assert "S5_POCKETPIVOT" in core.TRAILING_EXIT_STRATEGIES
     row = pd.DataFrame([{
-        "Ticker": "TRENDUP", "Strategy": "S5_POCKETPIVOT", "Score": 99.0,
-        "Entry": 100.0, "SL 7%": 93.0, "Target 3R": 121.0, "Regime": "BULL",
+        "Ticker": "TRENDUP", "Strategy": "S5_POCKETPIVOT", "Score": 55.0,
+        "Entry": 100.0, "SL 7%": 96.0, "Target 3R": None, "Regime": "BULL",
     }])
-    assert core.add_forward_candidates(row, signal_date="2026-01-02") == 0
+    assert core.add_forward_candidates(row, signal_date="2026-01-02") == 1
+
+    # A fixed-target strategy with no target is still a bad row.
+    bad = pd.DataFrame([{
+        "Ticker": "CHOPPY", "Strategy": "S1", "Score": 90.0,
+        "Entry": 100.0, "SL 7%": 93.0, "Target 3R": None, "Regime": "BULL",
+    }])
+    assert core.add_forward_candidates(bad, signal_date="2026-01-02") == 0
 
 
 def test_position_sizing_is_the_source_stated_concentrated_book():
@@ -258,7 +272,8 @@ def test_backtest_runs_and_reports_the_checklist_metrics(frames):
     """
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    result = core.run_s5_pocket_pivot_backtest(frames, start, end)
+    result = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)
 
     summary = result["summary"]
     for key in ("trades", "win_rate_pct", "avg_r", "signals_per_week", "symbols_scanned"):
@@ -327,7 +342,8 @@ def test_every_captured_trade_carries_its_signal_bar_readings(frames):
     signal, not reconstructed afterwards."""
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    trades = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)["trades"]
     if trades.empty:
         pytest.skip("no S5 trades on these fixtures")
 
@@ -341,7 +357,8 @@ def test_every_captured_trade_carries_its_signal_bar_readings(frames):
 def test_winner_profile_measures_rather_than_asserts(frames):
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    profile = core.run_s5_pocket_pivot_backtest(frames, start, end)["winner_profile"]
+    profile = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)["winner_profile"]
     if not profile.get("ok"):
         pytest.skip(profile.get("reason", "not enough trades"))
 
@@ -360,7 +377,8 @@ def test_a_profile_over_noise_reports_no_edge_rather_than_inventing_one(frames):
     them, it would claim one on anything."""
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    profile = core.run_s5_pocket_pivot_backtest(frames, start, end)["winner_profile"]
+    profile = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)["winner_profile"]
     if not profile.get("ok"):
         pytest.skip(profile.get("reason", "not enough trades"))
     assert not profile["separating_readings"], (
@@ -372,7 +390,8 @@ def test_a_profile_over_noise_reports_no_edge_rather_than_inventing_one(frames):
 def test_a_stored_capture_can_be_re_analysed_without_re_simulating(frames, seeded_db):
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    result = core.run_s5_pocket_pivot_backtest(frames, start, end)
+    result = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)
     if result["trades"].empty:
         pytest.skip("no S5 trades on these fixtures")
 
@@ -413,7 +432,8 @@ def test_slot_simulation_respects_the_slot_limit(frames):
     all firing on one Tuesday is not a rule you can trade."""
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    trades = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)["trades"]
     if trades.empty:
         pytest.skip("no S5 trades on these fixtures")
 
@@ -429,7 +449,8 @@ def test_slot_simulation_respects_the_slot_limit(frames):
 def test_slot_simulation_never_doubles_up_on_one_name(frames):
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    trades = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)["trades"]
     if trades.empty:
         pytest.skip("no S5 trades on these fixtures")
     t = trades.copy()
@@ -444,7 +465,8 @@ def test_filter_sweep_judges_out_of_sample_not_in_sample(frames):
     good. The sweep has to report both windows for that to be visible."""
     start = min(df.index[300] for df in frames.values())
     end = max(df.index[-1] for df in frames.values())
-    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    trades = core.run_s5_pocket_pivot_backtest(
+        frames, start, end, apply_evidence_filter=False)["trades"]
     if trades.empty or len(trades) < 400:
         pytest.skip("not enough fixture trades to split")
 
@@ -457,3 +479,60 @@ def test_filter_sweep_judges_out_of_sample_not_in_sample(frames):
     # "Survived" must mean helped in BOTH windows, never just the first.
     assert (sweep.loc[sweep.Survived, "Train Lift PF"] > 0).all()
     assert (sweep.loc[sweep.Survived, "Test Lift PF"] > 0).all()
+
+
+# --------------------------------------------------------------------------- #
+# Live wiring: the evidence filter, and S5's own trade geometry
+# --------------------------------------------------------------------------- #
+def test_the_evidence_filter_is_on_and_actually_removes_signals(frames):
+    """Unfiltered S5 loses money on three slots, so the live rule is filtered.
+    If this ever silently becomes a no-op, the scan goes back to offering 109
+    signals a week that it cannot trade."""
+    assert core.S5_APPLY_EVIDENCE_FILTER is True
+    assert core.S5_MIN_ATR_PCT == 4.0
+    assert core.S5_MIN_GAP_PCT == 0.36
+
+    f = core.features_fast("S5_FILT", frames["TRENDUP"]).replace([np.inf, -np.inf], np.nan)
+    raw = core.strategy5_signal(f, apply_filter=False)
+    live = core.strategy_signal(f, 5)
+    assert int(live.sum()) <= int(raw.sum())
+    assert not (live & ~raw).any(), "the filter added a signal instead of removing one"
+
+
+def test_the_filter_thresholds_match_the_columns_they_were_measured_on(frames):
+    """The thresholds were fitted on compute_signal_fingerprint()'s atr_pct and
+    gap_pct. If the signal-side definitions drift from those, the filter stops
+    meaning what the study measured."""
+    df = frames["TRENDUP"]
+    f = core.features_fast("S5_DEF", df).replace([np.inf, -np.inf], np.nan)
+    s5 = core.strategy5_pocket_pivot_features(f)
+    i = len(f) - 1
+    fp = core._s5_signal_fingerprint(df, f, s5, i, float(f.close.iloc[i]),
+                                     float(f.close.iloc[i]) * 0.95, "BULL", 80, [])
+    # The fingerprint rounds to 3 decimals; anything beyond that is a real
+    # difference in definition, which is what this test is for.
+    for key, col in (("atr_pct", "s5_atr_pct"), ("gap_pct", "s5_gap_pct")):
+        if fp.get(key) is not None and pd.notna(s5[col].iloc[i]):
+            assert abs(float(fp[key]) - float(s5[col].iloc[i])) < 1e-3, key
+
+
+def test_s5_carries_its_own_stop_and_no_target(frames, seeded_db):
+    """S5 trails on the 10/50 EMA and has no target. Handing it the shared 7%
+    stop and 3R target would record a different system's outcome."""
+    f = core.features_fast("S5_GEOM", frames["TRENDUP"]).replace([np.inf, -np.inf], np.nan)
+    idx = np.flatnonzero(core.strategy_signal(f, 5).to_numpy())
+    if not len(idx) or idx[-1] < 300:
+        pytest.skip("no filtered S5 signal on this fixture")
+
+    truncated = {"TRENDUP": frames["TRENDUP"].iloc[: idx[-1] + 1]}
+    res = core.scan_dataset(truncated, [5], "BULL", stats={})
+    if res.empty:
+        pytest.skip("scan produced no row")
+    row = res.iloc[0]
+    assert row["Strategy"] == "S5_POCKETPIVOT"
+    assert row["Target 3R"] is None
+    assert row["R:R"] == "trailing (10/50 EMA)"
+    assert float(row["SL 7%"]) < float(row["Entry"])
+    # Specifically NOT the shared 7% stop.
+    assert abs(float(row["SL 7%"]) - float(row["Entry"]) * 0.93) > 1e-6
+    assert pd.isna(row["Strategy Score"]), "S5 must stay unscored"

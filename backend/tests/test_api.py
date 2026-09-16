@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+from app.engine import core
+
 
 def _wait(client, job_id: str, timeout: float = 120.0) -> dict:
     deadline = time.time() + timeout
@@ -130,7 +132,7 @@ def test_stock_detail_and_chart(client):
 
 def test_condition_matrix_explains_the_verdict(client):
     body = client.get("/api/v1/stocks/TRENDUP/conditions").json()
-    assert len(body["strategies"]) == 4
+    assert len(body["strategies"]) == len(core.DEFAULT_STRATEGIES)
     for entry in body["strategies"]:
         assert entry["total"] == len(entry["conditions"])
         assert entry["passed"] == sum(1 for c in entry["conditions"] if c["passed"])

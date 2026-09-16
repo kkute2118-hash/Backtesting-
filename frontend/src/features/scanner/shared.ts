@@ -16,7 +16,7 @@ export const STRATEGY_OPTIONS = [
   { value: 2, label: "S2 · Tight pullback", hint: "Tight pullback in an uptrend" },
   { value: 3, label: "S3 · EMA50 pullback", hint: "Liquid pullback to EMA50" },
   { value: 4, label: "S4 · SEPA", hint: "Minervini-style stage analysis" },
-  { value: 5, label: "S5 · Pocket pivot", hint: "O'Neil-disciple pocket pivot — not backtested yet" },
+  { value: 5, label: "S5 · Pocket pivot", hint: "O'Neil pocket pivot, volatility-filtered — no quality score" },
 ];
 
 export interface ScanFormState {
@@ -29,7 +29,7 @@ export interface ScanFormState {
 
 export const DEFAULT_SCAN: ScanFormState = {
   universes: ["Nifty 500"],
-  strategies: [1, 2, 3, 4],
+  strategies: [1, 2, 3, 4, 5],
   min_score: 85,
   use_live_prices: false,
   limit: null,

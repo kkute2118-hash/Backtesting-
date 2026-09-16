@@ -498,12 +498,40 @@ they are not interchangeable:
 | `GTF_APPROXIMATION` | the source showed this visually; the number is our proxy. |
 | `NEEDS_TUNING` | no source backing at all. A placeholder. |
 
-S5 is **not in `DEFAULT_STRATEGIES`** and its rows (`S5_POCKETPIVOT`) are not
-accepted by `add_forward_candidates()`, so no S5 signal can become an
-auto-tracked forward test. That is deliberate: it is backtested first, through
-its own harness, `run_s5_pocket_pivot_backtest()`, which reports win rate,
-average R and signals per week. `s5_tightness_diagnostic()` measures what the
-untuned base-tightness threshold is actually costing the scan.
+### S5 is live, and has no quality score
+
+S5 is in `DEFAULT_STRATEGIES` and is forward-tracked. It went live only after
+its evidence run; see `research/S5_POCKETPIVOT_FINDINGS.md` and
+`research/S5_SELECTION_STUDY.md`.
+
+Two things about it differ from S1–S4 on purpose.
+
+**No marking.** S1–S4 each contribute a hand-written 30-point
+`strategy_quality_score()`. S5 contributes nothing (`STRATEGIES_WITHOUT_QUALITY_
+COMPONENT`), because the evidence run found that *nothing measurable at entry
+separates ordinary S5 winners from losers* — the largest gap across 42 readings
+was 0.15 standard deviations. A score built on those readings would rank noise,
+and 84 candidate ranking rules were tested and all failed a proper
+multiple-comparison null. `final_setup_score()` rescales the four components it
+can measure onto 100 and reports Strategy as `NaN`, so "not measured" stays
+distinguishable from "measured badly". S5 is also exempt from the forward-test
+score gate, because gating on a score it does not have would gate on nothing.
+
+**Selection is a filter, not a rank.** What survived the null is a
+volatility-and-gap filter, `S5_MIN_ATR_PCT = 4.0` and `S5_MIN_GAP_PCT = 0.36`,
+tagged `EVIDENCE_DERIVED`. It keeps 9.5% of raw signals — roughly 10 a week
+instead of 109, which is tradeable against three concurrent positions. Profit
+factor rises in all five years of the record with it on, including turning both
+losing years positive. Re-fitting the ATR level quarterly picks 4.00 anyway.
+`S5_APPLY_EVIDENCE_FILTER = False` restores the raw source rule set, which is
+what a fresh evidence capture needs.
+
+**Its trade geometry is its own.** S5 carries no target — it trails on the
+10/50 EMA machine until the stop breaks — so its scan rows report
+`Target 3R = None`, `R:R = "trailing (10/50 EMA)"`, and a stop taken from the
+10 EMA (or the trigger day's low for undercut entries) rather than the shared
+7%. `refresh_forward_positions()` runs the same state machine the backtest
+does, so a forward test and a backtest of S5 measure the same system.
 
 **Running S5 on its own** — three ways in, all reading local candles, no Dhan
 calls:

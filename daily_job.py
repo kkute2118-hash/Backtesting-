@@ -308,9 +308,15 @@ def step_add(result, min_score, session_date=None):
     if result is None or result.empty:
         log("add", "no qualified setups today; nothing added")
         return 0
-    selected = result[result["Score"] >= min_score].copy()
+    # S5 has no strategy-quality component by design, so its Score is not a
+    # judgement about the setup and gating on it would be gating on nothing.
+    # Its selection already happened: the evidence filter is part of its signal,
+    # so every S5 row that reaches here is one the record says is worth a slot.
+    unscored = {f"S{n}" for n in core.STRATEGIES_WITHOUT_QUALITY_COMPONENT} | {"S5_POCKETPIVOT"}
+    strategy_col = result["Strategy"].astype(str).str.upper()
+    selected = result[(result["Score"] >= min_score) | strategy_col.isin(unscored)].copy()
     if selected.empty:
-        log("add", f"no setup reached the >={min_score} gate; nothing added")
+        log("add", f"no setup reached the >={min_score} gate (S5 exempt); nothing added")
         return 0
     added = core.add_forward_candidates(selected, signal_date=session_date)
     names = ", ".join(f"{r.Ticker}/{r.Strategy}" for r in selected.itertuples())

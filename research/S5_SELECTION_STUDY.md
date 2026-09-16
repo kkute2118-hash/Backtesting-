@@ -166,7 +166,34 @@ volatility-harvesting artifact would look like:
 4. **Do not build a ranking.** Filtering works; ordering the survivors does not.
    84 ranking rules were searched and the best came out below the median of pure
    search luck.
-5. Even at its best this is ×1.22 over 20 months on 3 concentrated positions,
-   from 923 of 24,478 signals (3.8%). That is not a finished strategy; it is the
-   first version that is not losing, and the first S5 result that survives a
-   null.
+5. Even at its best this is ×1.22 over 20 months on 3 concentrated positions.
+   The filter keeps **2,321 of 24,478 signals (9.5%)** over the whole record —
+   923 of the 10,769 out-of-sample ones. That is not a finished strategy; it is
+   the first version that is not losing, and the first S5 result that survives
+   a null.
+
+## Walk-forward: the threshold picks itself
+
+Re-fitting the ATR level every quarter on the prior two years, choosing the
+level that maximised training profit factor (grid 2.0–6.5, minimum 8% of
+signals kept):
+
+| | |
+| --- | --- |
+| Chosen level | median **4.00**, sd 0.47, range 2.25–4.25 |
+| Quarters choosing exactly 4.00 | 9 of 16 |
+| Walk-forward beat fixed 4.0 | **2 of 16** |
+| Filter beat no filter | 11 of 16 |
+
+| Over 16 live quarters | N | Win % | Avg ret | PF |
+| --- | --- | --- | --- | --- |
+| No filter | 22,881 | 33.9 | +2.47% | 2.106 |
+| Fixed `atr_pct >= 4.0` | 2,135 | 40.4 | +4.79% | **2.794** |
+| Walk-forward level | 2,429 | 41.0 | +4.48% | 2.708 |
+
+So 4.0 is not a number picked from the data once — it is what the data picks
+again and again, and re-fitting it quarterly makes things slightly *worse*. The
+fixed level is kept because it is simpler and marginally better.
+
+It beats no filter in 11 of 16 quarters, not 16. This is an edge, not a
+certainty.

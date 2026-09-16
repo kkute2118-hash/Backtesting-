@@ -4630,6 +4630,34 @@ S5_MAX_CONCURRENT_POSITIONS = 3      # SOURCE_STATED (implied by the 30% floor)
 # circuit band from the Dhan feed, so what is implemented below is a proxy, and
 # an untuned one. It is OFF by default: an untuned exit rule that fires inside a
 # backtest would change the result we are trying to measure.
+# ---- Evidence filter: which signals are worth a slot (EVIDENCE_DERIVED) ----
+# A fourth tag, and it means something the other three do not: these two numbers
+# came from OUR trade record, not from the source and not from a guess.
+#
+# Provenance, so a later reader can re-judge them rather than trust them:
+# 485 NSE symbols, 2022-06-01 -> 2026-09-15, 24,478 signals, ungated. Unfiltered
+# S5 on three slots returns x0.849 over 2025-2026 - it loses. 264 thresholds
+# were swept on 2022-2024 and judged on 2025-2026; a shuffled-outcome null (60
+# shuffles, outcomes permuted within each window so 2023 stays the good year)
+# never reached the +0.438 profit-factor lift that atr_pct >= 4.0 produced,
+# p < 0.017. Profit factor then rises in ALL FIVE years with both filters on,
+# including turning 2025 (0.928 -> 1.224) and 2026 (0.915 -> 2.305) profitable.
+# Win rate 34.3% -> 41.8%, so it moves direction and is not just fatter tails.
+#
+# 4.0 is not hand-picked: re-fitting the level every quarter on the prior two
+# years chooses 4.00 in 9 of 16 quarters (median 4.0, sd 0.47) and beats the
+# fixed level in only 2 of 16, so the fixed number is kept as the simpler and
+# slightly better rule. See research/S5_SELECTION_STUDY.md.
+#
+# This is an edge, not a certainty: the filter beats no filter in 11 of 16
+# quarters, not 16. Re-run the study before trusting it in a new regime.
+S5_MIN_ATR_PCT = 4.0      # EVIDENCE_DERIVED — ATR(14) as % of close
+S5_MIN_GAP_PCT = 0.36     # EVIDENCE_DERIVED — open vs previous close, %
+S5_APPLY_EVIDENCE_FILTER = True
+# ^ Turning this off restores the raw source rule set, which is what the
+# research capture wants. It is ON for the live scan because the raw rule set
+# loses money on the only book we can actually run.
+
 S5_INTRADAY_INITIAL_STOP = True
 # ^ GTF_APPROXIMATION. The initial tight stop (module 5's entry_sl_override -
 # the trigger day's low, 1-3% away) is a resting STOP ORDER, so it fills
@@ -4766,15 +4794,36 @@ def strategy5_pocket_pivot_features(x):
     out["s5_undercut_rally"] = out.s5_undercut_rally_raw & ~out.s5_pocket_pivot
 
     out["s5_trigger_day"] = out.s5_pocket_pivot | out.s5_undercut_rally_raw
+
+    # --- Evidence filter (EVIDENCE_DERIVED — see S5_MIN_ATR_PCT) -------------
+    # Defined to match compute_signal_fingerprint() exactly, because these two
+    # thresholds were measured on the columns that function records. If the two
+    # definitions drift, the filter stops meaning what the study measured.
+    prev_close = x.close.shift(1)
+    out["s5_atr_pct"] = x.atr14 / x.close.replace(0, np.nan) * 100
+    out["s5_gap_pct"] = (x.open - prev_close) / prev_close.replace(0, np.nan) * 100
+    out["s5_evidence_filter"] = (
+        (out.s5_atr_pct >= S5_MIN_ATR_PCT) & (out.s5_gap_pct >= S5_MIN_GAP_PCT)
+    ).fillna(False)
     return out
 
 
-def _s5_enabled_variants(s5):
-    """The variant mask actually traded, honouring the two "skip this" flags."""
+def _s5_enabled_variants(s5, apply_filter=None):
+    """The variant mask actually traded.
+
+    Honours the two "skip this" flags from the source, and then the evidence
+    filter, which is a separate kind of thing: the variants are what the source
+    calls a signal, the filter is what our own record says is worth a slot.
+    """
     variant = s5.s5_base_pivot | s5.s5_continuation_pivot | s5.s5_undercut_rally
     if S5_ENABLE_ROUNDABOUT_PIVOT:
         variant = variant | s5.s5_roundabout_pivot
-    return variant.fillna(False)
+    variant = variant.fillna(False)
+    if apply_filter is None:
+        apply_filter = S5_APPLY_EVIDENCE_FILTER
+    if apply_filter and "s5_evidence_filter" in s5.columns:
+        variant = variant & s5.s5_evidence_filter
+    return variant
 
 
 def strategy5_entry_variant(x):
@@ -4796,7 +4845,7 @@ def strategy5_entry_variant(x):
     return label
 
 
-def strategy5_signal(x):
+def strategy5_signal(x, apply_filter=None):
     """Live S5 entry trigger: an enabled pocket-pivot variant fired today.
 
     Unlike S4 there is no separate coarse/precise split — the pocket pivot IS
@@ -4809,7 +4858,8 @@ def strategy5_signal(x):
     """
     if x.empty:
         return pd.Series(False, index=x.index)
-    return _s5_enabled_variants(strategy5_pocket_pivot_features(x)).astype(bool)
+    return _s5_enabled_variants(strategy5_pocket_pivot_features(x),
+                                apply_filter=apply_filter).astype(bool)
 
 
 # ---- Stop-loss state machine (module 5, SOURCE_STATED) ----------------------
@@ -5032,7 +5082,8 @@ def _s5_signal_fingerprint(df, f, s5, i, entry, stop, regime, safe, safety_flags
 
 
 def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
-                                 min_bars=260, progress_cb=None):
+                                 min_bars=260, progress_cb=None,
+                                 apply_evidence_filter=None):
     """Standalone walk-forward replay of S5, on its own stop machine.
 
     Deliberately NOT routed through _professional_bt(): that harness exits every
@@ -5045,10 +5096,13 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
     PocketPivotSLStateMachine alone (plus `max_hold_bars` as a backstop, which
     is a harness limit, not a rule of the system).
 
-    Results are tagged S5_POCKETPIVOT. Nothing here writes to forward_tests —
-    add_forward_candidates() only accepts S1/S2/S3/S4_SEPA, so an S5 row cannot
-    become an auto-tracked forward test until someone deliberately widens that
-    whitelist. That ordering is intentional: backtest first.
+    Results are tagged S5_POCKETPIVOT.
+
+    `apply_evidence_filter` defaults to the live setting, so by default this
+    measures exactly what the scanner trades. Pass False to capture the raw
+    source rule set instead, which is what the evidence run wants: the filter
+    was derived from an unfiltered capture and re-deriving it from a filtered
+    one would be circular.
     """
     start = pd.Timestamp(start)
     end = pd.Timestamp(end)
@@ -5075,7 +5129,7 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
             diag["scanned"] += 1
 
             s5 = strategy5_pocket_pivot_features(f)
-            sig = _s5_enabled_variants(s5).to_numpy()
+            sig = _s5_enabled_variants(s5, apply_filter=apply_evidence_filter).to_numpy()
             labels = strategy5_entry_variant(f)
             # Same O(1) precompute the other replays use, so the per-signal
             # fingerprint does not re-derive safety from scratch each time.
@@ -5655,6 +5709,8 @@ def s5_tightness_diagnostic(data, min_bars=260):
             continue
         if s5.empty:
             continue
+        # Deliberately measured on the raw rule set: this diagnostic exists to
+        # judge the tightness threshold, not the evidence filter layered above it.
         pivots += int(s5.s5_pocket_pivot.sum())
         loc = s5.s5_pocket_pivot & s5.s5_location_ok
         located += int(loc.sum())
@@ -5953,11 +6009,18 @@ def strategy_condition_matrix(x, s):
         # are implied by it; they are listed because they are the two things
         # worth seeing on a name that is close but not there yet.
         s5 = strategy5_pocket_pivot_features(x)
-        return {
+        matrix = {
             "Trigger day (pocket pivot or undercut-and-rally)": s5.s5_trigger_day,
             "Up-close day": x.close > x.open,
-            "An enabled entry variant qualifies": _s5_enabled_variants(s5),
+            "An enabled entry variant qualifies": _s5_enabled_variants(s5, apply_filter=False),
         }
+        if S5_APPLY_EVIDENCE_FILTER:
+            # Listed separately from the variant test because it is a different
+            # kind of rule and the radar should name it as its own blocker:
+            # the setup can be perfect and still not be worth one of three slots.
+            matrix[f"ATR >= {S5_MIN_ATR_PCT}% of price"] = s5.s5_atr_pct >= S5_MIN_ATR_PCT
+            matrix[f"Gap up >= {S5_MIN_GAP_PCT}%"] = s5.s5_gap_pct >= S5_MIN_GAP_PCT
+        return matrix
 
     return {}
 
@@ -6612,13 +6675,20 @@ DEFAULT_MIN_SCORE = 71
 LEGACY_MIN_SCORE = 85
 
 # Which strategy numbers strategy_signal() actually implements, and which of
-# them a caller gets when it does not choose. They are not the same list: S5
-# (pocket pivot) is implemented and selectable, but stays out of the default
-# selection until it has its own backtest record - see
-# run_s5_pocket_pivot_backtest(). One tuple each, so the API, the services, the
-# presets and the scheduled job cannot drift apart about what exists.
+# them a caller gets when it does not choose. Two tuples rather than one so the
+# API, the services, the presets and the scheduled job cannot drift apart about
+# what exists; they happen to be equal now that S5 is live, and the split is
+# what let S5 sit implemented-but-off while its evidence run was pending.
 IMPLEMENTED_STRATEGIES = (1, 2, 3, 4, 5)
-DEFAULT_STRATEGIES = (1, 2, 3, 4)
+DEFAULT_STRATEGIES = (1, 2, 3, 4, 5)
+
+# The labels written into forward_tests.strategy that the forward tracker will
+# accept and then keep updating. S5_POCKETPIVOT joined this list only after its
+# evidence run; before that it was scanned and shown but never auto-tracked.
+FORWARD_TRACKED_STRATEGIES = {"S1", "S2", "S3", "S4_SEPA", "S5_POCKETPIVOT"}
+# Strategies whose exit is a trailing rule rather than a fixed target, so a
+# missing target is correct rather than a malformed row.
+TRAILING_EXIT_STRATEGIES = {"S5_POCKETPIVOT"}
 
 SCORE_COMPONENT_WEIGHTS = {
     "Strategy": 33,
@@ -11221,8 +11291,18 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
 
             z = f.iloc[-1]
             entry = float(z.close)
-            stop = entry * .93
-            target = entry + 3 * (entry - stop)
+            if s == 5:
+                # S5 is held on the 10/50 EMA machine until it breaks and has no
+                # profit target at all, so the shared 7% stop / 3R target would
+                # describe a different system. The stop is the one the trade
+                # actually starts with; target stays NaN and every consumer has
+                # to handle that rather than be handed a number that is not real.
+                variant = str(strategy5_entry_variant(f).iloc[-1])
+                stop, _override, _basis = _s5_initial_stop(f, len(f) - 1, len(f) - 1, variant)
+                target = np.nan
+            else:
+                stop = entry * .93
+                target = entry + 3 * (entry - stop)
 
             # Learning-edge lookups stay keyed by "S4" (unchanged): the backtest
             # engine (which populates learning_observations) also labels this
@@ -11256,9 +11336,9 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 "Regime": regime,
                 "Safety": safe_status,
                 "Entry": round(entry, 2),
-                "SL 7%": round(stop, 2),
-                "Target 3R": round(target, 2),
-                "R:R": "1:3",
+                "SL 7%": round(stop, 2) if np.isfinite(stop) else None,
+                "Target 3R": round(target, 2) if np.isfinite(target) else None,
+                "R:R": "1:3" if np.isfinite(target) else "trailing (10/50 EMA)",
                 "RSI": round(float(z.rsi14), 1),
                 "RelVol": round(float(z.relvol), 2),
                 "HTF Score": parts["HTF Demand"],
@@ -11305,8 +11385,10 @@ def persist_scanner_signals(result, min_score, signal_date=None):
                 float(r.get("Historical Edge R", 0)), str(r.get("Learning Confidence", "")),
                 str(r.get("Regime", "")), str(r.get("Safety", "")),
                 float(r.get("Safety Score", 0)), float(r.get("Entry", np.nan)),
-                float(r.get("SL 7%", r.get("SL", np.nan))),
-                float(r.get("Target 3R", r.get("Target", np.nan))),
+                # S5 stores no target: float(None) would raise, and a
+                # fabricated number would claim a target it does not have.
+                float(r.get("SL 7%", r.get("SL", np.nan)) or np.nan),
+                float(r.get("Target 3R", r.get("Target", np.nan)) or np.nan),
                 3.0, float(r.get("RSI", np.nan)), float(r.get("RelVol", np.nan)),
                 float(r.get("HTF Score", r.get("HTF Demand", 0))),
                 float(r.get("Footprint Score", r.get("Footprint", 0))),
@@ -11339,11 +11421,16 @@ def add_forward_candidates(candidates, signal_date=None):
             symbol=str(r.get("Ticker","")).upper().replace(".NS","")
             strategy=str(r.get("Strategy","")).upper()
             score=float(r.get("Score",0))
-            if not symbol or strategy not in {"S1","S2","S3","S4_SEPA"}:
+            if not symbol or strategy not in FORWARD_TRACKED_STRATEGIES:
                 continue
-            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)))
-            target=float(r.get("Target",r.get("Target 3R",np.nan)))
-            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl) or not np.isfinite(target):
+            entry=float(r.get("Entry",np.nan)); sl=float(r.get("SL",r.get("SL 7%",np.nan)) or np.nan)
+            target=float(r.get("Target",r.get("Target 3R",np.nan)) or np.nan)
+            if not np.isfinite(entry) or entry<=0 or not np.isfinite(sl):
+                continue
+            # S5 genuinely has no target - it trails until the stop breaks - so a
+            # missing one is a fact about the strategy, not a bad row. Every
+            # other strategy still needs one.
+            if not np.isfinite(target) and strategy not in TRAILING_EXIT_STRATEGIES:
                 continue
             exists=con.execute(
                 """SELECT id FROM forward_tests
@@ -11377,6 +11464,58 @@ def add_forward_candidates(candidates, signal_date=None):
 
 # ========================= RESEARCH MODULES =========================
 
+def _s5_forward_exit(symbol, d, entry, initial_stop):
+    """Run S5's own stop machine over a live position's bars since entry.
+
+    Returns (status, exit_price, result_r). Mirrors the backtest exactly - the
+    tight initial stop fills intraday, EMA violations are close rules - because
+    a forward test that exits on different rules than the backtest is not
+    measuring the backtested system.
+
+    `d` is the stored daily history from the signal date onward. The EMAs are
+    recomputed from full history rather than from `d` alone: a 50 EMA built from
+    twenty bars is not a 50 EMA.
+    """
+    status, exitp, result_r = "ACTIVE", None, None
+    risk = entry - initial_stop if np.isfinite(initial_stop) else np.nan
+    try:
+        con = _db()
+        try:
+            hist = _read_cache(con, symbol, (pd.Timestamp(d.index[0]) - pd.Timedelta(days=500)).date(),
+                               pd.Timestamp(d.index[-1]).date())
+        finally:
+            con.close()
+        if hist is None or hist.empty:
+            return status, exitp, result_r
+        f = features(hist)
+    except Exception:
+        return status, exitp, result_r
+
+    bars = f[f.index >= pd.Timestamp(d.index[0])]
+    if bars.empty:
+        return status, exitp, result_r
+
+    override = initial_stop if np.isfinite(initial_stop) else None
+    machine = PocketPivotSLStateMachine(bars.index[0], entry_sl_override=override)
+    for i in range(1, len(bars)):
+        bar = bars.iloc[i]
+        level = machine.entry_sl_override
+        if (S5_INTRADAY_INITIAL_STOP and level is not None
+                and float(bar.low) <= float(level)):
+            exitp = min(float(bar.open), float(level))
+            status = "STOP"
+            break
+        action, _detail = machine.update(bar)
+        if action == "EXIT":
+            exitp = float(bar.close)
+            status = "TRAIL_STOP"
+            break
+
+    if status != "ACTIVE" and exitp is not None and np.isfinite(risk) and risk > 0:
+        result_r = (exitp - entry) / risk
+    return status, exitp, result_r
+
+
 def refresh_forward_positions():
     """Update active forward records using only locally stored daily candles."""
     con=_db()
@@ -11398,18 +11537,31 @@ def refresh_forward_positions():
             d=_read_cache(con,s,signal_date,today)
             if d is None or d.empty: continue
 
-            entry=float(r.entry);stop=float(r.sl);target=float(r.target)
+            entry=float(r.entry);stop=float(r.sl)
+            target=float(r.target) if r.target is not None and np.isfinite(float(r.target)) else np.nan
             last_dt=pd.Timestamp(d.index[-1]).date(); close=float(d.close.iloc[-1])
             mfe=max(0.0,(float(d.high.max())/entry-1)*100)
             mae=min(0.0,(float(d.low.min())/entry-1)*100)
             ret=(close/entry-1)*100; held=max(0,len(d)-1)
             status="ACTIVE";exitp=None;result_r=None;closed_at=None
+            trailing = str(r.strategy).upper() in TRAILING_EXIT_STRATEGIES
 
-            for _,bar in d.iterrows():
-                if float(bar.low)<=stop:
-                    status="STOP";exitp=stop;result_r=(exitp-entry)/(entry-stop);closed_at=datetime.now().isoformat(timespec="seconds");break
-                if float(bar.high)>=target:
-                    status="TARGET";exitp=target;result_r=(exitp-entry)/(entry-stop);closed_at=datetime.now().isoformat(timespec="seconds");break
+            if trailing:
+                # S5 has no target and its stop moves: the 10 EMA from entry, the
+                # 50 EMA after an early violation, the 10 EMA permanently after 35
+                # days. Tracking it against the fixed level in forward_tests.sl
+                # would record a different strategy's outcome. The stored sl is
+                # still what result_r divides by - it is the risk the trade was
+                # taken with.
+                status, exitp, result_r = _s5_forward_exit(s, d, entry, stop)
+                if status != "ACTIVE":
+                    closed_at = datetime.now().isoformat(timespec="seconds")
+            else:
+                for _,bar in d.iterrows():
+                    if float(bar.low)<=stop:
+                        status="STOP";exitp=stop;result_r=(exitp-entry)/(entry-stop);closed_at=datetime.now().isoformat(timespec="seconds");break
+                    if float(bar.high)>=target:
+                        status="TARGET";exitp=target;result_r=(exitp-entry)/(entry-stop);closed_at=datetime.now().isoformat(timespec="seconds");break
 
             con.execute("""INSERT OR IGNORE INTO forward_observations(
                 forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
@@ -11434,7 +11586,13 @@ def refresh_forward_positions():
                     "symbol": s, "strategy": str(r.strategy), "signal_time": str(signal_date),
                     "score": float(r.score), "regime": str(r.regime), "entry": entry,
                     "exit_price": exitp, "result_r": result_r,
-                    "outcome": "WIN" if status == "TARGET" else "LOSS" if status == "STOP" else status,
+                    # A trailing exit is a win or a loss by its R, not by which
+                    # level it hit: S5 has no target to "hit", so classifying it
+                    # off the status alone would file every S5 trade as neither.
+                    "outcome": ("WIN" if status == "TARGET"
+                                else "LOSS" if status == "STOP"
+                                else ("WIN" if (result_r or 0) > 0 else "LOSS")
+                                if status == "TRAIL_STOP" else status),
                     "holding_minutes": held * 24 * 60,  # daily-bar strategy; bars converted to minutes for schema consistency
                 })
             else:
