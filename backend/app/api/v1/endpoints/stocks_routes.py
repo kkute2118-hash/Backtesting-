@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from app.engine import core
 from app.schemas.common import Timeframe
 from app.services import stocks
 
@@ -34,7 +35,9 @@ def indicators(symbol: str) -> dict[str, Any]:
 
 
 @router.get("/stocks/{symbol}/conditions")
-def conditions(symbol: str, strategies: list[int] = Query(default=[1, 2, 3, 4])) -> dict[str, Any]:
+def conditions(symbol: str,
+               strategies: list[int] = Query(default=list(core.DEFAULT_STRATEGIES))
+               ) -> dict[str, Any]:
     """Rule-by-rule pass/fail — the honest reason a stock did or did not qualify."""
     return stocks.condition_matrix(symbol, strategies)
 

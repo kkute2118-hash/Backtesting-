@@ -1,7 +1,7 @@
 """Saved scanner configurations.
 
 A preset stores only options the scanner really accepts: universes, which of
-S1-S4 to evaluate, the score gate, the live-intraday overlay and a result cap.
+S1-S5 to evaluate, the score gate, the live-intraday overlay and a result cap.
 Presets that would imply screens the engine does not implement are deliberately
 not offered - a "Volume Surge" preset would have to invent a rule the scanner
 never runs.
@@ -31,9 +31,11 @@ def _validate(config: dict[str, Any]) -> dict[str, Any]:
     if bad:
         raise ApiError(f"Unknown universe: {', '.join(bad)}")
 
-    strategies = sorted({int(s) for s in (config.get("strategies") or []) if int(s) in (1, 2, 3, 4)})
+    strategies = sorted({int(s) for s in (config.get("strategies") or [])
+                         if int(s) in core.IMPLEMENTED_STRATEGIES})
     if not strategies:
-        raise ApiError("A preset needs at least one of strategies 1-4.")
+        known = core.IMPLEMENTED_STRATEGIES
+        raise ApiError(f"A preset needs at least one of strategies {min(known)}-{max(known)}.")
 
     min_score = float(config.get("min_score", core.DEFAULT_MIN_SCORE))
     if not 0 <= min_score <= 100:

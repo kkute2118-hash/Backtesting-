@@ -36,7 +36,7 @@ Configuration comes from environment variables (see core._secret):
                SCAN_UNIVERSE     default "Nifty 500"; any name in
                                  core.UNIVERSE_CHOICES, including
                                  "NSE All Cash (~2000)" for the full list
-               SCAN_STRATEGIES   default "1,2,3,4"
+               SCAN_STRATEGIES   default "1,2,3,4" (S5 is opt-in)
                SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
                                  gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
@@ -117,13 +117,15 @@ def _clear_candles():
 
 
 def _selected_strategies():
-    raw = os.environ.get("SCAN_STRATEGIES", "1,2,3,4")
+    default = ",".join(str(s) for s in core.DEFAULT_STRATEGIES)
+    raw = os.environ.get("SCAN_STRATEGIES", default)
+    known = {str(s) for s in core.IMPLEMENTED_STRATEGIES}
     out = []
     for part in str(raw).split(","):
         part = part.strip()
-        if part in {"1", "2", "3", "4"} and int(part) not in out:
+        if part in known and int(part) not in out:
             out.append(int(part))
-    return out or [1, 2, 3, 4]
+    return out or list(core.DEFAULT_STRATEGIES)
 
 
 def _universes():

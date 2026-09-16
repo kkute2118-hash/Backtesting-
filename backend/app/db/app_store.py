@@ -179,7 +179,7 @@ def all_preferences() -> dict[str, Any]:
 # built-in presets
 # --------------------------------------------------------------------------- #
 # Every preset below is expressed only in options the engine actually supports:
-# which of strategies S1-S4 to evaluate, the universe, the score gate, whether
+# which of strategies S1-S5 to evaluate, the universe, the score gate, whether
 # to overlay the live intraday bar, and the post-scan result filters. There is
 # deliberately no "Oversold" or "Volume Surge" preset - the engine has no such
 # screen, and inventing one would mean inventing rules the scanner never ran.

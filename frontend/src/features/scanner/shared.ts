@@ -16,6 +16,7 @@ export const STRATEGY_OPTIONS = [
   { value: 2, label: "S2 · Tight pullback", hint: "Tight pullback in an uptrend" },
   { value: 3, label: "S3 · EMA50 pullback", hint: "Liquid pullback to EMA50" },
   { value: 4, label: "S4 · SEPA", hint: "Minervini-style stage analysis" },
+  { value: 5, label: "S5 · Pocket pivot", hint: "O'Neil-disciple pocket pivot — not backtested yet" },
 ];
 
 export interface ScanFormState {

@@ -42,7 +42,7 @@ permissions.** A setup score ranks quality; it is not a probability of profit.
 
 | Path | Role |
 | --- | --- |
-| `backend/app/engine/core.py` | the engine — data, features, strategies S1–S4, scoring, safety, backtests, forward tests, learning. No UI, no HTTP. |
+| `backend/app/engine/core.py` | the engine — data, features, strategies S1–S5, scoring, safety, backtests, forward tests, learning. No UI, no HTTP. |
 | `backend/app/services/` | typed, JSON-safe wrappers around the engine, one module per domain |
 | `backend/app/api/v1/` | the REST surface |
 | `backend/app/db/app_store.py` | watchlists, scanner presets, preferences and run history |
@@ -366,7 +366,7 @@ dry-up, and distance from the 52-week high.
 Readiness = 55% proximity-to-trigger + 35% compression + regime adjustment
 ```
 
-The radar changes nothing about S1–S4 qualification. It builds a watchlist.
+The radar changes nothing about S1–S5 qualification. It builds a watchlist.
 Setting "rules allowed to fail" to 0 reproduces the scanner's qualified list
 exactly.
 
@@ -393,11 +393,12 @@ repeated unnecessarily.
 ---
 
 📊 Strategies
-The system currently evaluates four primary strategies:
+The system implements five strategies:
 Strategy 1
 Strategy 2
 Strategy 3
 Strategy 4
+Strategy 5 — implemented and selectable, but NOT in the default selection
 The strategy rules are treated as the authoritative signal layer.
 The learning engine does not silently modify the original strategy rules.
 The hierarchy is:
@@ -462,6 +463,48 @@ news/event risk
 selected fundamental risk indicators
 The safety engine can downgrade or reject a candidate.
 It must not manufacture a strategy signal that does not otherwise exist.
+---
+🎯 Strategy 5 — Pocket Pivot (O'Neil disciple)
+
+S5 implements the Gil Morales / Chris Kacher **pocket pivot**: a strong up-close
+day whose volume exceeds the largest DOWN-day volume of the previous ten
+sessions, taken at a constructive location (10 > 20 > 50 > 200 EMA stack, price
+at the 10 or 50 EMA rather than extended above it) inside a tight base.
+
+Three entry variants are traded, and two the source explicitly tells you to skip
+are implemented but disabled:
+
+| Variant | State |
+| --- | --- |
+| `BASE_POCKET_PIVOT` — right side of a tight base | on |
+| `CONTINUATION_POCKET_PIVOT` — already broken out, bouncing off the 10 EMA | on |
+| `UNDERCUT_AND_RALLY` — breaks a prior low, recovers above it | on |
+| `ROUNDABOUT_POCKET_PIVOT` | off — the source recommends skipping it |
+| BGU (buyable gap up) | off — same |
+
+Exits do not use the engine's 7% stop and 3R target. They use the source's
+**35-day / 7-week stop machine** (`PocketPivotSLStateMachine`): the 10 EMA is
+the stop from entry; an early violation inside the first 35 trading days widens
+the stop to the 50 EMA; surviving 35 days without violating the 10 EMA locks it
+as a permanent trailing stop. Position sizing is deliberately concentrated — a
+30% minimum position, so about three concurrent S5 names.
+
+**Every constant in the S5 section of `core.py` carries one of three tags**, and
+they are not interchangeable:
+
+| Tag | Means |
+| --- | --- |
+| `SOURCE_STATED` | stated outright in the source. Changing it changes the system. |
+| `GTF_APPROXIMATION` | the source showed this visually; the number is our proxy. |
+| `NEEDS_TUNING` | no source backing at all. A placeholder. |
+
+S5 is **not in `DEFAULT_STRATEGIES`** and its rows (`S5_POCKETPIVOT`) are not
+accepted by `add_forward_candidates()`, so no S5 signal can become an
+auto-tracked forward test. That is deliberate: it is backtested first, through
+its own harness, `run_s5_pocket_pivot_backtest()`, which reports win rate,
+average R and signals per week. `s5_tightness_diagnostic()` measures what the
+untuned base-tightness threshold is actually costing the scan.
+
 ---
 🔬 Strategy 4 Recovery Study
 Strategy 4 also contains a separate research-only Recovery Study.

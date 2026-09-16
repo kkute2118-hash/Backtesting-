@@ -195,7 +195,7 @@ def test_preset_validation_rejects_options_the_engine_has_no_screen_for(client):
     response = client.post("/api/v1/presets", json={
         "name": "Bad", "config": {"universes": ["Nifty 500"], "strategies": [9]}})
     assert response.status_code == 400
-    assert "strategies 1-4" in response.json()["error"]["message"]
+    assert "strategies 1-5" in response.json()["error"]["message"]
 
     response = client.post("/api/v1/presets", json={
         "name": "Bad", "config": {"universes": ["Made Up Index"], "strategies": [1]}})

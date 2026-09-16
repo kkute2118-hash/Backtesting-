@@ -100,7 +100,7 @@ def run_scan(*, universes: list[str], strategies: list[int], min_score: float,
              use_live_prices: bool, limit: int | None,
              preset_id: int | None = None) -> dict[str, Any]:
     """Submit a scan. Returns the job envelope; results arrive via the run id."""
-    strategies = sorted({int(s) for s in strategies if int(s) in (1, 2, 3, 4)})
+    strategies = sorted({int(s) for s in strategies if int(s) in core.IMPLEMENTED_STRATEGIES})
     if not strategies:
         raise ApiError("Select at least one strategy to scan.")
     tickers = resolve(universes)

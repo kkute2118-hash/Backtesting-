@@ -4549,6 +4549,618 @@ def scan_s4_sepa(data, fundamentals=None, min_score=60, max_stocks=None,
     return results, safety_audit
 
 
+# ========================= S5 POCKET PIVOT (O'NEIL DISCIPLE) =========================
+# Gil Morales / Chris Kacher "pocket pivot" buy point, as taught in the
+# "Trade Like an O'Neil Disciple" lecture series. A pocket pivot is a strong
+# up-close day whose volume exceeds the largest DOWN-day volume of the recent
+# past, occurring at a constructive location (rising EMA stack, price at the
+# 10 or 50 EMA rather than extended above it) inside a tight base.
+#
+# EVERY constant in this section carries one of three tags, and they mean
+# different things when you are deciding whether to touch one:
+#
+#   SOURCE_STATED       stated outright in the source material. Changing one
+#                       changes the system, not its calibration.
+#   GTF_APPROXIMATION   the source only showed this visually or by example;
+#                       the number here is our codable proxy for it.
+#   NEEDS_TUNING        no source backing at all. A placeholder standing in
+#                       until our own backtest says otherwise.
+#
+# The tags live here, in the code, rather than only in the spec that produced
+# it, so a future reader can tell which numbers are safe to leave alone.
+
+# ---- Detector / filter parameters -------------------------------------------
+S5_POCKET_PIVOT_LOOKBACK = 10        # SOURCE_STATED ("last 10 sessions"; the
+                                     # source calls a 5-day lookback an
+                                     # acceptable variant, hence the parameter).
+S5_EXTENDED_PCT = 0.08               # GTF_APPROXIMATION / NEEDS_TUNING. How far
+                                     # above the 10 (or 50) EMA price may sit and
+                                     # still count as "at the pivot" rather than
+                                     # chasing. Source shows this visually only.
+S5_BASE_TIGHTNESS_WINDOW = 10        # GTF_APPROXIMATION
+S5_BASE_RANGE_PCT_MAX = 0.12         # NEEDS_TUNING. 10-bar high-low range as a
+                                     # fraction of price. Zero source backing —
+                                     # the source only ever says "tight base".
+S5_BREAKOUT_LOOKBACK = 50            # GTF_APPROXIMATION ("right side of the base"
+                                     # vs "already broken out").
+S5_CONTINUATION_EMA10_TOL = 0.02     # GTF_APPROXIMATION (bounce off the 10 EMA).
+S5_UNDERCUT_LOOKBACK = 20            # GTF_APPROXIMATION ("a prior meaningful low").
+S5_UNDERCUT_REQUIRES_LOCATION = False
+# ^ GTF_APPROXIMATION, default OFF = exactly what the spec describes. As
+# specified, undercut-and-rally is the one variant carrying NO location filter:
+# it needs no EMA stack, no tightness, not even a pocket-pivot volume day. On
+# 40 synthetic random-walk symbols it therefore outnumbered the two pocket-pivot
+# variants roughly 35:1. Random walks are not NSE and the ratio will differ on
+# real data, but the asymmetry is structural, not statistical, so S5's character
+# will be decided by this variant unless something constrains it. Setting this
+# True ANDs ma_stack_ok() onto it. Left off because narrowing a SOURCE_STATED
+# rule is the author's call, not ours - see the note in the handover.
+S5_ROUNDABOUT_EMA200_TOL = 0.05      # GTF_APPROXIMATION
+S5_VDU_LOOKBACK = 50                 # SOURCE_STATED (volume dry-up vs average)
+S5_VDU_RATIO = 0.5                   # SOURCE_STATED ("half of average volume")
+S5_VDU_RECENT_DAYS = 3               # SOURCE_STATED (VDU on day i-1..i-3)
+
+# ---- Entry variants the source tells you to skip ----------------------------
+# Both default OFF because the creator explicitly recommends skipping them, not
+# because we are unsure of the rule. Turning either on is a decision about the
+# system, so it is a constant here and not a scan option.
+S5_ENABLE_ROUNDABOUT_PIVOT = False   # SOURCE_STATED (creator: skip this)
+S5_ENABLE_BGU = False                # SOURCE_STATED (creator: skip this too).
+                                     # No BGU detector is implemented; the flag
+                                     # exists so the sizing/stop code can talk
+                                     # about BGU entries without pretending the
+                                     # scan produces them.
+
+# ---- Partial profit booking (module 6 of the spec) --------------------------
+# NOT a stated rule of the system. The source says only, qualitatively, "book a
+# good chunk, leave a decent chunk to run". The two numbers below are our
+# extrapolation from a SINGLE case-study trade, so this stays off until our own
+# backtest has an opinion.
+S5_ENABLE_PARTIAL_PROFIT_BOOKING = False
+S5_PARTIAL_BOOK_TRIGGER_PCT = 0.18   # NEEDS_TUNING (case study: ~20% single-day pop)
+S5_PARTIAL_BOOK_FRACTION = 0.70      # NEEDS_TUNING (case study trimmed ~74%)
+
+# ---- Position sizing (module 7) ---------------------------------------------
+S5_MIN_POSITION_SIZE_PCT = 0.30      # SOURCE_STATED ("minimum position size... 30%")
+S5_MAX_CONCURRENT_POSITIONS = 3      # SOURCE_STATED (implied by the 30% floor)
+
+# ---- Lower-circuit hard exit (module 8) -------------------------------------
+# The source closes the whole position on a lower-circuit print, bypassing the
+# stop machine, because a circuit can gap through any stop. We have no per-stock
+# circuit band from the Dhan feed, so what is implemented below is a proxy, and
+# an untuned one. It is OFF by default: an untuned exit rule that fires inside a
+# backtest would change the result we are trying to measure.
+S5_ENABLE_CIRCUIT_OVERRIDE = False
+S5_CIRCUIT_DROP_PCT = 0.05           # NEEDS_TUNING — stand-in for the band
+S5_CIRCUIT_VOLUME_COLLAPSE = 0.40    # NEEDS_TUNING — volume vs 20d avg on a halt
+
+
+def strategy5_pocket_pivot_features(x):
+    """Every S5 building block as a vectorised column, computed once.
+
+    strategy5_signal(), strategy_condition_matrix(x, 5) and
+    strategy_quality_score(x, 5) all read these, so there is exactly one
+    definition of "pocket pivot day" in the engine rather than three that can
+    drift apart.
+
+    Reuses the EMA/ATR columns features()/features_fast() already produced —
+    nothing here recomputes an indicator the feature pipeline owns.
+    """
+    out = pd.DataFrame(index=x.index)
+    if x.empty:
+        return out
+
+    lb = S5_POCKET_PIVOT_LOOKBACK
+    rng = (x.high - x.low)
+
+    # --- Rule 1: strong up-close day (SOURCE_STATED) -------------------------
+    out["s5_price_ok"] = (
+        (x.close > x.open) &
+        (x.close > x.close.shift(1)) &
+        (x.close > x.open + 0.5 * rng)          # closed in the upper half of range
+    ).fillna(False)
+
+    # --- Rule 2: volume signature (SOURCE_STATED) ----------------------------
+    # Today's volume must exceed the largest DOWN-day volume of the previous
+    # `lb` sessions. A window with no down day contributes a maximum of 0, which
+    # is the spec's behaviour: any positive volume clears it.
+    down_vol = x.volume.where(x.close < x.open, 0.0)
+    max_down_vol = down_vol.rolling(lb, min_periods=lb).max().shift(1)
+    out["s5_max_down_vol"] = max_down_vol
+    out["s5_volume_ok"] = (x.volume > max_down_vol).fillna(False)
+    # How decisively the volume rule was cleared — the quality score reads this.
+    out["s5_vol_signature_ratio"] = x.volume / max_down_vol.replace(0, np.nan)
+
+    out["s5_pocket_pivot"] = out.s5_price_ok & out.s5_volume_ok
+
+    # --- Rule 3: location / MA stack (SOURCE_STATED, tolerance approximated) --
+    out["s5_ma_stack"] = (
+        (x.ema10 > x.ema20) & (x.ema20 > x.ema50) & (x.ema50 > x.ema200)
+    ).fillna(False)
+    near_10 = (x.close - x.ema10).abs() / x.ema10.replace(0, np.nan) <= S5_EXTENDED_PCT
+    near_50 = (x.close - x.ema50).abs() / x.ema50.replace(0, np.nan) <= S5_EXTENDED_PCT
+    out["s5_near_ma"] = (near_10 | near_50).fillna(False)
+    out["s5_location_ok"] = out.s5_ma_stack & out.s5_near_ma
+
+    # --- Base tightness (GTF_APPROXIMATION — see S5_BASE_RANGE_PCT_MAX) ------
+    w = S5_BASE_TIGHTNESS_WINDOW
+    atr_ratio = x.atr14 / x.close.replace(0, np.nan)
+    out["s5_atr_ratio"] = atr_ratio
+    out["s5_atr_contracting"] = (atr_ratio <= atr_ratio.shift(w)).fillna(False)
+    # The spec's `df.iloc[i - window:i + 1]` is w+1 bars INCLUDING today.
+    recent_range = (x.high.rolling(w + 1, min_periods=w + 1).max() -
+                    x.low.rolling(w + 1, min_periods=w + 1).min())
+    out["s5_base_range_pct"] = recent_range / x.close.replace(0, np.nan)
+    out["s5_base_tight"] = (out.s5_base_range_pct <= S5_BASE_RANGE_PCT_MAX).fillna(False)
+    out["s5_base_tightness_ok"] = out.s5_atr_contracting & out.s5_base_tight
+
+    # --- Volume dry-up, a confidence reading only (SOURCE_STATED, downgraded
+    # by the creator himself: "not a great entry technique... just an
+    # indicative metric"). Never a trigger on its own — nothing below ANDs it
+    # into the signal; only the quality score reads it.
+    avg_vol_50 = x.volume.rolling(S5_VDU_LOOKBACK, min_periods=S5_VDU_LOOKBACK).mean().shift(1)
+    vdu_day = (x.volume <= S5_VDU_RATIO * avg_vol_50).fillna(False)
+    out["s5_vdu_day"] = vdu_day
+    recent_vdu = pd.Series(False, index=x.index)
+    for k in range(1, S5_VDU_RECENT_DAYS + 1):
+        recent_vdu = recent_vdu | vdu_day.shift(k, fill_value=False)
+    out["s5_vdu_recent"] = recent_vdu
+
+    # --- Entry variants (SOURCE_STATED definitions) --------------------------
+    # "Right side of the base" vs "already broken out", measured on closes, as
+    # the spec does — not on highs.
+    recent_high = x.close.rolling(S5_BREAKOUT_LOOKBACK, min_periods=1).max().shift(1)
+    out["s5_recent_high"] = recent_high
+
+    out["s5_base_pivot"] = (
+        out.s5_pocket_pivot &
+        (x.close < recent_high).fillna(False) &
+        out.s5_location_ok &
+        out.s5_base_tightness_ok
+    )
+    bounce_10 = ((x.low - x.ema10).abs() / x.ema10.replace(0, np.nan)
+                 <= S5_CONTINUATION_EMA10_TOL).fillna(False)
+    out["s5_continuation_pivot"] = (
+        out.s5_pocket_pivot & (x.close >= recent_high).fillna(False) & bounce_10
+    )
+    near_200 = ((x.close - x.ema200).abs() / x.ema200.replace(0, np.nan)
+                <= S5_ROUNDABOUT_EMA200_TOL).fillna(False)
+    # Classified even when disabled, so a research run can count how many
+    # signals the "skip this" advice is actually costing.
+    out["s5_roundabout_pivot"] = (
+        out.s5_pocket_pivot &
+        ~out.s5_base_pivot & ~out.s5_continuation_pivot &
+        near_200
+    )
+
+    # --- Undercut & rally (SOURCE_STATED) ------------------------------------
+    # DEVIATION FROM THE SPEC, deliberate. The spec computes the prior low over
+    # df.iloc[i-20:i], which INCLUDES yesterday, and then asks whether
+    # yesterday's low undercut it. Yesterday's low is a member of that window,
+    # so it can never be strictly below the window's minimum: as written, the
+    # variant can never fire on any data. The window is therefore taken up to
+    # the day BEFORE the undercut day, which is what "price breaks a prior
+    # meaningful low" means. Flagged to the author; revert the shift(2) below
+    # to shift(1) to reproduce the spec verbatim (and get zero signals).
+    ul = S5_UNDERCUT_LOOKBACK
+    prior_low = x.low.rolling(ul, min_periods=ul).min().shift(2)
+    out["s5_prior_low"] = prior_low
+    undercut_yesterday = (x.low.shift(1) < prior_low).fillna(False)
+    rallied_back = ((x.close > prior_low) & (x.close > x.open)).fillna(False)
+    out["s5_undercut_rally_raw"] = undercut_yesterday & rallied_back
+    if S5_UNDERCUT_REQUIRES_LOCATION:
+        out["s5_undercut_rally_raw"] = out.s5_undercut_rally_raw & out.s5_location_ok
+    # The spec only reaches the undercut check when the day is NOT a pocket
+    # pivot (classify_entry returns early otherwise), so the variants stay
+    # mutually exclusive and the label below is unambiguous.
+    out["s5_undercut_rally"] = out.s5_undercut_rally_raw & ~out.s5_pocket_pivot
+
+    out["s5_trigger_day"] = out.s5_pocket_pivot | out.s5_undercut_rally_raw
+    return out
+
+
+def _s5_enabled_variants(s5):
+    """The variant mask actually traded, honouring the two "skip this" flags."""
+    variant = s5.s5_base_pivot | s5.s5_continuation_pivot | s5.s5_undercut_rally
+    if S5_ENABLE_ROUNDABOUT_PIVOT:
+        variant = variant | s5.s5_roundabout_pivot
+    return variant.fillna(False)
+
+
+def strategy5_entry_variant(x):
+    """Which variant fired, as a label per bar ("" where none did).
+
+    Mirrors classify_entry() in the spec, including its precedence: a pocket
+    pivot day is classified as base -> continuation -> roundabout and never
+    falls through to undercut-and-rally.
+    """
+    s5 = strategy5_pocket_pivot_features(x)
+    label = pd.Series("", index=x.index)
+    if s5.empty:
+        return label
+    if S5_ENABLE_ROUNDABOUT_PIVOT:
+        label = label.mask(s5.s5_roundabout_pivot, "ROUNDABOUT_POCKET_PIVOT")
+    label = label.mask(s5.s5_undercut_rally, "UNDERCUT_AND_RALLY")
+    label = label.mask(s5.s5_continuation_pivot, "CONTINUATION_POCKET_PIVOT")
+    label = label.mask(s5.s5_base_pivot, "BASE_POCKET_PIVOT")
+    return label
+
+
+def strategy5_signal(x):
+    """Live S5 entry trigger: an enabled pocket-pivot variant fired today.
+
+    Unlike S4 there is no separate coarse/precise split — the pocket pivot IS
+    the entry, and the location and tightness filters are part of it. What
+    keeps S5 out of a manipulated or illiquid name is the same thing that keeps
+    S1-S4 out of one: clean_liquid_universe() runs before any signal is
+    evaluated. S5 deliberately adds no price or volume floor of its own,
+    because the source states none and inventing one here would be an untagged
+    constant in a rule set whose whole point is that every number is tagged.
+    """
+    if x.empty:
+        return pd.Series(False, index=x.index)
+    return _s5_enabled_variants(strategy5_pocket_pivot_features(x)).astype(bool)
+
+
+# ---- Stop-loss state machine (module 5, SOURCE_STATED) ----------------------
+
+class PocketPivotSLStateMachine:
+    """The 35-day / 7-week stop rule, implemented exactly and not simplified.
+
+    States:
+      TIGHT         tracking the 10 EMA from entry.
+      WIDE          an early 10-EMA violation (inside the first 35 trading days)
+                    buys the position room down to the 50 EMA.
+      LOCKED_TIGHT  having survived 35 days without violating the 10 EMA, the
+                    10 EMA becomes a permanent trailing stop.
+
+    `entry_sl_override` is the tight initial stop used by UNDERCUT_AND_RALLY
+    (and BGU, were it enabled): the low of the trigger day, 1-3% away. It holds
+    until it is breached, or until price clears meaningfully above the 10 EMA
+    and the EMA machine takes over naturally.
+
+    update() is fed one row per trading day and returns ("EXIT", reason) or
+    ("HOLD", current_mode).
+    """
+
+    GRACE_PERIOD_DAYS = 35   # SOURCE_STATED ("7 weeks")
+    HANDOFF_EMA10_MULT = 1.02  # SOURCE_STATED (spec: close > ema_10 * 1.02)
+
+    def __init__(self, entry_date, entry_sl_override=None):
+        self.entry_date = entry_date
+        self.days_held = 0
+        self.mode = "TIGHT"
+        self.entry_sl_override = entry_sl_override   # absolute price level or None
+
+    def update(self, row):
+        self.days_held += 1
+        close = float(row["close"])
+        ema_10 = float(row["ema10"])
+        ema_50 = float(row["ema50"])
+
+        # The tight initial override takes priority until breached or outgrown.
+        if self.entry_sl_override is not None:
+            if close < self.entry_sl_override:
+                return "EXIT", "initial_tight_stop_hit"
+            if np.isfinite(ema_10) and close > ema_10 * self.HANDOFF_EMA10_MULT:
+                self.entry_sl_override = None
+
+        if self.mode == "TIGHT":
+            if np.isfinite(ema_10) and close < ema_10:
+                if self.days_held <= self.GRACE_PERIOD_DAYS:
+                    self.mode = "WIDE"
+                else:
+                    return "EXIT", "10ema_violated_after_grace_period"
+            elif self.days_held > self.GRACE_PERIOD_DAYS:
+                self.mode = "LOCKED_TIGHT"
+
+        elif self.mode == "WIDE":
+            if np.isfinite(ema_50) and close < ema_50:
+                return "EXIT", "50ema_violated"
+
+        elif self.mode == "LOCKED_TIGHT":
+            if np.isfinite(ema_10) and close < ema_10:
+                return "EXIT", "10ema_violated_locked"
+
+        return "HOLD", self.mode
+
+
+def s5_check_partial_booking(entry_price, current_close, single_day_gain_pct, already_booked):
+    """Fraction of the position to trim, or None.
+
+    The PRINCIPLE is SOURCE_STATED ("book a good chunk, leave a decent chunk to
+    run"); the two NUMBERS are not stated anywhere and are generalised from one
+    example trade. Disabled by default — see S5_ENABLE_PARTIAL_PROFIT_BOOKING.
+    """
+    if not S5_ENABLE_PARTIAL_PROFIT_BOOKING or already_booked:
+        return None
+    if not np.isfinite(single_day_gain_pct):
+        return None
+    if single_day_gain_pct >= S5_PARTIAL_BOOK_TRIGGER_PCT:
+        return S5_PARTIAL_BOOK_FRACTION
+    return None
+
+
+def s5_check_circuit_override(row, prev_close=None):
+    """Lower-circuit hard exit, approximated.
+
+    The rule itself is SOURCE_STATED: close the entire position on a lower
+    circuit, bypassing the stop machine, because a circuit gaps through any
+    stop. The DETECTION is not: we have no per-stock circuit band from the Dhan
+    feed, so this looks for the shape of a halt instead — a large single-day
+    drop on collapsed volume. Both thresholds are NEEDS_TUNING and the whole
+    check is off by default (S5_ENABLE_CIRCUIT_OVERRIDE).
+    """
+    if not S5_ENABLE_CIRCUIT_OVERRIDE:
+        return False
+    close = float(row["close"])
+    prev = float(prev_close) if prev_close is not None else np.nan
+    if not np.isfinite(close) or not np.isfinite(prev) or prev <= 0:
+        return False
+    drop = close / prev - 1
+    if drop > -S5_CIRCUIT_DROP_PCT:
+        return False
+    vol, avg_vol = float(row.get("volume", np.nan)), float(row.get("vol20", np.nan))
+    if not np.isfinite(vol) or not np.isfinite(avg_vol) or avg_vol <= 0:
+        return False
+    return (vol / avg_vol) <= S5_CIRCUIT_VOLUME_COLLAPSE
+
+
+def s5_position_plan(n_open_positions):
+    """How much of the book one new S5 entry takes, and whether there is room.
+
+    Both numbers are SOURCE_STATED: a 30% minimum position implies about three
+    concurrent positions, which is the whole risk posture of the system — it is
+    a concentrated book by design, not a diversified one.
+    """
+    room = int(max(0, S5_MAX_CONCURRENT_POSITIONS - int(n_open_positions)))
+    return {
+        "min_position_pct": S5_MIN_POSITION_SIZE_PCT,
+        "max_concurrent": S5_MAX_CONCURRENT_POSITIONS,
+        "slots_free": room,
+        "can_enter": room > 0,
+    }
+
+
+def _s5_initial_stop(f, entry_i, trigger_i, variant):
+    """The stop the trade actually starts with, and why.
+
+    UNDERCUT_AND_RALLY (and BGU) start on the low of the trigger day — the tight
+    1-3% stop the source describes, handed to the state machine as its override.
+    A pocket pivot has no stated initial stop: the machine's TIGHT mode is
+    already tracking the 10 EMA, so that is the stop. Where the 10 EMA is not
+    below the entry (price entered back under it), the trigger day's low is the
+    structural fallback — GTF_APPROXIMATION, the source does not cover this.
+    """
+    trigger_low = float(f.low.iloc[trigger_i])
+    entry = float(f.close.iloc[entry_i])
+    if variant in ("UNDERCUT_AND_RALLY", "BGU"):
+        return trigger_low, trigger_low, "trigger_day_low"
+    ema10 = float(f.ema10.iloc[entry_i])
+    if np.isfinite(ema10) and 0 < ema10 < entry:
+        return ema10, None, "ema10_at_entry"
+    if np.isfinite(trigger_low) and 0 < trigger_low < entry:
+        return trigger_low, None, "trigger_day_low_fallback"
+    return np.nan, None, "none"
+
+
+def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
+                                 min_bars=260, progress_cb=None):
+    """Standalone walk-forward replay of S5, on its own stop machine.
+
+    Deliberately NOT routed through _professional_bt(): that harness exits every
+    trade on a fixed 7% stop and a 3R target, which is a different system. A
+    pocket pivot is held on the 10/50 EMA rule until it breaks, so measuring it
+    against a 3R target would measure the target, not the strategy.
+
+    Entry convention matches the rest of the engine: signal on bar i, entry at
+    the close of bar i+1, BT_COST_PCT deducted round trip. Exits come from
+    PocketPivotSLStateMachine alone (plus `max_hold_bars` as a backstop, which
+    is a harness limit, not a rule of the system).
+
+    Results are tagged S5_POCKETPIVOT. Nothing here writes to forward_tests —
+    add_forward_candidates() only accepts S1/S2/S3/S4_SEPA, so an S5 row cannot
+    become an auto-tracked forward test until someone deliberately widens that
+    whitelist. That ordering is intentional: backtest first.
+    """
+    start = pd.Timestamp(start)
+    end = pd.Timestamp(end)
+    rows = []
+    diag = {"symbols": 0, "no_data": 0, "short_history": 0, "no_features": 0,
+            "failed": 0, "scanned": 0, "signals": 0, "unpriced_risk": 0}
+    tickers = list(data.keys())
+    diag["symbols"] = len(tickers)
+
+    for n, ticker in enumerate(tickers):
+        try:
+            df = data[ticker]
+            if df is None or len(df) == 0:
+                diag["no_data"] += 1
+                continue
+            if len(df) < min_bars:
+                diag["short_history"] += 1
+                continue
+            df = df.sort_index()
+            f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            if f.empty:
+                diag["no_features"] += 1
+                continue
+            diag["scanned"] += 1
+
+            s5 = strategy5_pocket_pivot_features(f)
+            sig = _s5_enabled_variants(s5).to_numpy()
+            labels = strategy5_entry_variant(f)
+
+            for i in np.flatnonzero(sig):
+                dt = pd.Timestamp(f.index[i])
+                if dt < start or dt > end or i >= len(f) - 1:
+                    continue
+                diag["signals"] += 1
+                entry_i = i + 1
+                entry = float(f.close.iloc[entry_i])
+                if not np.isfinite(entry) or entry <= 0:
+                    continue
+                variant = str(labels.iloc[i])
+                stop0, override, stop_basis = _s5_initial_stop(f, entry_i, i, variant)
+                risk = entry - stop0 if np.isfinite(stop0) else np.nan
+                if not np.isfinite(risk) or risk <= 0:
+                    diag["unpriced_risk"] += 1
+
+                machine = PocketPivotSLStateMachine(f.index[entry_i], entry_sl_override=override)
+                last = min(len(f) - 1, entry_i + int(max_hold_bars))
+                exit_i, reason = last, "max_hold_reached"
+                booked_fraction, booked = 0.0, False
+                max_high = min_low = entry
+
+                for j in range(entry_i + 1, last + 1):
+                    bar = f.iloc[j]
+                    max_high = max(max_high, float(bar.high))
+                    min_low = min(min_low, float(bar.low))
+
+                    if S5_ENABLE_PARTIAL_PROFIT_BOOKING and not booked:
+                        prev_close = float(f.close.iloc[j - 1])
+                        day_gain = (float(bar.close) / prev_close - 1) if prev_close > 0 else np.nan
+                        frac = s5_check_partial_booking(entry, float(bar.close), day_gain, booked)
+                        if frac:
+                            booked_fraction, booked = float(frac), True
+
+                    if s5_check_circuit_override(bar, prev_close=float(f.close.iloc[j - 1])):
+                        exit_i, reason = j, "lower_circuit_override"
+                        break
+
+                    action, detail = machine.update(bar)
+                    if action == "EXIT":
+                        exit_i, reason = j, detail
+                        break
+
+                exit_price = float(f.close.iloc[exit_i])
+                gross_pct = (exit_price / entry - 1) * 100
+                return_pct = gross_pct - BT_COST_PCT
+                r_mult = (return_pct / ((risk / entry) * 100)) if (np.isfinite(risk) and risk > 0) else np.nan
+                rows.append({
+                    "Date": dt.date(),
+                    "Ticker": str(ticker).replace(".NS", ""),
+                    "Strategy": "S5_POCKETPIVOT",
+                    "Variant": variant,
+                    "Entry Date": f.index[entry_i].date(),
+                    "Exit Date": f.index[exit_i].date(),
+                    "Entry": round(entry, 2),
+                    "Initial SL": round(float(stop0), 2) if np.isfinite(stop0) else None,
+                    "SL Basis": stop_basis,
+                    "Exit": round(exit_price, 2),
+                    "Exit Reason": reason,
+                    "Final SL Mode": machine.mode,
+                    "Return %": round(return_pct, 2),
+                    "R": round(float(r_mult), 2) if np.isfinite(r_mult) else None,
+                    "Holding Bars": int(exit_i - entry_i),
+                    "MFE %": round((max_high / entry - 1) * 100, 2),
+                    "MAE %": round((min_low / entry - 1) * 100, 2),
+                    "Partial Booked": round(booked_fraction, 2),
+                    "VDU Confidence": bool(s5.s5_vdu_recent.iloc[i]),
+                })
+        except Exception:
+            diag["failed"] += 1
+            continue
+        finally:
+            if progress_cb:
+                progress_cb((n + 1) / max(1, len(tickers)))
+
+    trades = pd.DataFrame(rows)
+    return {"trades": trades, "diagnostics": diag,
+            "summary": s5_backtest_summary(trades, start, end, diag)}
+
+
+def s5_backtest_summary(trades, start, end, diag=None):
+    """Win rate, average R, signals per week — checklist item 6.
+
+    Signals/week is reported against the number of symbols actually scanned, so
+    it can be compared honestly with the source's "~40-50 per week on the full
+    universe" claim instead of against a 400-name subset.
+    """
+    diag = diag or {}
+    weeks = max(1e-9, (pd.Timestamp(end) - pd.Timestamp(start)).days / 7.0)
+    scanned = int(diag.get("scanned", 0))
+    signals = int(diag.get("signals", len(trades)))
+    summary = {
+        "trades": int(len(trades)),
+        "symbols_scanned": scanned,
+        "signals": signals,
+        "signals_per_week": round(signals / weeks, 2),
+        "weeks": round(weeks, 1),
+        "win_rate_pct": None,
+        "avg_r": None,
+        "median_r": None,
+        "avg_return_pct": None,
+        "avg_holding_bars": None,
+        "trades_without_priced_risk": int(diag.get("unpriced_risk", 0)),
+    }
+    if trades is None or trades.empty:
+        return summary
+    ret = pd.to_numeric(trades["Return %"], errors="coerce").dropna()
+    if len(ret):
+        summary["win_rate_pct"] = round(float((ret > 0).mean() * 100), 1)
+        summary["avg_return_pct"] = round(float(ret.mean()), 2)
+    r = pd.to_numeric(trades["R"], errors="coerce").dropna()
+    if len(r):
+        summary["avg_r"] = round(float(r.mean()), 3)
+        summary["median_r"] = round(float(r.median()), 3)
+    bars = pd.to_numeric(trades["Holding Bars"], errors="coerce").dropna()
+    if len(bars):
+        summary["avg_holding_bars"] = round(float(bars.mean()), 1)
+    if "Variant" in trades:
+        summary["by_variant"] = {
+            str(k): int(v) for k, v in trades["Variant"].value_counts().items()
+        }
+    if "Exit Reason" in trades:
+        summary["by_exit_reason"] = {
+            str(k): int(v) for k, v in trades["Exit Reason"].value_counts().items()
+        }
+    return summary
+
+
+def s5_tightness_diagnostic(data, min_bars=260):
+    """Checklist item 7: is S5_BASE_RANGE_PCT_MAX starving the scan?
+
+    That threshold has zero source backing, so the honest thing is to measure
+    what it costs rather than trust it. Reports how many pocket pivots in the
+    right location survive each filter, and what the base-range distribution
+    actually looks like, so the number can be set from evidence.
+    """
+    kept = dropped = located = pivots = 0
+    ranges = []
+    for ticker, df in data.items():
+        if df is None or len(df) < min_bars:
+            continue
+        try:
+            f = features_fast(str(ticker), df).replace([np.inf, -np.inf], np.nan)
+            s5 = strategy5_pocket_pivot_features(f)
+        except Exception:
+            continue
+        if s5.empty:
+            continue
+        pivots += int(s5.s5_pocket_pivot.sum())
+        loc = s5.s5_pocket_pivot & s5.s5_location_ok
+        located += int(loc.sum())
+        kept += int((loc & s5.s5_base_tightness_ok).sum())
+        dropped += int((loc & ~s5.s5_base_tightness_ok).sum())
+        ranges.extend(s5.s5_base_range_pct[loc].dropna().tolist())
+
+    out = {
+        "pocket_pivot_days": pivots,
+        "in_constructive_location": located,
+        "passed_tightness": kept,
+        "dropped_by_tightness": dropped,
+        "pass_rate_pct": round(100.0 * kept / located, 1) if located else None,
+        "threshold": S5_BASE_RANGE_PCT_MAX,
+    }
+    if ranges:
+        q = pd.Series(ranges)
+        out["base_range_pct_quantiles"] = {
+            str(p): round(float(q.quantile(p)), 4) for p in (0.1, 0.25, 0.5, 0.75, 0.9)
+        }
+    return out
+
+
 def strategy_signal(x,s):
     if x.empty:
         return pd.Series(False,index=x.index)
@@ -4711,6 +5323,15 @@ def strategy_signal(x,s):
         # working; it is deliberately NOT called from here anymore.
         return strategy4_sepa_watchlist(x)
 
+    if s==5:
+        # ================================================================
+        # STRATEGY 5 — POCKET PIVOT (O'Neil disciple)
+        # ================================================================
+        # An enabled pocket-pivot variant firing today. Every rule and every
+        # tunable lives in the S5 section above, next to the tag saying
+        # whether the number came from the source or from us.
+        return strategy5_signal(x)
+
     return pd.Series(False,index=x.index)
 
 # ========================= EARLY WARNING RADAR =========================
@@ -4802,6 +5423,23 @@ def strategy_condition_matrix(x, s):
             "Vol30 >= 50000": x.vol30 >= 50000,
             "Close >= 20": x.close >= 20,
             "Recent monthly cross or reclaim": (monthly_bull_cross_count >= 1) | monthly_reclaim,
+        }
+
+    if s == 5:
+        # S5 is a disjunction of entry variants, not a conjunction of rules, and
+        # the variants share almost nothing: undercut-and-rally is not a pocket
+        # pivot day at all and carries neither the MA-stack nor the tightness
+        # filter. So the variant test is ONE composite condition here rather
+        # than the six or seven the radar would prefer - splitting it would
+        # break the property this matrix exists for, that ANDing these
+        # reproduces strategy_signal(x, 5) exactly. The two rules alongside it
+        # are implied by it; they are listed because they are the two things
+        # worth seeing on a name that is close but not there yet.
+        s5 = strategy5_pocket_pivot_features(x)
+        return {
+            "Trigger day (pocket pivot or undercut-and-rally)": s5.s5_trigger_day,
+            "Up-close day": x.close > x.open,
+            "An enabled entry variant qualifies": _s5_enabled_variants(s5),
         }
 
     return {}
@@ -5416,6 +6054,22 @@ def strategy_quality_score(x, s):
         p += 10 if z.mmom >= 30 else 7 if z.mmom >= 25 else 4 if z.mmom >= 20 else 0
         p += 10 if z.mema10 > z.mema20 else 0
         raw_max = 20.0
+    elif s == 5:
+        # Only what S5 itself owns. Volume EXPANSION belongs to Footprint and
+        # the EMA20 extension to Entry Quality, so neither is re-scored here;
+        # what is scored is the pocket pivot's own volume SIGNATURE (today
+        # against the biggest down-day volume of the base, which no other
+        # component looks at), the full EMA stack, base tightness, and the
+        # volume dry-up reading - which the source downgrades to "indicative",
+        # so it is worth points and is never part of the trigger.
+        s5 = strategy5_pocket_pivot_features(x)
+        w = s5.iloc[-1]
+        ratio = float(w.s5_vol_signature_ratio) if pd.notna(w.s5_vol_signature_ratio) else np.nan
+        p += 10 if np.isfinite(ratio) and ratio >= 2.0 else 7 if np.isfinite(ratio) and ratio >= 1.5 else 4 if bool(w.s5_volume_ok) else 0
+        p += 8 if bool(w.s5_ma_stack) else 0
+        p += 7 if bool(w.s5_base_tightness_ok) else 0
+        p += 5 if bool(w.s5_vdu_recent) else 0
+        raw_max = 30.0
     return _scaled_component(p, raw_max, 30)
 
 # Published component weights. Hand-chosen, NOT fitted - the relative weighting
@@ -5444,6 +6098,15 @@ def strategy_quality_score(x, s):
 # to place a better one.
 DEFAULT_MIN_SCORE = 71
 LEGACY_MIN_SCORE = 85
+
+# Which strategy numbers strategy_signal() actually implements, and which of
+# them a caller gets when it does not choose. They are not the same list: S5
+# (pocket pivot) is implemented and selectable, but stays out of the default
+# selection until it has its own backtest record - see
+# run_s5_pocket_pivot_backtest(). One tuple each, so the API, the services, the
+# presets and the scheduled job cannot drift apart about what exists.
+IMPLEMENTED_STRATEGIES = (1, 2, 3, 4, 5)
+DEFAULT_STRATEGIES = (1, 2, 3, 4)
 
 SCORE_COMPONENT_WEIGHTS = {
     "Strategy": 33,
@@ -9967,10 +10630,10 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     counts.setdefault("downloaded", len(data))
     counts.setdefault("usable", 0)
     counts.setdefault("too_short", 0)
-    # Seed all four strategies, not just the selected ones: callers index these
+    # Seed every strategy, not just the selected ones: callers index these
     # by fixed strategy number when rendering the audit table.
-    counts.setdefault("signals", {1: 0, 2: 0, 3: 0, 4: 0})
-    counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0})
+    counts.setdefault("signals", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
+    counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
     counts.setdefault("safety_reject", 0)
 
     # Shared universe/safety/liquidity gate, applied to EVERY strategy (S1-S4)
@@ -10043,7 +10706,12 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             # ultimately writes into forward_tests.strategy. S4 is tagged
             # "S4_SEPA" there (not "S4") so pre-SEPA and post-SEPA forward-test
             # rows stay distinguishable, per the forward_tests migration in _db().
-            strategy_label = "S4_SEPA" if s == 4 else f"S{s}"
+            # S5 is tagged S5_POCKETPIVOT wherever it is persisted, per the
+            # spec's checklist. add_forward_candidates() does not accept that
+            # label, so an S5 signal is scored, ranked and shown but never
+            # auto-enrolled into forward_tests - the backtest comes first.
+            strategy_label = ("S4_SEPA" if s == 4 else
+                              "S5_POCKETPIVOT" if s == 5 else f"S{s}")
             row = {
                 "Score": score,
                 "Adaptive Score": round(adaptive_score, 2),
