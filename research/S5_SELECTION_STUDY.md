@@ -106,13 +106,47 @@ The observed ×1.414 sits at **p = 0.98** — worse than the median of pure sear
 luck. No ranking rule found here is real. Any "rank the candidates by X" scoring
 system built on this data would be ranking noise.
 
-**Filters: treat as unproven until the same test clears them.** The sweep's 71
-survivors out of 264 thresholds is ~27%, which is about what independent
-coin-flips would give (25%) if train and test performance were unrelated. The
-headline `atr_pct >= 4.0` is also the best of 264 tries, so it carries the same
-multiple-comparison risk that killed the rankings. A shuffled-outcome null for
-the sweep is the test that settles it; until it has run, the filter numbers
-below are a hypothesis, not a result.
+**Filters: they clear it.** The same null was run for the sweep — outcomes
+shuffled within the train block and within the test block, so 2023 stays the
+good year and 2025-26 stay bad while every reading-to-outcome link is destroyed.
+60 shuffles:
+
+| | Observed | Null median | Null p95 | Null max | p |
+| --- | --- | --- | --- | --- | --- |
+| Survivors | 71 | 65 | 87 | 93 | 0.40 |
+| Best test lift | **+0.438** | +0.185 | +0.319 | +0.361 | **< 0.017** |
+
+Two different answers, and both matter. The *count* of survivors is pure chance —
+71 of 264 is what coin-flips give, so "71 thresholds survived" means nothing on
+its own. But the *size* of the best lift beats all 60 shuffles; the null never
+once reached +0.438. `atr_pct >= 4.0` is not the kind of thing this search
+produces by accident.
+
+## The decisive check: does it lift every year?
+
+Profit factor by year, unfiltered and filtered. The filter thresholds come from
+2022-2024 only.
+
+| Year | N | PF all | `atr_pct>=4` | `gap_pct>=0.36` | both |
+| --- | --- | --- | --- | --- | --- |
+| 2022 | 2,934 | 1.413 | 1.880 | 1.408 | 1.815 |
+| 2023 | 5,241 | 6.592 | 8.618 | 7.415 | 10.786 |
+| 2024 | 5,534 | 1.304 | 1.489 | 1.379 | 1.611 |
+| 2025 | 6,194 | 0.928 | 1.017 | 1.099 | **1.224** |
+| 2026 | 4,575 | 0.915 | 1.864 | 1.139 | **2.305** |
+
+**Five years out of five, in the same direction** — including turning both
+losing years profitable. That is a far stronger result than one train/test split,
+and it is what separates this from the ranking search that failed.
+
+It also improves direction, not just tail size, which is what a pure
+volatility-harvesting artifact would look like:
+
+| | Win rate | Median ret | Avg win | Avg loss |
+| --- | --- | --- | --- | --- |
+| All signals | 34.3% | −0.95% | — | — |
+| `atr_pct>=4` | 39.9% | −0.87% | +15.49% | −4.34% |
+| both | **41.8%** | −0.64% | +17.45% | −4.42% |
 
 ## What to do with this
 
@@ -122,10 +156,17 @@ below are a hypothesis, not a result.
 2. **Do not build a score from the winners-vs-losers table.** Nothing separates
    there (max 0.15 sd). The separation is all in the big-winner tail and all in
    2023.
-3. **Treat the thresholds as provisional, and weakly so.** They come from one
-   train/test split on one market, and they are the best of 264 tries. The
-   identical style of search over rankings produced a result that a proper null
-   showed to be worse than luck. Do not trade these until the shuffled-outcome
-   null has cleared them and a third window agrees.
-4. Even at its best this is ×1.22 over 20 months on 3 concentrated positions.
-   That is not a finished strategy; it is the first version that is not losing.
+3. **The thresholds are supported but not settled.** They cleared a shuffled
+   null and lift every one of five years. What remains open is the exact
+   number: `atr_pct >= 3.0` came out *worse* than no filter in the slot
+   simulation while `>= 4.0` helped, and a cliff that sharp between adjacent
+   thresholds usually means the slot sample (~140 trades) is too small to
+   resolve it, not that 3.5 is a boundary. Re-fit the level walk-forward rather
+   than hard-coding 4.0.
+4. **Do not build a ranking.** Filtering works; ordering the survivors does not.
+   84 ranking rules were searched and the best came out below the median of pure
+   search luck.
+5. Even at its best this is ×1.22 over 20 months on 3 concentrated positions,
+   from 923 of 24,478 signals (3.8%). That is not a finished strategy; it is the
+   first version that is not losing, and the first S5 result that survives a
+   null.
