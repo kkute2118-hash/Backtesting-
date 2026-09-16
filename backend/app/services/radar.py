@@ -25,7 +25,7 @@ RADAR_KIND = "radar"
 
 def run(*, universes: list[str], strategies: list[int], max_missing: int,
         min_readiness: float) -> dict[str, Any]:
-    strategies = sorted({int(s) for s in strategies if int(s) in (1, 2, 3, 4)})
+    strategies = sorted({int(s) for s in strategies if int(s) in core.IMPLEMENTED_STRATEGIES})
     if not strategies:
         raise ApiError("Select at least one strategy for the radar.")
     tickers = resolve(universes)

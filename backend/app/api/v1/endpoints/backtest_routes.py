@@ -70,3 +70,25 @@ def s4_extension(payload: StudyRequest) -> Any:
              status_code=status.HTTP_202_ACCEPTED)
 def s4_recovery(payload: StudyRequest) -> Any:
     return backtest.run_s4_recovery(universes=payload.universes, period=payload.period)
+
+
+@router.post("/backtest/s5-pocketpivot", response_model=JobEnvelope,
+             status_code=status.HTTP_202_ACCEPTED)
+def s5_pocketpivot(payload: StudyRequest) -> Any:
+    """S5 on its own, with S5's own stop machine — not the 7% / 3R replay.
+
+    Ungated: every signal is captured, then measured for what the winners share.
+    """
+    return backtest.run_s5_pocketpivot(universes=payload.universes, period=payload.period)
+
+
+@router.get("/backtest/s5-winner-profile")
+def s5_winner_profile(run_id: int | None = Query(default=None),
+                      big_winner_quantile: float = Query(default=0.80, ge=0.5, lt=1.0)
+                      ) -> dict[str, Any]:
+    """Re-cut "what do the winners have in common?" over a stored capture run.
+
+    No re-simulation — this reads the trades the last S5 run stored, so trying
+    a different big-winner cut costs a request rather than an afternoon.
+    """
+    return backtest.s5_winner_profile(run_id=run_id, big_winner_quantile=big_winner_quantile)

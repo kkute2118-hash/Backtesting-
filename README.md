@@ -42,7 +42,7 @@ permissions.** A setup score ranks quality; it is not a probability of profit.
 
 | Path | Role |
 | --- | --- |
-| `backend/app/engine/core.py` | the engine — data, features, strategies S1–S4, scoring, safety, backtests, forward tests, learning. No UI, no HTTP. |
+| `backend/app/engine/core.py` | the engine — data, features, strategies S1–S5, scoring, safety, backtests, forward tests, learning. No UI, no HTTP. |
 | `backend/app/services/` | typed, JSON-safe wrappers around the engine, one module per domain |
 | `backend/app/api/v1/` | the REST surface |
 | `backend/app/db/app_store.py` | watchlists, scanner presets, preferences and run history |
@@ -366,7 +366,7 @@ dry-up, and distance from the 52-week high.
 Readiness = 55% proximity-to-trigger + 35% compression + regime adjustment
 ```
 
-The radar changes nothing about S1–S4 qualification. It builds a watchlist.
+The radar changes nothing about S1–S5 qualification. It builds a watchlist.
 Setting "rules allowed to fail" to 0 reproduces the scanner's qualified list
 exactly.
 
@@ -393,11 +393,12 @@ repeated unnecessarily.
 ---
 
 📊 Strategies
-The system currently evaluates four primary strategies:
+The system implements five strategies:
 Strategy 1
 Strategy 2
 Strategy 3
 Strategy 4
+Strategy 5 — implemented and selectable, but NOT in the default selection
 The strategy rules are treated as the authoritative signal layer.
 The learning engine does not silently modify the original strategy rules.
 The hierarchy is:
@@ -462,6 +463,121 @@ news/event risk
 selected fundamental risk indicators
 The safety engine can downgrade or reject a candidate.
 It must not manufacture a strategy signal that does not otherwise exist.
+---
+🎯 Strategy 5 — Pocket Pivot (O'Neil disciple)
+
+S5 implements the Gil Morales / Chris Kacher **pocket pivot**: a strong up-close
+day whose volume exceeds the largest DOWN-day volume of the previous ten
+sessions, taken at a constructive location (10 > 20 > 50 > 200 EMA stack, price
+at the 10 or 50 EMA rather than extended above it) inside a tight base.
+
+Three entry variants are traded, and two the source explicitly tells you to skip
+are implemented but disabled:
+
+| Variant | State |
+| --- | --- |
+| `BASE_POCKET_PIVOT` — right side of a tight base | on |
+| `CONTINUATION_POCKET_PIVOT` — already broken out, bouncing off the 10 EMA | on |
+| `UNDERCUT_AND_RALLY` — breaks a prior low, recovers above it | on |
+| `ROUNDABOUT_POCKET_PIVOT` | off — the source recommends skipping it |
+| BGU (buyable gap up) | off — same |
+
+Exits do not use the engine's 7% stop and 3R target. They use the source's
+**35-day / 7-week stop machine** (`PocketPivotSLStateMachine`): the 10 EMA is
+the stop from entry; an early violation inside the first 35 trading days widens
+the stop to the 50 EMA; surviving 35 days without violating the 10 EMA locks it
+as a permanent trailing stop. Position sizing is deliberately concentrated — a
+30% minimum position, so about three concurrent S5 names.
+
+**Every constant in the S5 section of `core.py` carries one of three tags**, and
+they are not interchangeable:
+
+| Tag | Means |
+| --- | --- |
+| `SOURCE_STATED` | stated outright in the source. Changing it changes the system. |
+| `GTF_APPROXIMATION` | the source showed this visually; the number is our proxy. |
+| `NEEDS_TUNING` | no source backing at all. A placeholder. |
+
+### S5 is live, and has no quality score
+
+S5 is in `DEFAULT_STRATEGIES` and is forward-tracked. It went live only after
+its evidence run; see `research/S5_POCKETPIVOT_FINDINGS.md` and
+`research/S5_SELECTION_STUDY.md`.
+
+Two things about it differ from S1–S4 on purpose.
+
+**No marking.** S1–S4 each contribute a hand-written 30-point
+`strategy_quality_score()`. S5 contributes nothing (`STRATEGIES_WITHOUT_QUALITY_
+COMPONENT`), because the evidence run found that *nothing measurable at entry
+separates ordinary S5 winners from losers* — the largest gap across 42 readings
+was 0.15 standard deviations. A score built on those readings would rank noise,
+and 84 candidate ranking rules were tested and all failed a proper
+multiple-comparison null. `final_setup_score()` rescales the four components it
+can measure onto 100 and reports Strategy as `NaN`, so "not measured" stays
+distinguishable from "measured badly". S5 is also exempt from the forward-test
+score gate, because gating on a score it does not have would gate on nothing.
+
+**Selection is a filter, not a rank.** What survived the null is a
+volatility-and-gap filter, `S5_MIN_ATR_PCT = 4.0` and `S5_MIN_GAP_PCT = 0.36`,
+tagged `EVIDENCE_DERIVED`. It keeps 9.5% of raw signals — roughly 10 a week
+instead of 109, which is tradeable against three concurrent positions. Profit
+factor rises in all five years of the record with it on, including turning both
+losing years positive. Re-fitting the ATR level quarterly picks 4.00 anyway.
+`S5_APPLY_EVIDENCE_FILTER = False` restores the raw source rule set, which is
+what a fresh evidence capture needs.
+
+**Its trade geometry is its own.** S5 carries no target — it trails on the
+10/50 EMA machine until the stop breaks — so its scan rows report
+`Target 3R = None`, `R:R = "trailing (10/50 EMA)"`, and a stop taken from the
+10 EMA (or the trigger day's low for undercut entries) rather than the shared
+7%. `refresh_forward_positions()` runs the same state machine the backtest
+does, so a forward test and a backtest of S5 measure the same system.
+
+**Running S5 on its own** — three ways in, all reading local candles, no Dhan
+calls:
+
+```bash
+# GitHub Actions (the only one with enough CPU for a full universe)
+#   Run backtest -> study: s5_pocketpivot
+
+# headless, on any machine with the candle store
+BACKTEST_STUDY=s5_pocketpivot BACKTEST_PERIOD='2 Years' python daily_job.py study
+
+# API
+POST /api/v1/backtest/s5-pocketpivot   {"universes": ["Nifty 500"], "period": "2 Years"}
+```
+
+This is NOT `/backtest/runs` with strategy 5 selected. That path replays
+everything against a 7% stop and a 3R target, which for a pocket pivot would
+measure the target rather than the strategy.
+
+**S5 has no scoring component, on purpose.** S1–S4 each contribute a
+hand-written 30-point `strategy_quality_score()`; S5 contributes nothing,
+because writing one would mean deciding in advance — from nothing — that a 2x
+volume signature is worth more than a tight base. `final_setup_score()` knows
+this (`STRATEGIES_WITHOUT_QUALITY_COMPONENT`) and rescales the four components
+it *can* measure onto 100, reporting Strategy as `NaN`. Zeroing it would not be
+neutral; it would be a 33-point penalty on every S5 candidate — a marking
+decision made by omission.
+
+The scoring gets written from evidence instead. Every S5 signal is captured
+ungated, with its readings from the signal bar and what the trade went on to do:
+
+```bash
+# capture + analyse in one run
+BACKTEST_STUDY=s5_pocketpivot python daily_job.py study
+
+# re-cut the question over the stored run — no re-simulation
+GET /api/v1/backtest/s5-winner-profile?big_winner_quantile=0.9
+```
+
+`s5_winner_profile()` reports, for ~40 readings, how far apart the winners and
+losers sit in standard deviations of that reading — on two splits: every winner
+against every loser, and the top quintile by return against everything else
+(in a system held on a trailing stop, the mass of small wins is not where the
+money is). Readings that separate nothing are reported too; that is the
+evidence for leaving them out. Only then is a marking system worth writing.
+
 ---
 🔬 Strategy 4 Recovery Study
 Strategy 4 also contains a separate research-only Recovery Study.

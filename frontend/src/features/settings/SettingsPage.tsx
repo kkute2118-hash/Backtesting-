@@ -61,7 +61,7 @@ export function SettingsPage() {
   const setPreference = useSetPreference();
 
   const [defaultUniverses, setDefaultUniverses] = useState<string[]>(["Nifty 500"]);
-  const [defaultStrategies, setDefaultStrategies] = useState<number[]>([1, 2, 3, 4]);
+  const [defaultStrategies, setDefaultStrategies] = useState<number[]>([1, 2, 3, 4, 5]);
   const [defaultGate, setDefaultGate] = useState(85);
   const [mounted, setMounted] = useState(false);
 

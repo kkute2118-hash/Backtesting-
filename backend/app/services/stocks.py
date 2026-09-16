@@ -235,7 +235,8 @@ def condition_matrix(symbol: str, strategies: list[int] | None = None) -> dict[s
         raise ApiError(f"{sym} has only {len(df)} stored bars; 260 are needed.")
     f = core.features_fast(sym, df).replace([np.inf, -np.inf], np.nan)
 
-    wanted = sorted({int(s) for s in (strategies or [1, 2, 3, 4]) if int(s) in (1, 2, 3, 4)})
+    wanted = sorted({int(s) for s in (strategies or core.DEFAULT_STRATEGIES)
+                     if int(s) in core.IMPLEMENTED_STRATEGIES})
     out = []
     for s in wanted:
         matrix = core.strategy_condition_matrix(f, s)
