@@ -10722,6 +10722,12 @@ def save_learning_panel_run(result):
 
 ML_MIN_SAMPLES = 60
 ML_MIN_CLASS_SAMPLES = 15
+# Per-STRATEGY evidence before the classifier is allowed to speak about that
+# strategy. Without it, the first completed S5 forward test - one trade - put a
+# strategy_S5_POCKETPIVOT dummy into the model, and every S5 candidate then got
+# a confident-looking Win Probability fitted on a single winning sample. The
+# whole-model minimum above says nothing about the per-strategy slice.
+ML_MIN_STRATEGY_SAMPLES = 30
 ML_FEATURE_COLUMNS = [
     "score", "htf", "footprint", "strategy_score",
     "entry_quality", "relative_strength", "safety_score"
@@ -10813,6 +10819,10 @@ def train_win_probability_model(market="INDIA"):
         "gbc_model": gbc,
         "logit_model": logit,
         "feature_columns": list(X.columns),
+        # How much evidence exists per strategy, so inference can refuse to
+        # answer for one the model has barely seen.
+        "strategy_samples": {str(k).upper(): int(v) for k, v in
+                             q["strategy"].astype(str).str.upper().value_counts().items()},
         "gbc_auc": gbc_auc, "gbc_brier": gbc_brier,
         "logit_auc": logit_auc, "logit_brier": logit_brier,
     })
@@ -10833,6 +10843,27 @@ def ml_win_probability(model_info, row):
                 return v
         return default
 
+    strategy = str(g("strategy", "Strategy", default="")).upper()
+
+    # Two refusals, both of which used to be silent numbers instead.
+    #
+    # A strategy the model has barely seen. One completed S5 trade was enough to
+    # create its dummy column, after which every S5 candidate was handed a
+    # probability fitted on that single sample.
+    seen = (model_info.get("strategy_samples") or {}).get(strategy, 0)
+    if seen < ML_MIN_STRATEGY_SAMPLES:
+        return np.nan
+    #
+    # A missing strategy_score. g() would default it to 0.0, which is not
+    # "unknown" to a model trained on 15-30 - it is the worst possible setup.
+    # S5 has no quality component by design, so its score is absent rather than
+    # low, and the honest output is no estimate at all.
+    raw_strategy_score = row.get("strategy_score") if hasattr(row, "get") else None
+    if raw_strategy_score is None or pd.isna(raw_strategy_score):
+        raw_strategy_score = row.get("Strategy Score") if hasattr(row, "get") else None
+    if raw_strategy_score is None or pd.isna(raw_strategy_score):
+        return np.nan
+
     feat = {
         "score": g("score", "Score"),
         "htf": g("htf", "HTF Score", "HTF Demand", "HTF"),
@@ -10842,7 +10873,6 @@ def ml_win_probability(model_info, row):
         "relative_strength": g("relative_strength", "Relative Strength"),
         "safety_score": g("safety_score", "Safety Score"),
     }
-    strategy = str(g("strategy", "Strategy", default="")).upper()
     regime = str(g("regime", "Regime", default=""))
 
     x = pd.DataFrame([feat])
