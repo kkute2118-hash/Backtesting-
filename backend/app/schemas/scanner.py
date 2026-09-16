@@ -45,6 +45,20 @@ class CustomValidateRequest(BaseModel):
     rules: str = ""
 
 
+class PortfolioRequest(BaseModel):
+    """How to size a set of candidates, not which ones are best.
+
+    `filters` is the same shape the results table uses, so the portfolio is
+    built from exactly the rows on screen rather than from the whole run.
+    """
+
+    filters: "ResultFilters | None" = None
+    capital: float = Field(default=1_000_000.0, gt=0)
+    risk_pct: float = Field(default=1.0, gt=0, le=100)
+    max_positions: int = Field(default=20, ge=1, le=200)
+    max_correlation: float | None = Field(default=None, ge=0, le=1)
+
+
 class ResultFilters(BaseModel):
     """Post-scan filters. Changing these never re-runs the engine."""
 
@@ -103,3 +117,6 @@ class PortfolioRequest(BaseModel):
     capital: float = Field(default=100000, gt=0)
     risk_pct: float = Field(default=1.0, gt=0, le=100)
     slots: int = Field(default=5, ge=1, le=50)
+
+
+PortfolioRequest.model_rebuild()

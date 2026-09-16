@@ -454,6 +454,51 @@ def filter_rows(rows: Iterable[dict[str, Any]], filters: dict[str, Any]) -> list
     return out
 
 
+def portfolio(rows: Iterable[dict[str, Any]], capital: float, risk_pct: float,
+              max_positions: int, max_correlation: float | None = None) -> dict[str, Any]:
+    """Size a SET of candidates rather than ranking them.
+
+    Deliberately takes the rows the user is actually looking at — the filtered
+    set — rather than re-reading the whole run, so the table, this and the
+    forward-test action never disagree about which candidates are in play.
+
+    Price frames come from the local store only. This never downloads: it runs
+    from a UI click, and a scan that silently turns into 500 Dhan requests is
+    how the rate limiter gets tripped mid-session.
+    """
+    frame = pd.DataFrame(list(rows or []))
+    if frame.empty:
+        return {"positions": [], "skipped": [],
+                "summary": {"selected": 0, "reason": "No candidates to size."}}
+
+    tickers = [str(t).upper().replace(".NS", "") for t in frame.get("Ticker", [])]
+    data: dict[str, pd.DataFrame] = {}
+    if tickers:
+        con = core._db()
+        try:
+            qmarks = ",".join(["?"] * len(tickers))
+            hist = pd.read_sql_query(
+                f"""SELECT symbol, dt, close, volume FROM candles
+                    WHERE symbol IN ({qmarks})
+                      AND dt >= date('now', '-200 day') ORDER BY symbol, dt""",
+                con, params=tickers)
+        finally:
+            con.close()
+        for symbol, group in hist.groupby("symbol"):
+            g = group.copy()
+            g["dt"] = pd.to_datetime(g.dt)
+            data[str(symbol)] = g.set_index("dt")[["close", "volume"]]
+
+    kwargs: dict[str, Any] = {"capital": float(capital), "risk_pct": float(risk_pct),
+                              "max_positions": int(max_positions)}
+    if max_correlation is not None:
+        kwargs["max_correlation"] = float(max_correlation)
+    built = core.build_portfolio(frame, data=data, **kwargs)
+    return {"positions": frame_to_records(built["positions"]),
+            "skipped": built["skipped"],
+            "summary": clean_value(built["summary"])}
+
+
 def confluence(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Stocks qualifying under more than one strategy at once."""
     by_ticker: dict[str, list[dict[str, Any]]] = {}
