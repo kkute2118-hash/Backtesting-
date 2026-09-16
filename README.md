@@ -505,6 +505,24 @@ its own harness, `run_s5_pocket_pivot_backtest()`, which reports win rate,
 average R and signals per week. `s5_tightness_diagnostic()` measures what the
 untuned base-tightness threshold is actually costing the scan.
 
+**Running S5 on its own** — three ways in, all reading local candles, no Dhan
+calls:
+
+```bash
+# GitHub Actions (the only one with enough CPU for a full universe)
+#   Run backtest -> study: s5_pocketpivot
+
+# headless, on any machine with the candle store
+BACKTEST_STUDY=s5_pocketpivot BACKTEST_PERIOD='2 Years' python daily_job.py study
+
+# API
+POST /api/v1/backtest/s5-pocketpivot   {"universes": ["Nifty 500"], "period": "2 Years"}
+```
+
+This is NOT `/backtest/runs` with strategy 5 selected. That path replays
+everything against a 7% stop and a 3R target, which for a pocket pivot would
+measure the target rather than the strategy.
+
 ---
 🔬 Strategy 4 Recovery Study
 Strategy 4 also contains a separate research-only Recovery Study.

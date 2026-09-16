@@ -70,3 +70,10 @@ def s4_extension(payload: StudyRequest) -> Any:
              status_code=status.HTTP_202_ACCEPTED)
 def s4_recovery(payload: StudyRequest) -> Any:
     return backtest.run_s4_recovery(universes=payload.universes, period=payload.period)
+
+
+@router.post("/backtest/s5-pocketpivot", response_model=JobEnvelope,
+             status_code=status.HTTP_202_ACCEPTED)
+def s5_pocketpivot(payload: StudyRequest) -> Any:
+    """S5 on its own, with S5's own stop machine — not the 7% / 3R replay."""
+    return backtest.run_s5_pocketpivot(universes=payload.universes, period=payload.period)

@@ -57,6 +57,7 @@ on:
           - 'sl_calibration'
           - 's4_extension'
           - 's4_recovery'
+          - 's5_pocketpivot'
 
 concurrency:
   # The database is one file; never let two jobs write it at once.

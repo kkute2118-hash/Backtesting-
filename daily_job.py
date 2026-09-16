@@ -709,6 +709,55 @@ def _study_s4_recovery(data, tickers, start, end):
             "metrics": {str(k): v for k, v in (metrics or {}).items()}}
 
 
+def _study_s5_pocketpivot(data, tickers, start, end):
+    """S5 alone, on S5's own stop machine — checklist items 5, 6 and 7.
+
+    Not a variant of the S1-S4 replay and deliberately not routed through it.
+    That harness exits every trade on a fixed 7% stop and a 3R target; a pocket
+    pivot is held on the 10/50 EMA rule until it breaks, so running S5 through
+    it would measure the target instead of the strategy. Nothing here touches
+    forward_tests: S5 earns auto-tracking by producing numbers first.
+    """
+    res = core.run_s5_pocket_pivot_backtest(data, start, end)
+    trades, diag, summary = res["trades"], res["diagnostics"], res["summary"]
+    log("study", "  symbols: " + ", ".join(f"{k}={v}" for k, v in diag.items()))
+
+    if not len(trades):
+        log("study", "  NO TRADES. That is a result about the rules, not a failure — "
+                     "check the tightness diagnostic below before touching any threshold.")
+    else:
+        log("study", f"  {summary['trades']:,} trades over {summary['weeks']} weeks, "
+                     f"{summary['symbols_scanned']:,} symbols scanned")
+        log("study", f"  win rate {summary['win_rate_pct']}%  avg R {summary['avg_r']}  "
+                     f"median R {summary['median_r']}  avg return {summary['avg_return_pct']}%")
+        log("study", f"  signals/week {summary['signals_per_week']} — the source claims "
+                     "~40-50/week on a full universe; a sanity check, not a target")
+        log("study", f"  avg holding {summary['avg_holding_bars']} bars")
+        if summary.get("trades_without_priced_risk"):
+            log("study", f"  {summary['trades_without_priced_risk']:,} trades had no priceable "
+                         "initial risk (entry at or below the 10 EMA) and carry no R")
+        for label, block in (("variant", summary.get("by_variant")),
+                             ("exit", summary.get("by_exit_reason"))):
+            for k, v in sorted((block or {}).items(), key=lambda kv: -kv[1]):
+                log("study", f"  {label}: {k} = {v:,}")
+
+    # Checklist item 7. S5_BASE_RANGE_PCT_MAX has zero source backing, so what it
+    # costs is measured every run rather than assumed once.
+    tight = core.s5_tightness_diagnostic(data)
+    log("study", f"  tightness filter @ {tight['threshold']}: "
+                 f"{tight['pocket_pivot_days']:,} pocket-pivot days, "
+                 f"{tight['in_constructive_location']:,} in a constructive location, "
+                 f"{tight['passed_tightness']:,} passed ({tight['pass_rate_pct']}%)")
+    for q, v in (tight.get("base_range_pct_quantiles") or {}).items():
+        log("study", f"    base range p{float(q) * 100:.0f} = {v}")
+    if tight["in_constructive_location"] and (tight["pass_rate_pct"] or 0) < 10:
+        log("study", "  WARNING the tightness filter is starving the scan — it has no source "
+                     "backing, so the threshold is the suspect, not the setup")
+
+    summary["tightness"] = tight
+    return summary
+
+
 def _study_win_probability(data, tickers, start, end):
     """Check whether the scanner's Win Probability actually ranks outcomes.
 
@@ -800,6 +849,7 @@ STUDIES = {
     "sl_calibration": _study_sl_calibration,
     "s4_extension": _study_s4_extension,
     "s4_recovery": _study_s4_recovery,
+    "s5_pocketpivot": _study_s5_pocketpivot,
 }
 
 
