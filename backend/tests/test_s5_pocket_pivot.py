@@ -536,3 +536,36 @@ def test_s5_carries_its_own_stop_and_no_target(frames, seeded_db):
     # Specifically NOT the shared 7% stop.
     assert abs(float(row["SL 7%"]) - float(row["Entry"]) * 0.93) > 1e-6
     assert pd.isna(row["Strategy Score"]), "S5 must stay unscored"
+
+
+def test_the_win_probability_model_refuses_to_guess_for_s5():
+    """S5 has no strategy-quality component, and the classifier was trained on
+    strategies that do. Defaulting its missing strategy_score to 0.0 fed the
+    model the worst possible setup and got a confident number back — a live
+    scan showed 94.5% for a strategy whose real win rate is 34%. Absent must
+    mean no estimate, not zero."""
+    model = {
+        "ready": True,
+        "feature_columns": ["score", "htf", "footprint", "strategy_score",
+                            "entry_quality", "relative_strength", "safety_score",
+                            "strategy_S1", "strategy_S5_POCKETPIVOT", "regime_BULL"],
+        "strategy_samples": {"S1": 5000, "S5_POCKETPIVOT": 1},
+        "gbc_model": None,   # never reached: both rows below are refused first
+    }
+    unscored = {"Score": 38, "HTF Score": 11, "Footprint Score": 13,
+                "Strategy Score": np.nan, "Entry Quality": 11, "Safety Score": 80,
+                "Strategy": "S5_POCKETPIVOT", "Regime": "BULL"}
+    assert pd.isna(core.ml_win_probability(model, unscored))
+
+    # Thin evidence is refused even when the score is present: one completed
+    # trade is not a basis for a probability.
+    thin = {**unscored, "Strategy Score": 29.0}
+    assert pd.isna(core.ml_win_probability(model, thin))
+
+    # A strategy the model never saw at all is refused too.
+    unknown = {**unscored, "Strategy": "NOT_A_STRATEGY", "Strategy Score": 29.0}
+    assert pd.isna(core.ml_win_probability(model, unknown))
+
+
+def test_a_thinly_evidenced_strategy_needs_real_samples_before_the_model_speaks():
+    assert core.ML_MIN_STRATEGY_SAMPLES >= 20
