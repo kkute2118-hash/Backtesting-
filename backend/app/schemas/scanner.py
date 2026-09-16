@@ -4,12 +4,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.engine import core
 from app.schemas.common import Period
 
 
 class ScanRequest(BaseModel):
     universes: list[str] = Field(default_factory=lambda: ["Nifty 500"], min_length=1)
-    strategies: list[int] = Field(default_factory=lambda: [1, 2, 3, 4], min_length=1)
+    strategies: list[int] = Field(
+        default_factory=lambda: list(core.DEFAULT_STRATEGIES), min_length=1)
     min_score: float = Field(default=85, ge=0, le=100)
     use_live_prices: bool = False
     limit: int | None = Field(default=None, ge=1, le=5000)
@@ -18,9 +20,13 @@ class ScanRequest(BaseModel):
     @field_validator("strategies")
     @classmethod
     def _known_strategies(cls, value: list[int]) -> list[int]:
-        bad = [s for s in value if s not in (1, 2, 3, 4)]
+        known = core.IMPLEMENTED_STRATEGIES
+        bad = [s for s in value if s not in known]
         if bad:
-            raise ValueError(f"Unknown strategy: {bad}. The engine implements 1-4.")
+            raise ValueError(
+                f"Unknown strategy: {bad}. The engine implements "
+                f"{min(known)}-{max(known)}."
+            )
         return sorted(set(value))
 
 
@@ -96,7 +102,8 @@ class FilteredResults(BaseModel):
 
 class RadarRequest(BaseModel):
     universes: list[str] = Field(default_factory=lambda: ["Nifty 500"], min_length=1)
-    strategies: list[int] = Field(default_factory=lambda: [1, 2, 3, 4], min_length=1)
+    strategies: list[int] = Field(
+        default_factory=lambda: list(core.DEFAULT_STRATEGIES), min_length=1)
     max_missing: int = Field(default=2, ge=0, le=6)
     min_readiness: float = Field(default=0, ge=0, le=100)
 

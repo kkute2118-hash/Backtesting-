@@ -1,6 +1,7 @@
-"""Walk-forward backtest, raw-signal capture, SL calibration and S4 studies.
+"""Walk-forward backtest, raw-signal capture, SL calibration, the S4 studies
+and the S5-only pocket-pivot replay.
 
-All four read the local candle store and make zero Dhan calls — deliberately.
+All of them read the local candle store and make zero Dhan calls — deliberately.
 Acquiring history is an explicit Data Manager action; a research run that
 silently downloaded would burn the rate limit and change its own inputs
 mid-flight.
@@ -19,7 +20,7 @@ from app.engine import core
 from app.services import learning as learning_service
 from app.services import jobs
 from app.services.jobs import JobHandle
-from app.services.serialization import clean_value, frame_to_records
+from app.services.serialization import clean_mapping, clean_value, frame_to_records
 from app.services.universe import resolve
 
 BACKTEST_KIND = "backtest"
@@ -27,6 +28,7 @@ RAW_KIND = "raw_signals"
 SL_KIND = "sl_calibration"
 S4_EXT_KIND = "s4_extension"
 S4_RECOVERY_KIND = "s4_recovery"
+S5_KIND = "s5_pocketpivot"
 
 PERIODS = {"6 Months": 183, "1 Year": 365, "2 Years": 730, "3 Years": 1095}
 
@@ -296,6 +298,72 @@ def run_s4_extension(*, universes: list[str], period: str,
     job = jobs.registry.submit(S4_EXT_KIND, "S4 EMA20 extension calibration", work,
                                request=request, persist=True)
     return job.to_public()
+
+
+def run_s5_pocketpivot(*, universes: list[str], period: str,
+                       max_hold_bars: int = 250) -> dict[str, Any]:
+    """S5 alone, on S5's own stop machine.
+
+    Separate from /backtest/runs on purpose. That endpoint replays S1-S4 against
+    a fixed 7% stop and a 3R target; a pocket pivot is held on the 10/50 EMA
+    rule until it breaks, so measuring it there would measure the target. This
+    reports what checklist item 6 asks for — win rate, average R, signals per
+    week — plus what the untuned base-tightness threshold is costing the scan.
+    """
+    tickers = resolve(universes)
+    start, end = period_window(period)
+    request = {"universes": universes, "period": period, "max_hold_bars": max_hold_bars,
+               "start": start.isoformat(), "end": end.isoformat(),
+               "universe_size": len(tickers)}
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        data = _study_dataset(handle, tickers, start, end)
+        handle.progress(0.2, "Replaying pocket pivots on the 35-day stop machine")
+        result = core.run_s5_pocket_pivot_backtest(
+            data, start, end, max_hold_bars=max_hold_bars,
+            progress_cb=lambda f: handle.progress(0.2 + 0.65 * float(f), "Replaying"))
+        handle.progress(0.88, "Measuring the base-tightness threshold")
+        trades = result["trades"]
+        stats = {str(k): clean_value(v) for k, v in result["summary"].items()}
+        stats["diagnostics"] = {str(k): clean_value(v)
+                                for k, v in result["diagnostics"].items()}
+        stats["tightness"] = {str(k): clean_value(v)
+                              for k, v in core.s5_tightness_diagnostic(data).items()}
+        # The reason the run exists: which signal-bar readings separate the
+        # winners from the losers. No S5 score is computed anywhere in here.
+        stats["winner_profile"] = clean_mapping(result.get("winner_profile") or {})
+        handle.progress(0.95, "Storing the capture for re-analysis")
+        try:
+            stats["capture_run_id"] = core._persist_s5_captures(
+                result, start, end, len(tickers))
+        except Exception:
+            stats["capture_run_id"] = None
+        stats["universe_size"] = len(tickers)
+        stats["period"] = period
+        return {
+            "rows": frame_to_records(trades, limit=5000),
+            "columns": [str(c) for c in (trades.columns if trades is not None else [])],
+            "stats": stats,
+            "request": request,
+        }
+
+    job = jobs.registry.submit(S5_KIND, "S5 pocket pivot backtest", work,
+                               request=request, persist=True)
+    return job.to_public()
+
+
+def s5_winner_profile(*, run_id: int | None = None,
+                      big_winner_quantile: float = 0.80) -> dict[str, Any]:
+    """The winner analysis over a stored capture run. Synchronous: it reads
+    rows, it does not replay bars."""
+    profile = core.s5_winner_profile_from_db(
+        run_id=run_id, big_winner_quantile=big_winner_quantile)
+    if not profile.get("ok") and profile.get("reason") == "no stored S5 capture run":
+        raise ApiError(
+            "No S5 capture run is stored yet. Run POST /backtest/s5-pocketpivot "
+            "(or the s5_pocketpivot study) first — the analysis reads what that captured."
+        )
+    return clean_mapping(profile)
 
 
 def run_s4_recovery(*, universes: list[str], period: str,

@@ -48,7 +48,9 @@ def config() -> dict[str, Any]:
             {"id": 2, "label": "S2", "name": "Tight pullback in an uptrend"},
             {"id": 3, "label": "S3", "name": "Liquid pullback to EMA50"},
             {"id": 4, "label": "S4_SEPA", "name": "SEPA stage analysis"},
+            {"id": 5, "label": "S5_POCKETPIVOT", "name": "Pocket pivot (O'Neil disciple)"},
         ],
+        "default_strategies": list(core.DEFAULT_STRATEGIES),
         "forward_gate_default": 85,
         "market": market.market_status(),
     }

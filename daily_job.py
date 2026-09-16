@@ -36,7 +36,7 @@ Configuration comes from environment variables (see core._secret):
                SCAN_UNIVERSE     default "Nifty 500"; any name in
                                  core.UNIVERSE_CHOICES, including
                                  "NSE All Cash (~2000)" for the full list
-               SCAN_STRATEGIES   default "1,2,3,4"
+               SCAN_STRATEGIES   default "1,2,3,4" (S5 is opt-in)
                SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
                                  gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
@@ -117,13 +117,15 @@ def _clear_candles():
 
 
 def _selected_strategies():
-    raw = os.environ.get("SCAN_STRATEGIES", "1,2,3,4")
+    default = ",".join(str(s) for s in core.DEFAULT_STRATEGIES)
+    raw = os.environ.get("SCAN_STRATEGIES", default)
+    known = {str(s) for s in core.IMPLEMENTED_STRATEGIES}
     out = []
     for part in str(raw).split(","):
         part = part.strip()
-        if part in {"1", "2", "3", "4"} and int(part) not in out:
+        if part in known and int(part) not in out:
             out.append(int(part))
-    return out or [1, 2, 3, 4]
+    return out or list(core.DEFAULT_STRATEGIES)
 
 
 def _universes():
@@ -306,9 +308,15 @@ def step_add(result, min_score, session_date=None):
     if result is None or result.empty:
         log("add", "no qualified setups today; nothing added")
         return 0
-    selected = result[result["Score"] >= min_score].copy()
+    # S5 has no strategy-quality component by design, so its Score is not a
+    # judgement about the setup and gating on it would be gating on nothing.
+    # Its selection already happened: the evidence filter is part of its signal,
+    # so every S5 row that reaches here is one the record says is worth a slot.
+    unscored = {f"S{n}" for n in core.STRATEGIES_WITHOUT_QUALITY_COMPONENT} | {"S5_POCKETPIVOT"}
+    strategy_col = result["Strategy"].astype(str).str.upper()
+    selected = result[(result["Score"] >= min_score) | strategy_col.isin(unscored)].copy()
     if selected.empty:
-        log("add", f"no setup reached the >={min_score} gate; nothing added")
+        log("add", f"no setup reached the >={min_score} gate (S5 exempt); nothing added")
         return 0
     added = core.add_forward_candidates(selected, signal_date=session_date)
     names = ", ".join(f"{r.Ticker}/{r.Strategy}" for r in selected.itertuples())
@@ -707,6 +715,100 @@ def _study_s4_recovery(data, tickers, start, end):
             "metrics": {str(k): v for k, v in (metrics or {}).items()}}
 
 
+def _study_s5_pocketpivot(data, tickers, start, end):
+    """S5 alone, ungated, then: what do the winners have in common?
+
+    There is no S5 scoring system and this run is how one gets written. Every
+    signal is captured with its readings from the signal bar and what it went
+    on to do, and s5_winner_profile() measures which of those readings actually
+    separate winners from losers. A marking system comes out of that table, not
+    before it.
+
+    Not a variant of the S1-S4 replay and deliberately not routed through it.
+    That harness exits every trade on a fixed 7% stop and a 3R target; a pocket
+    pivot is held on the 10/50 EMA rule until it breaks, so running S5 through
+    it would measure the target instead of the strategy. Nothing here touches
+    forward_tests: S5 earns auto-tracking by producing numbers first.
+    """
+    started = time.perf_counter()
+    res = core.run_s5_pocket_pivot_backtest(data, start, end)
+    trades, diag, summary = res["trades"], res["diagnostics"], res["summary"]
+    log("study", "  symbols: " + ", ".join(f"{k}={v}" for k, v in diag.items()))
+
+    # Store the run so the winner analysis can be re-cut without re-simulating.
+    try:
+        run_id = core._persist_s5_captures(res, start, end, len(tickers),
+                                           elapsed=time.perf_counter() - started)
+        summary["capture_run_id"] = run_id
+        log("study", f"  stored as S5 capture run {run_id} — re-analyse with "
+                     "core.s5_winner_profile_from_db()")
+    except Exception as exc:
+        log("study", f"  WARNING could not store the capture run: {exc}")
+
+    if not len(trades):
+        log("study", "  NO TRADES. That is a result about the rules, not a failure — "
+                     "check the tightness diagnostic below before touching any threshold.")
+    else:
+        log("study", f"  {summary['trades']:,} trades over {summary['weeks']} weeks, "
+                     f"{summary['symbols_scanned']:,} symbols scanned")
+        log("study", f"  win rate {summary['win_rate_pct']}%  avg R {summary['avg_r']}  "
+                     f"median R {summary['median_r']}  avg return {summary['avg_return_pct']}%")
+        log("study", f"  signals/week {summary['signals_per_week']} — the source claims "
+                     "~40-50/week on a full universe; a sanity check, not a target")
+        log("study", f"  avg holding {summary['avg_holding_bars']} bars")
+        if summary.get("trades_without_priced_risk"):
+            log("study", f"  {summary['trades_without_priced_risk']:,} trades had no priceable "
+                         "initial risk (entry at or below the 10 EMA) and carry no R")
+        for label, block in (("variant", summary.get("by_variant")),
+                             ("exit", summary.get("by_exit_reason"))):
+            for k, v in sorted((block or {}).items(), key=lambda kv: -kv[1]):
+                log("study", f"  {label}: {k} = {v:,}")
+
+    # Checklist item 7. S5_BASE_RANGE_PCT_MAX has zero source backing, so what it
+    # costs is measured every run rather than assumed once.
+    tight = core.s5_tightness_diagnostic(data)
+    log("study", f"  tightness filter @ {tight['threshold']}: "
+                 f"{tight['pocket_pivot_days']:,} pocket-pivot days, "
+                 f"{tight['in_constructive_location']:,} in a constructive location, "
+                 f"{tight['passed_tightness']:,} passed ({tight['pass_rate_pct']}%)")
+    for q, v in (tight.get("base_range_pct_quantiles") or {}).items():
+        log("study", f"    base range p{float(q) * 100:.0f} = {v}")
+    if tight["in_constructive_location"] and (tight["pass_rate_pct"] or 0) < 10:
+        log("study", "  WARNING the tightness filter is starving the scan — it has no source "
+                     "backing, so the threshold is the suspect, not the setup")
+
+    # The step this has to come before any scoring: what do the winners share?
+    profile = res.get("winner_profile") or {}
+    if not profile.get("ok"):
+        log("study", f"  winner profile unavailable: {profile.get('reason')}")
+    else:
+        log("study", f"  winner profile — {profile['winners']:,} winners vs "
+                     f"{profile['losers']:,} losers, {profile['features_measured']} readings "
+                     f"measured, split on {profile['split']}")
+        log("study", f"  VERDICT: {profile['verdict']}")
+        log("study", "  reading                        win avg    loss avg   gap(sd)  read")
+        for r in profile["winners_vs_losers"][:15]:
+            log("study", f"    {r['Feature']:<28} {str(r['Win Avg']):>9} {str(r['Loss Avg']):>11}"
+                         f" {r['Gap (in std devs)']:>8}  {r['Read'].split(' — ')[0]}")
+        if profile.get("big_winners_vs_rest"):
+            log("study", f"  big winners (top quintile, return >= "
+                         f"{profile['big_winner_cut_return_pct']}%) vs the rest:")
+            for r in profile["big_winners_vs_rest"][:10]:
+                log("study", f"    {r['Feature']:<28} {str(r['Win Avg']):>9} {str(r['Loss Avg']):>11}"
+                             f" {r['Gap (in std devs)']:>8}")
+        for col, rows in (profile.get("by") or {}).items():
+            for r in rows:
+                log("study", f"  {col}: {r['Value']} — n={r['N']:,} win {r['Win %']}% "
+                             f"avg R {r['Avg R']} avg return {r['Avg Return %']}%")
+        if profile["inert_readings"]:
+            log("study", f"  measured and inert ({len(profile['inert_readings'])}): "
+                         + ", ".join(profile["inert_readings"][:12]))
+
+    summary["tightness"] = tight
+    summary["winner_profile"] = profile
+    return summary
+
+
 def _study_win_probability(data, tickers, start, end):
     """Check whether the scanner's Win Probability actually ranks outcomes.
 
@@ -798,6 +900,7 @@ STUDIES = {
     "sl_calibration": _study_sl_calibration,
     "s4_extension": _study_s4_extension,
     "s4_recovery": _study_s4_recovery,
+    "s5_pocketpivot": _study_s5_pocketpivot,
 }
 
 

@@ -14,7 +14,7 @@ import pytest
 
 from app.engine import core
 
-STRATEGIES = [1, 2, 3, 4]
+STRATEGIES = list(core.IMPLEMENTED_STRATEGIES)
 
 
 @pytest.fixture(scope="module")
