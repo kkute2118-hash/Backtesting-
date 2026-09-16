@@ -586,5 +586,219 @@
   "Begin storing point-in-time Nifty 500 membership with effective dates.",
   "Reconcile known 2024-2026 split and bonus dates against stored candles.",
   "Fill stops at min(stop, bar.open)."
- ]
+ ],
+ "scoring_restructure": {
+  "$comment": "Items 1-7 of the scoring restructure. Measured on the production store, not estimated. Engine FINAL-4_PIT_INDEPENDENT_COMPONENTS.",
+  "engine_version": "FINAL-4_PIT_INDEPENDENT_COMPONENTS",
+  "data_integrity": {
+   "duplication_found": {
+    "rows": 6608,
+    "distinct_trades": 3543,
+    "surplus": 3065,
+    "pct_of_table": 46.4,
+    "cause": "three backtest runs on 2026-09-06 over overlapping windows, bare INSERT, no unique key"
+   },
+   "inflated_confidence_verdicts": [
+    {
+     "strategy": "S3",
+     "band": "90-94",
+     "rows": 124,
+     "distinct": 62,
+     "reported": "HIGH",
+     "earned": "MEDIUM"
+    },
+    {
+     "strategy": "S4",
+     "band": "85-89",
+     "rows": 22,
+     "distinct": 14,
+     "reported": "MEDIUM",
+     "earned": "insufficient"
+    }
+   ],
+   "resolution": "engine_version column stamped on write; 6,608 unversioned rows marked PRE_PIT_UNVERSIONED, retained, excluded from every read. Partial unique index makes writes idempotent — confirmed in production: a second backtest over the same window left the count at 2,371 rather than doubling it.",
+   "forward_evidence": "none — all rows are source='backtest'; forward_tests holds 15 ACTIVE, 0 resolved"
+  },
+  "component_variance_before": {
+   "$comment": "sd across 6,608 real qualified signals. Three components could not discriminate at all.",
+   "relative_strength": {
+    "max": 5,
+    "sd": 0.0,
+    "distinct": 1,
+    "note": "every candidate scored 5/5"
+   },
+   "safety": {
+    "max": 5,
+    "sd": 0.18,
+    "distinct": 2
+   },
+   "market_regime": {
+    "max": 5,
+    "sd": null,
+    "note": "constant per scan by construction"
+   },
+   "entry_quality": {
+    "max": 10,
+    "sd": 1.08,
+    "distinct": 3
+   },
+   "strategy_score": {
+    "max": 30,
+    "sd": 1.76,
+    "distinct": 8
+   },
+   "htf": {
+    "max": 20,
+    "sd": 1.29,
+    "distinct": 9
+   },
+   "footprint": {
+    "max": 20,
+    "sd": 2.22,
+    "distinct": 12
+   },
+   "total_score_sd": 1.73
+  },
+  "double_counting_removed": {
+   "close_gt_ema50": "Trend +4, Relative Strength +5, Footprint +3 = 12 points for one boolean",
+   "ema20_extension": "Footprint +3, Entry Quality +10, S4 strategy quality +10",
+   "close_gt_ema200": "Trend +3, S3 strategy quality +10 (audit said S2/S3; only S3)",
+   "relvol": "Footprint +4, S2 strategy quality +10 (not in the audit)"
+  },
+  "signal_invariance_check": {
+   "session": "2026-09-11",
+   "symbols": 480,
+   "verdicts_compared": 1920,
+   "verdicts_changed": 0,
+   "qualified_signals": 225,
+   "note": "both engines loaded side by side and every strategy_signal compared"
+  },
+  "score_rescaling": {
+   "old": {
+    "mean": 68.06,
+    "sd": 10.8,
+    "max": 88
+   },
+   "new": {
+    "mean": 56.91,
+    "sd": 8.02,
+    "max": 78
+   },
+   "spearman_old_vs_new": 0.864,
+   "gate_moved_from": 85,
+   "gate_moved_to": 71,
+   "reason": "85 admitted 9 of 225 (4.0%); on the new scale nothing reaches 85 at all, so the gate would have forward-tested zero candidates. 71 admits the same share."
+  },
+  "backtest_on_corrected_engine": {
+   "window": "2025-09-15 to 2026-09-15",
+   "universe": "Nifty 500",
+   "gate": 71,
+   "symbols_with_history": 485,
+   "trades": 2371,
+   "overall": {
+    "win_pct": 34.0,
+    "avg_r": 0.035,
+    "total_r": 81.97,
+    "ci95_avg_r": [
+     -0.0262,
+     0.0953
+    ],
+    "verdict": "crosses zero — not distinguishable from zero"
+   },
+   "per_strategy": [
+    {
+     "strategy": "S1",
+     "trades": 1544,
+     "win_pct": 36.3,
+     "avg_r": 0.124,
+     "profit_factor": 1.21,
+     "total_r": 191.0,
+     "naive_p": 0.002,
+     "clustered_by_month_p": 0.415,
+     "note": "the naive p treats ~119 concurrent trades per month as independent; clustering by month over 13 months gives t=0.85, p=0.415. Not significant."
+    },
+    {
+     "strategy": "S2",
+     "trades": 206,
+     "win_pct": 33.0,
+     "avg_r": -0.017,
+     "profit_factor": 0.97,
+     "total_r": -3.5,
+     "naive_p": 0.866
+    },
+    {
+     "strategy": "S3",
+     "trades": 620,
+     "win_pct": 28.5,
+     "avg_r": -0.168,
+     "profit_factor": 0.75,
+     "total_r": -104.4,
+     "naive_p": 0.002,
+     "clustered_by_month_p": 0.138,
+     "note": "same correction applies; not significant once overlap is accounted for"
+    },
+    {
+     "strategy": "S4",
+     "trades": 1,
+     "note": "one trade — nothing can be said"
+    }
+   ],
+   "caveats": [
+    "in-sample replay over the data the rules were built against",
+    "the 71 gate was derived from this data's own distribution",
+    "four strategies examined, so naive p-values are not multiple-comparison corrected",
+    "trades overlap heavily in time; the effective sample is far below the trade count"
+   ]
+  },
+  "component_fit": {
+   "$comment": "The answer to 'which characteristics do winning trades share?'",
+   "method": "OLS on result_r and unregularised logistic on win/loss, standardised, with Wald standard errors, 95% intervals and VIF. alpha=0.05, min 200 observations per strategy.",
+   "results": {
+    "S1": {
+     "n": 1544,
+     "r2": 0.0032,
+     "min_p": 0.3709,
+     "qualifying_components": 0
+    },
+    "S2": {
+     "n": 206,
+     "r2": 0.0104,
+     "min_p": 0.2023,
+     "qualifying_components": 0
+    },
+    "S3": {
+     "n": 620,
+     "r2": 0.0024,
+     "min_p": 0.568,
+     "qualifying_components": 0
+    },
+    "S4": {
+     "n": 1,
+     "fitted": false,
+     "reason": "below the 200-observation bar"
+    }
+   },
+   "max_vif": 1.95,
+   "collinearity_verdict": "components are genuinely independent now — max VIF 1.95, down from a -0.52 correlation between strategy_score and footprint before the restructure",
+   "verdict": "no_component_clears_p05_on_any_strategy",
+   "reading": "The components are independent and the score still carries no information about outcome. R-squared is 0.3% at best. Making the score honest did not make it informative: the double-counting was real and worth removing, but it was not what was wrong. SCORE_COMPONENT_WEIGHTS remains unfitted and unchanged.",
+   "score_still_does_not_rank_within_strategy": {
+    "S1_top_minus_bottom_quartile_r": -0.079,
+    "S3_top_minus_bottom_quartile_r": -0.141,
+    "note": "both negative — a higher score is, if anything, slightly worse"
+   }
+  },
+  "defects_found_while_implementing": [
+   "train_win_probability_model used train_test_split(random_state=42, stratify=y) — a random split on time-series data, training on trades that happened after the test set. Every AUC and Brier it has reported was measured that way. Now a chronological 75/25 hold-out.",
+   "learning_observations was CREATE TABLE'd twice with different schemas (signal_dt vs signal_time). The losing one would have made every learning write raise on a missing column and be swallowed by a bare except — a store that silently learned nothing.",
+   "FEATURE_CACHE_VERSION was decorative: its only reference, _feature_cache_key(), was never called, and the cache keyed on (symbol, df). Bumping it invalidated nothing.",
+   "setup_score() was a second, differently-weighted scorer with zero callers."
+  ],
+  "next_steps": [
+   "Entries remain the open question. Three studies (score bands, 28-feature screen, component regression) now agree that nothing captured at signal time separates winners from losers.",
+   "Forward evidence still does not exist. 15 positions are open and none have resolved; until they do, every number here is in-sample.",
+   "S4 produced one trade in a year. Either its rules are effectively never satisfied or something upstream is filtering it out — worth a look before any more effort goes into weighting it.",
+   "Do not tune the weights. The fit refuses for a reason, and the refusal is the finding."
+  ]
+ }
 }
