@@ -16,6 +16,7 @@ import pandas as pd
 
 from app.core.errors import ApiError
 from app.engine import core
+from app.services import learning as learning_service
 from app.services import jobs
 from app.services.jobs import JobHandle
 from app.services.serialization import clean_value, frame_to_records
@@ -95,6 +96,11 @@ def run(*, universes: list[str], period: str, threshold: float) -> dict[str, Any
                 **_backtest_stats(bt),
                 "elapsed_seconds": round(elapsed, 2),
                 "learning_observations_added": int(learned),
+                # A rerun of the same window now legitimately adds nothing,
+                # because the writes are idempotent. Without this the operator
+                # cannot tell that from a write that failed.
+                "learning_write": core._LAST_LEARNING_WRITE,
+                "learning_evidence": learning_service.evidence(),
                 "universe_size": len(tickers),
                 "threshold": threshold,
                 "period": period,

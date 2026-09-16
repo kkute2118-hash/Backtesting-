@@ -5,7 +5,6 @@ import { CheckCircle2, CircleAlert, Clock } from "lucide-react";
 import { Banner } from "@/components/ui/Misc";
 import { errorMessage } from "@/lib/api";
 import type { Freshness } from "@/types/api";
-import { date } from "@/lib/format";
 
 /**
  * Data freshness, given prominence on purpose.
@@ -45,8 +44,26 @@ export function FreshnessBanner({
           Data current
         </span>
       }>
-        Stored candles are complete through {date(freshness.latest)} — the last
-        completed session. {freshness.universe_size.toLocaleString("en-IN")} stocks checked.
+        {/* The message carries the reason when the newest close is older than
+            it looks — e.g. "14 Sep 2026 was not a trading day (NSE holiday:
+            Ganesh Chaturthi)". Restating it generically here hid that. */}
+        {freshness.message} {freshness.universe_size.toLocaleString("en-IN")} stocks checked.
+      </Banner>
+    );
+  }
+
+  // The session has closed but Dhan has not published its daily candle yet.
+  // There is nothing to top up, so this must not look like, or offer the fix
+  // for, stale data.
+  if (freshness.severity === "info") {
+    return (
+      <Banner tone="accent" title={
+        <span className="flex items-center gap-1.5">
+          <Clock className="h-3.5 w-3.5" aria-hidden />
+          Waiting on today&apos;s candle
+        </span>
+      }>
+        {freshness.message}
       </Banner>
     );
   }
