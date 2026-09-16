@@ -88,6 +88,32 @@ one (×1.221) while cutting the scan by 91%. Note `atr_pct >= 3.0` is *worse*
 than no filter while `>= 4.0` helps — a threshold that sensitive on one window
 is a warning, not a setting.
 
+## Two multiple-comparison tests, one of them fatal
+
+**Ranking rules: dead.** Searching 84 rankings (42 readings × 2 directions)
+directly on the test window found `s5_ema200_slope_pct` lowest-first at ×1.414,
+beating 100% of 30 random draws. That looks conclusive and is worthless. The
+right null is not one random draw but the BEST of 84 random draws, because with
+84 tries something always wins. Over 150 such experiments:
+
+| best-of-84 random rankings | |
+| --- | --- |
+| median | ×1.735 |
+| p95 | ×2.213 |
+| max | ×2.923 |
+
+The observed ×1.414 sits at **p = 0.98** — worse than the median of pure search
+luck. No ranking rule found here is real. Any "rank the candidates by X" scoring
+system built on this data would be ranking noise.
+
+**Filters: treat as unproven until the same test clears them.** The sweep's 71
+survivors out of 264 thresholds is ~27%, which is about what independent
+coin-flips would give (25%) if train and test performance were unrelated. The
+headline `atr_pct >= 4.0` is also the best of 264 tries, so it carries the same
+multiple-comparison risk that killed the rankings. A shuffled-outcome null for
+the sweep is the test that settles it; until it has run, the filter numbers
+below are a hypothesis, not a result.
+
 ## What to do with this
 
 1. **Filter on volatility and the entry gap, not on momentum.** `atr_pct >= 4`
@@ -96,8 +122,10 @@ is a warning, not a setting.
 2. **Do not build a score from the winners-vs-losers table.** Nothing separates
    there (max 0.15 sd). The separation is all in the big-winner tail and all in
    2023.
-3. **Treat the thresholds as provisional.** They come from one train/test split
-   on one market. A third window, or a walk-forward re-fit, is what would make
-   them a system rather than a hypothesis.
+3. **Treat the thresholds as provisional, and weakly so.** They come from one
+   train/test split on one market, and they are the best of 264 tries. The
+   identical style of search over rankings produced a result that a proper null
+   showed to be worse than luck. Do not trade these until the shuffled-outcome
+   null has cleared them and a third window agrees.
 4. Even at its best this is ×1.22 over 20 months on 3 concentrated positions.
    That is not a finished strategy; it is the first version that is not losing.
