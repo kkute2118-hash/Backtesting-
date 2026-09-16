@@ -523,6 +523,33 @@ This is NOT `/backtest/runs` with strategy 5 selected. That path replays
 everything against a 7% stop and a 3R target, which for a pocket pivot would
 measure the target rather than the strategy.
 
+**S5 has no scoring component, on purpose.** S1–S4 each contribute a
+hand-written 30-point `strategy_quality_score()`; S5 contributes nothing,
+because writing one would mean deciding in advance — from nothing — that a 2x
+volume signature is worth more than a tight base. `final_setup_score()` knows
+this (`STRATEGIES_WITHOUT_QUALITY_COMPONENT`) and rescales the four components
+it *can* measure onto 100, reporting Strategy as `NaN`. Zeroing it would not be
+neutral; it would be a 33-point penalty on every S5 candidate — a marking
+decision made by omission.
+
+The scoring gets written from evidence instead. Every S5 signal is captured
+ungated, with its readings from the signal bar and what the trade went on to do:
+
+```bash
+# capture + analyse in one run
+BACKTEST_STUDY=s5_pocketpivot python daily_job.py study
+
+# re-cut the question over the stored run — no re-simulation
+GET /api/v1/backtest/s5-winner-profile?big_winner_quantile=0.9
+```
+
+`s5_winner_profile()` reports, for ~40 readings, how far apart the winners and
+losers sit in standard deviations of that reading — on two splits: every winner
+against every loser, and the top quintile by return against everything else
+(in a system held on a trailing stop, the mass of small wins is not where the
+money is). Readings that separate nothing are reported too; that is the
+evidence for leaving them out. Only then is a marking system worth writing.
+
 ---
 🔬 Strategy 4 Recovery Study
 Strategy 4 also contains a separate research-only Recovery Study.

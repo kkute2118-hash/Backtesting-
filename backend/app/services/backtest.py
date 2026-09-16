@@ -20,7 +20,7 @@ from app.engine import core
 from app.services import learning as learning_service
 from app.services import jobs
 from app.services.jobs import JobHandle
-from app.services.serialization import clean_value, frame_to_records
+from app.services.serialization import clean_mapping, clean_value, frame_to_records
 from app.services.universe import resolve
 
 BACKTEST_KIND = "backtest"
@@ -322,13 +322,22 @@ def run_s5_pocketpivot(*, universes: list[str], period: str,
         result = core.run_s5_pocket_pivot_backtest(
             data, start, end, max_hold_bars=max_hold_bars,
             progress_cb=lambda f: handle.progress(0.2 + 0.65 * float(f), "Replaying"))
-        handle.progress(0.9, "Measuring the base-tightness threshold")
+        handle.progress(0.88, "Measuring the base-tightness threshold")
         trades = result["trades"]
         stats = {str(k): clean_value(v) for k, v in result["summary"].items()}
         stats["diagnostics"] = {str(k): clean_value(v)
                                 for k, v in result["diagnostics"].items()}
         stats["tightness"] = {str(k): clean_value(v)
                               for k, v in core.s5_tightness_diagnostic(data).items()}
+        # The reason the run exists: which signal-bar readings separate the
+        # winners from the losers. No S5 score is computed anywhere in here.
+        stats["winner_profile"] = clean_mapping(result.get("winner_profile") or {})
+        handle.progress(0.95, "Storing the capture for re-analysis")
+        try:
+            stats["capture_run_id"] = core._persist_s5_captures(
+                result, start, end, len(tickers))
+        except Exception:
+            stats["capture_run_id"] = None
         stats["universe_size"] = len(tickers)
         stats["period"] = period
         return {
@@ -341,6 +350,20 @@ def run_s5_pocketpivot(*, universes: list[str], period: str,
     job = jobs.registry.submit(S5_KIND, "S5 pocket pivot backtest", work,
                                request=request, persist=True)
     return job.to_public()
+
+
+def s5_winner_profile(*, run_id: int | None = None,
+                      big_winner_quantile: float = 0.80) -> dict[str, Any]:
+    """The winner analysis over a stored capture run. Synchronous: it reads
+    rows, it does not replay bars."""
+    profile = core.s5_winner_profile_from_db(
+        run_id=run_id, big_winner_quantile=big_winner_quantile)
+    if not profile.get("ok") and profile.get("reason") == "no stored S5 capture run":
+        raise ApiError(
+            "No S5 capture run is stored yet. Run POST /backtest/s5-pocketpivot "
+            "(or the s5_pocketpivot study) first — the analysis reads what that captured."
+        )
+    return clean_mapping(profile)
 
 
 def run_s4_recovery(*, universes: list[str], period: str,

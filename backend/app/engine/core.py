@@ -4944,6 +4944,83 @@ def _s5_initial_stop(f, entry_i, trigger_i, variant):
     return np.nan, None, "none"
 
 
+# The readings captured for EVERY S5 signal, so the question "what do the
+# winners have in common?" can be asked of evidence instead of intuition. The
+# list is deliberately wider than any scoring system would use: a reading that
+# turns out to separate nothing is exactly as useful to know about as one that
+# does, and it can only be ruled out if it was measured.
+S5_FINGERPRINT_FEATURES = [
+    # the pocket pivot's own readings
+    "s5_vol_signature_ratio", "s5_base_range_pct", "s5_atr_ratio",
+    "s5_atr_contracting", "s5_ma_stack", "s5_base_tightness_ok", "s5_vdu_recent",
+    "s5_dist_ema10_pct", "s5_dist_ema20_pct", "s5_dist_ema50_pct", "s5_dist_ema200_pct",
+    "s5_close_location", "s5_dist_recent_high_pct", "s5_ema200_slope_pct",
+    "s5_up_days_10", "s5_vol_vs_20d",
+    # the engine's generic signal fingerprint, reused rather than reinvented
+    "dist_ema20_atr", "dist_ema50_atr", "dist_ema200_atr", "atr_pct",
+    "relvol", "relvol_trend", "candle_body_pct", "candle_upper_wick_pct",
+    "candle_lower_wick_pct", "breakout_20d", "breakout_50d", "pullback_depth_pct",
+    "dist_recent_high_atr", "dist_recent_low_atr", "gap_pct",
+    "dist_support_atr", "dist_resistance_atr", "rsi14", "macd_hist",
+    "retracement_pct", "retracement_duration_bars", "retracement_volume_ratio",
+    "rejection_candle", "reclaim_candle", "stop_distance_pct", "safety_score",
+]
+
+S5_FINGERPRINT_CATEGORICALS = ["Variant", "market_regime", "trend_structure", "SL Basis"]
+
+
+def _s5_signal_fingerprint(df, f, s5, i, entry, stop, regime, safe, safety_flags):
+    """Every reading available at the signal bar, using only bars up to i.
+
+    The generic engine fingerprint plus the pocket-pivot readings it has no
+    reason to know about. `parts` is passed empty on purpose: there is no S5
+    score to record, which is the whole point of the exercise.
+    """
+    out = compute_signal_fingerprint(df, f, i, entry, stop, np.nan,
+                                     regime, safe, safety_flags, {})
+    # The deterministic score columns are meaningless without a scoring system;
+    # leaving them at 0 would look like a measurement.
+    for dead in ("score_htf", "score_footprint", "score_entry_quality",
+                 "score_trend", "score_relative_strength"):
+        out.pop(dead, None)
+
+    z, w = f.iloc[i], s5.iloc[i]
+
+    def pct_from(level):
+        lv = float(level) if pd.notna(level) else np.nan
+        c = float(z.close)
+        return round((c / lv - 1) * 100, 3) if np.isfinite(lv) and lv > 0 else None
+
+    def num(v, nd=4):
+        return round(float(v), nd) if pd.notna(v) and np.isfinite(float(v)) else None
+
+    bar_range = float(z.high) - float(z.low)
+    ema200_then = f.ema200.iloc[i - 60] if i >= 60 else np.nan
+    up_days = int((f.close.iloc[max(0, i - 9):i + 1] >
+                   f.open.iloc[max(0, i - 9):i + 1]).sum())
+
+    out.update({
+        "s5_vol_signature_ratio": num(w.s5_vol_signature_ratio),
+        "s5_base_range_pct": num(w.s5_base_range_pct),
+        "s5_atr_ratio": num(w.s5_atr_ratio),
+        "s5_atr_contracting": int(bool(w.s5_atr_contracting)),
+        "s5_ma_stack": int(bool(w.s5_ma_stack)),
+        "s5_base_tightness_ok": int(bool(w.s5_base_tightness_ok)),
+        "s5_vdu_recent": int(bool(w.s5_vdu_recent)),
+        "s5_dist_ema10_pct": pct_from(z.ema10),
+        "s5_dist_ema20_pct": pct_from(z.ema20),
+        "s5_dist_ema50_pct": pct_from(z.ema50),
+        "s5_dist_ema200_pct": pct_from(z.ema200),
+        "s5_close_location": (round((float(z.close) - float(z.low)) / bar_range, 4)
+                              if bar_range > 0 else None),
+        "s5_dist_recent_high_pct": pct_from(w.s5_recent_high),
+        "s5_ema200_slope_pct": (pct_from(ema200_then) if pd.notna(ema200_then) else None),
+        "s5_up_days_10": up_days,
+        "s5_vol_vs_20d": num(float(z.volume) / float(z.vol20)) if pd.notna(z.vol20) and float(z.vol20) > 0 else None,
+    })
+    return out
+
+
 def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
                                  min_bars=260, progress_cb=None):
     """Standalone walk-forward replay of S5, on its own stop machine.
@@ -4990,6 +5067,9 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
             s5 = strategy5_pocket_pivot_features(f)
             sig = _s5_enabled_variants(s5).to_numpy()
             labels = strategy5_entry_variant(f)
+            # Same O(1) precompute the other replays use, so the per-signal
+            # fingerprint does not re-derive safety from scratch each time.
+            avg_value, abnormal = _safety_fast_series(df)
 
             for i in np.flatnonzero(sig):
                 dt = pd.Timestamp(f.index[i])
@@ -5005,6 +5085,16 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
                 risk = entry - stop0 if np.isfinite(stop0) else np.nan
                 if not np.isfinite(risk) or risk <= 0:
                     diag["unpriced_risk"] += 1
+
+                regime, _ = _regime_from_row(f, i)
+                safe, _, safety_flags = _safety_from_row(avg_value, abnormal, i)
+                try:
+                    fingerprint = _s5_signal_fingerprint(
+                        df, f, s5, i, entry, stop0, regime, safe, safety_flags)
+                except Exception:
+                    # A fingerprint that cannot be computed must not cost the
+                    # trade: the outcome is the thing being measured.
+                    fingerprint = {}
 
                 machine = PocketPivotSLStateMachine(f.index[entry_i], entry_sl_override=override)
                 last = min(len(f) - 1, entry_i + int(max_hold_bars))
@@ -5057,6 +5147,7 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
                     "MAE %": round((min_low / entry - 1) * 100, 2),
                     "Partial Booked": round(booked_fraction, 2),
                     "VDU Confidence": bool(s5.s5_vdu_recent.iloc[i]),
+                    **fingerprint,
                 })
         except Exception:
             diag["failed"] += 1
@@ -5067,7 +5158,8 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
 
     trades = pd.DataFrame(rows)
     return {"trades": trades, "diagnostics": diag,
-            "summary": s5_backtest_summary(trades, start, end, diag)}
+            "summary": s5_backtest_summary(trades, start, end, diag),
+            "winner_profile": s5_winner_profile(trades)}
 
 
 def s5_backtest_summary(trades, start, end, diag=None):
@@ -5116,6 +5208,209 @@ def s5_backtest_summary(trades, start, end, diag=None):
             str(k): int(v) for k, v in trades["Exit Reason"].value_counts().items()
         }
     return summary
+
+
+def _s5_categorical_split(trades, column, win_mask):
+    """Win rate and average R per value of a categorical reading.
+
+    A gap table cannot speak about "which variant" or "which regime", and those
+    are exactly the splits that decide whether S5 has one edge or three
+    different ones wearing the same name.
+    """
+    if column not in trades.columns:
+        return []
+    out = []
+    r = pd.to_numeric(trades.get("R"), errors="coerce")
+    ret = pd.to_numeric(trades.get("Return %"), errors="coerce")
+    for value, block in trades.groupby(trades[column].astype(str)):
+        idx = block.index
+        n = len(block)
+        wins = int(win_mask.loc[idx].sum())
+        out.append({
+            "Value": str(value),
+            "N": n,
+            "Wins": wins,
+            "Win %": round(100.0 * wins / n, 1) if n else None,
+            "Avg R": (round(float(r.loc[idx].dropna().mean()), 3)
+                      if r.loc[idx].notna().any() else None),
+            "Avg Return %": (round(float(ret.loc[idx].dropna().mean()), 2)
+                             if ret.loc[idx].notna().any() else None),
+        })
+    return sorted(out, key=lambda d: -d["N"])
+
+
+def s5_winner_profile(trades, big_winner_quantile=0.80, min_n=5):
+    """What the winning S5 trades actually have in common.
+
+    This is the step that has to come BEFORE any S5 scoring exists. Every
+    captured signal carries its readings from the signal bar and what it went
+    on to do, so the question is answerable by measurement: for each reading,
+    how far apart are the winners and the losers, in standard deviations of
+    that reading itself.
+
+    Two splits, because a trend-following system has two different questions:
+
+      winners vs losers   every trade that made money against every one that
+                          did not. Says what avoids a loser.
+      big winners vs rest the top quintile by return against everything else.
+                          Says what finds the trades the system is actually
+                          for - in a system held on a trailing stop, the mass
+                          of small wins is not where the money is.
+
+    A reading that separates nothing is reported too, and that is not a null
+    result: it is the evidence for leaving that reading out of the scoring.
+    Nothing here changes a score. It produces the table a scoring system would
+    have to be argued from.
+    """
+    empty = {"ok": False, "reason": "no trades captured", "n": 0}
+    if trades is None or trades.empty:
+        return empty
+
+    ret = pd.to_numeric(trades.get("Return %"), errors="coerce")
+    if ret.notna().sum() < 2 * min_n:
+        return {"ok": False, "reason": f"only {int(ret.notna().sum())} priced trades", "n": int(len(trades))}
+
+    win_mask = ret > 0
+    wins, losses = trades[win_mask], trades[~win_mask]
+    features = [c for c in S5_FINGERPRINT_FEATURES if c in trades.columns]
+
+    profile = {
+        "ok": True,
+        "n": int(len(trades)),
+        "winners": int(win_mask.sum()),
+        "losers": int((~win_mask).sum()),
+        "win_rate_pct": round(float(win_mask.mean() * 100), 1),
+        "features_measured": len(features),
+        "split": "Return % > 0 after costs",
+    }
+
+    gaps = _feature_gap_table(wins, losses, features, min_n=min_n)
+    profile["winners_vs_losers"] = [
+        {**row, "Read": _component_read_label(row["Gap (in std devs)"])}
+        for row in gaps.to_dict("records")
+    ]
+
+    # Top quintile by return, against everything else.
+    cut = float(ret.dropna().quantile(big_winner_quantile))
+    big_mask = ret >= cut
+    if int(big_mask.sum()) >= min_n and int((~big_mask).sum()) >= min_n:
+        big_gaps = _feature_gap_table(trades[big_mask], trades[~big_mask], features, min_n=min_n)
+        profile["big_winners_vs_rest"] = [
+            {**row, "Read": _component_read_label(row["Gap (in std devs)"])}
+            for row in big_gaps.to_dict("records")
+        ]
+        profile["big_winner_cut_return_pct"] = round(cut, 2)
+        profile["big_winners"] = int(big_mask.sum())
+
+    profile["by"] = {col: _s5_categorical_split(trades, col, win_mask)
+                     for col in S5_FINGERPRINT_CATEGORICALS if col in trades.columns}
+
+    strong = [r for r in profile["winners_vs_losers"] if abs(r["Gap (in std devs)"]) >= 0.5]
+    weak = [r for r in profile["winners_vs_losers"] if abs(r["Gap (in std devs)"]) < 0.2]
+    profile["separating_readings"] = [r["Feature"] for r in strong]
+    profile["inert_readings"] = [r["Feature"] for r in weak]
+    profile["verdict"] = (
+        f"{len(strong)} reading(s) separate winners from losers by 0.5 sd or more"
+        if strong else
+        "NOTHING measured separates winners from losers by 0.5 sd. A scoring "
+        "system built on these readings would be ranking noise."
+    )
+    return profile
+
+
+S5_CAPTURE_TABLE = "s5_signal_captures"
+
+
+def ensure_s5_capture_tables():
+    """Storage for the S5 evidence run.
+
+    Created lazily rather than at import: this is research storage, and a
+    process that never runs the study should not be writing schema.
+    """
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS s5_capture_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT,
+            start_date TEXT, end_date TEXT, universe_size INTEGER,
+            symbols_scanned INTEGER, signals INTEGER, trades INTEGER,
+            elapsed_seconds REAL, status TEXT
+        )""")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _persist_s5_captures(result, start, end, universe_size, elapsed=None):
+    """Store every captured S5 trade with its signal-bar readings.
+
+    The point of storing them is that the winner analysis can then be re-run,
+    re-cut and argued with WITHOUT re-simulating years of bars - which is what
+    makes "look at the evidence again" a cheap thing to do rather than a
+    four-hour thing. The trade columns are written as they come, so adding a
+    reading to S5_FINGERPRINT_FEATURES does not need a migration.
+    """
+    trades = result.get("trades") if isinstance(result, dict) else result
+    diag = (result.get("diagnostics") or {}) if isinstance(result, dict) else {}
+    ensure_s5_capture_tables()
+    con = _db()
+    try:
+        cur = con.execute(
+            """INSERT INTO s5_capture_runs(created_at,start_date,end_date,universe_size,
+               symbols_scanned,signals,trades,elapsed_seconds,status)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (datetime.now().isoformat(timespec="seconds"), str(start), str(end),
+             int(universe_size), int(diag.get("scanned", 0)), int(diag.get("signals", 0)),
+             0 if trades is None else int(len(trades)),
+             float(elapsed) if elapsed is not None else None, "COMPLETED"))
+        run_id = int(cur.lastrowid)
+        if trades is not None and not trades.empty:
+            stored = trades.copy()
+            stored.insert(0, "run_id", run_id)
+            for col in stored.columns:
+                if stored[col].dtype == object:
+                    stored[col] = stored[col].astype(str)
+            stored.to_sql(S5_CAPTURE_TABLE, con, if_exists="append", index=False)
+        con.commit()
+        return run_id
+    finally:
+        con.close()
+
+
+def s5_stored_captures(run_id=None):
+    """The stored trades of one capture run - the latest if none is named."""
+    ensure_s5_capture_tables()
+    con = _db()
+    try:
+        if not _table_exists(con, S5_CAPTURE_TABLE):
+            return pd.DataFrame(), None
+        if run_id is None:
+            row = con.execute(
+                "SELECT id FROM s5_capture_runs WHERE trades > 0 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return pd.DataFrame(), None
+            run_id = int(row[0])
+        df = pd.read_sql_query(
+            f"SELECT * FROM {S5_CAPTURE_TABLE} WHERE run_id=?", con, params=(int(run_id),))
+        return df, int(run_id)
+    finally:
+        con.close()
+
+
+def s5_winner_profile_from_db(run_id=None, **kwargs):
+    """Re-ask "what do the winners have in common?" of a stored capture run.
+
+    Same analysis, no re-simulation. This is what makes re-cutting the question
+    (a different big-winner quantile, a subset of variants) cost seconds
+    instead of hours, and it is the loop a scoring system should be argued out
+    of rather than written in one sitting.
+    """
+    trades, resolved = s5_stored_captures(run_id)
+    if trades.empty:
+        return {"ok": False, "reason": "no stored S5 capture run", "run_id": resolved}
+    profile = s5_winner_profile(trades, **kwargs)
+    profile["run_id"] = resolved
+    return profile
 
 
 def s5_tightness_diagnostic(data, min_bars=260):
@@ -6054,22 +6349,17 @@ def strategy_quality_score(x, s):
         p += 10 if z.mmom >= 30 else 7 if z.mmom >= 25 else 4 if z.mmom >= 20 else 0
         p += 10 if z.mema10 > z.mema20 else 0
         raw_max = 20.0
-    elif s == 5:
-        # Only what S5 itself owns. Volume EXPANSION belongs to Footprint and
-        # the EMA20 extension to Entry Quality, so neither is re-scored here;
-        # what is scored is the pocket pivot's own volume SIGNATURE (today
-        # against the biggest down-day volume of the base, which no other
-        # component looks at), the full EMA stack, base tightness, and the
-        # volume dry-up reading - which the source downgrades to "indicative",
-        # so it is worth points and is never part of the trigger.
-        s5 = strategy5_pocket_pivot_features(x)
-        w = s5.iloc[-1]
-        ratio = float(w.s5_vol_signature_ratio) if pd.notna(w.s5_vol_signature_ratio) else np.nan
-        p += 10 if np.isfinite(ratio) and ratio >= 2.0 else 7 if np.isfinite(ratio) and ratio >= 1.5 else 4 if bool(w.s5_volume_ok) else 0
-        p += 8 if bool(w.s5_ma_stack) else 0
-        p += 7 if bool(w.s5_base_tightness_ok) else 0
-        p += 5 if bool(w.s5_vdu_recent) else 0
-        raw_max = 30.0
+    elif s in STRATEGIES_WITHOUT_QUALITY_COMPONENT:
+        # S5 has no strategy-quality component, on purpose. Writing one would
+        # mean deciding, in advance and from nothing, that a 2x volume
+        # signature is worth more than a tight base - which is the guess this
+        # whole component is supposed to have evidence for. The S5 evidence run
+        # (run_s5_pocket_pivot_backtest -> s5_winner_profile) measures which
+        # readings actually separate winners from losers; the scoring is
+        # written afterwards, from that. final_setup_score() does not call this
+        # for such a strategy at all, so the 0 below is never scored - it is
+        # only what a direct caller gets.
+        return 0
     return _scaled_component(p, raw_max, 30)
 
 # Published component weights. Hand-chosen, NOT fitted - the relative weighting
@@ -6117,6 +6407,14 @@ SCORE_COMPONENT_WEIGHTS = {
 }
 SCORE_WEIGHTS_ARE_FITTED = False
 
+# Strategies with no strategy-quality component yet. Scoring one of these zero
+# on the biggest component of all would not be neutrality - it would be a
+# 33-point penalty applied to every one of its candidates, which is a marking
+# decision made by omission. final_setup_score() instead rescales the four
+# components it CAN measure onto 100 and reports Strategy as None, so the
+# absence stays visible in the row rather than being read as a bad setup.
+STRATEGIES_WITHOUT_QUALITY_COMPONENT = {5}
+
 
 def final_setup_score(x, s, regime, safety_score):
     """100-point ranking score over five independent components.
@@ -6150,7 +6448,8 @@ def final_setup_score(x, s, regime, safety_score):
     callers pass them.
     """
     z = x.iloc[-1]
-    strategy = strategy_quality_score(x, s)
+    unscored = int(s) in STRATEGIES_WITHOUT_QUALITY_COMPONENT
+    strategy = 0 if unscored else strategy_quality_score(x, s)
     htf = _scaled_component(htf_confluence(x), 20, SCORE_COMPONENT_WEIGHTS["HTF Demand"])
     footprint = _scaled_component(footprint_score(x), 20, SCORE_COMPONENT_WEIGHTS["Footprint"])
 
@@ -6169,13 +6468,24 @@ def final_setup_score(x, s, regime, safety_score):
     entry = _scaled_component(entry_raw, ENTRY_RAW_MAX, SCORE_COMPONENT_WEIGHTS["Entry Quality"])
 
     total = strategy + htf + footprint + trend + entry
-    return int(max(0, min(100, total))), {
+    parts = {
         "Strategy": strategy,
         "HTF Demand": htf,
         "Footprint": footprint,
         "Trend": trend,
         "Entry Quality": entry,
     }
+    if unscored:
+        # Spread the missing component's weight across the four that were
+        # actually measured, so the total still means "out of 100" and is
+        # comparable with a scored strategy. Strategy reports NaN rather than 0:
+        # a reader must be able to tell "not measured" from "measured badly",
+        # and NaN carries that through the row, the CSV and the DB column
+        # without a None crashing float() on the way.
+        measured = sum(SCORE_COMPONENT_WEIGHTS[k] for k in parts if k != "Strategy")
+        total = (htf + footprint + trend + entry) * (100.0 / measured) if measured else 0
+        parts["Strategy"] = np.nan
+    return int(max(0, min(100, total))), parts
 
 # The ~100-point setup_score() stood here: a second, differently-weighted
 # scorer that no caller ever reached. final_setup_score() is the live one.

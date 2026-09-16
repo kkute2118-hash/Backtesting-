@@ -710,7 +710,13 @@ def _study_s4_recovery(data, tickers, start, end):
 
 
 def _study_s5_pocketpivot(data, tickers, start, end):
-    """S5 alone, on S5's own stop machine — checklist items 5, 6 and 7.
+    """S5 alone, ungated, then: what do the winners have in common?
+
+    There is no S5 scoring system and this run is how one gets written. Every
+    signal is captured with its readings from the signal bar and what it went
+    on to do, and s5_winner_profile() measures which of those readings actually
+    separate winners from losers. A marking system comes out of that table, not
+    before it.
 
     Not a variant of the S1-S4 replay and deliberately not routed through it.
     That harness exits every trade on a fixed 7% stop and a 3R target; a pocket
@@ -718,9 +724,20 @@ def _study_s5_pocketpivot(data, tickers, start, end):
     it would measure the target instead of the strategy. Nothing here touches
     forward_tests: S5 earns auto-tracking by producing numbers first.
     """
+    started = time.perf_counter()
     res = core.run_s5_pocket_pivot_backtest(data, start, end)
     trades, diag, summary = res["trades"], res["diagnostics"], res["summary"]
     log("study", "  symbols: " + ", ".join(f"{k}={v}" for k, v in diag.items()))
+
+    # Store the run so the winner analysis can be re-cut without re-simulating.
+    try:
+        run_id = core._persist_s5_captures(res, start, end, len(tickers),
+                                           elapsed=time.perf_counter() - started)
+        summary["capture_run_id"] = run_id
+        log("study", f"  stored as S5 capture run {run_id} — re-analyse with "
+                     "core.s5_winner_profile_from_db()")
+    except Exception as exc:
+        log("study", f"  WARNING could not store the capture run: {exc}")
 
     if not len(trades):
         log("study", "  NO TRADES. That is a result about the rules, not a failure — "
@@ -754,7 +771,35 @@ def _study_s5_pocketpivot(data, tickers, start, end):
         log("study", "  WARNING the tightness filter is starving the scan — it has no source "
                      "backing, so the threshold is the suspect, not the setup")
 
+    # The step this has to come before any scoring: what do the winners share?
+    profile = res.get("winner_profile") or {}
+    if not profile.get("ok"):
+        log("study", f"  winner profile unavailable: {profile.get('reason')}")
+    else:
+        log("study", f"  winner profile — {profile['winners']:,} winners vs "
+                     f"{profile['losers']:,} losers, {profile['features_measured']} readings "
+                     f"measured, split on {profile['split']}")
+        log("study", f"  VERDICT: {profile['verdict']}")
+        log("study", "  reading                        win avg    loss avg   gap(sd)  read")
+        for r in profile["winners_vs_losers"][:15]:
+            log("study", f"    {r['Feature']:<28} {str(r['Win Avg']):>9} {str(r['Loss Avg']):>11}"
+                         f" {r['Gap (in std devs)']:>8}  {r['Read'].split(' — ')[0]}")
+        if profile.get("big_winners_vs_rest"):
+            log("study", f"  big winners (top quintile, return >= "
+                         f"{profile['big_winner_cut_return_pct']}%) vs the rest:")
+            for r in profile["big_winners_vs_rest"][:10]:
+                log("study", f"    {r['Feature']:<28} {str(r['Win Avg']):>9} {str(r['Loss Avg']):>11}"
+                             f" {r['Gap (in std devs)']:>8}")
+        for col, rows in (profile.get("by") or {}).items():
+            for r in rows:
+                log("study", f"  {col}: {r['Value']} — n={r['N']:,} win {r['Win %']}% "
+                             f"avg R {r['Avg R']} avg return {r['Avg Return %']}%")
+        if profile["inert_readings"]:
+            log("study", f"  measured and inert ({len(profile['inert_readings'])}): "
+                         + ", ".join(profile["inert_readings"][:12]))
+
     summary["tightness"] = tight
+    summary["winner_profile"] = profile
     return summary
 
 

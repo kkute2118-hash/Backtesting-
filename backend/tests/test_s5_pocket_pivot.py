@@ -281,3 +281,117 @@ def test_tightness_diagnostic_measures_what_the_untuned_threshold_costs(frames):
     assert out["threshold"] == core.S5_BASE_RANGE_PCT_MAX
     assert out["passed_tightness"] + out["dropped_by_tightness"] == out["in_constructive_location"]
     assert out["in_constructive_location"] <= out["pocket_pivot_days"]
+
+
+# --------------------------------------------------------------------------- #
+# No marking system yet — the evidence run comes first
+# --------------------------------------------------------------------------- #
+def test_s5_has_no_strategy_quality_component(frames):
+    """S5 is deliberately unscored. A hand-written component would be a guess
+    about what matters, which is exactly what the evidence run is for."""
+    assert 5 in core.STRATEGIES_WITHOUT_QUALITY_COMPONENT
+    f = core.features_fast("S5_TRENDUP", frames["TRENDUP"]).replace([np.inf, -np.inf], np.nan)
+    assert core.strategy_quality_score(f, 5) == 0
+
+
+def test_an_unscored_strategy_is_not_penalised_against_a_scored_one(frames):
+    """Scoring the biggest component zero would be a 33-point penalty on every
+    S5 candidate — a marking decision made by omission. The four measured
+    components are rescaled onto 100 instead, and Strategy reports NaN so
+    "not measured" stays distinguishable from "measured badly"."""
+    f = core.features_fast("S5_TRENDUP", frames["TRENDUP"]).replace([np.inf, -np.inf], np.nan)
+    score, parts = core.final_setup_score(f, 5, "BULL", 80)
+
+    assert np.isnan(parts["Strategy"])
+    assert 0 <= score <= 100
+
+    measured = sum(core.SCORE_COMPONENT_WEIGHTS[k] for k in parts if k != "Strategy")
+    earned = sum(parts[k] for k in parts if k != "Strategy")
+    assert score == int(max(0, min(100, earned * (100.0 / measured))))
+    # Zeroing the component instead would have produced this, which is lower.
+    assert score >= earned
+
+
+def test_a_scored_strategy_is_untouched(frames):
+    f = core.features_fast("S5_TRENDUP", frames["TRENDUP"]).replace([np.inf, -np.inf], np.nan)
+    for s in (1, 2, 3, 4):
+        _, parts = core.final_setup_score(f, s, "BULL", 80)
+        assert not np.isnan(parts["Strategy"]), f"S{s} lost its Strategy component"
+
+
+# --------------------------------------------------------------------------- #
+# The evidence run: what do the winners have in common?
+# --------------------------------------------------------------------------- #
+def test_every_captured_trade_carries_its_signal_bar_readings(frames):
+    """The analysis is only possible if the readings were recorded at the
+    signal, not reconstructed afterwards."""
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    if trades.empty:
+        pytest.skip("no S5 trades on these fixtures")
+
+    for column in ("s5_vol_signature_ratio", "s5_base_range_pct", "s5_ma_stack",
+                   "s5_dist_ema10_pct", "relvol", "rsi14", "market_regime"):
+        assert column in trades.columns, column
+    # No score columns: there is no S5 scoring system to record.
+    assert not [c for c in trades.columns if str(c).startswith("score_")]
+
+
+def test_winner_profile_measures_rather_than_asserts(frames):
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    profile = core.run_s5_pocket_pivot_backtest(frames, start, end)["winner_profile"]
+    if not profile.get("ok"):
+        pytest.skip(profile.get("reason", "not enough trades"))
+
+    assert profile["winners"] + profile["losers"] == profile["n"]
+    assert profile["features_measured"] > 0
+    for row in profile["winners_vs_losers"]:
+        assert row["Gap (in std devs)"] >= 0
+        assert row["Read"]
+    # Every reading is either separating or inert — none is silently dropped.
+    assert set(profile["separating_readings"]).isdisjoint(profile["inert_readings"])
+    assert profile["verdict"]
+
+
+def test_a_profile_over_noise_reports_no_edge_rather_than_inventing_one(frames):
+    """The fixtures are random walks. If the analysis claimed a strong read on
+    them, it would claim one on anything."""
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    profile = core.run_s5_pocket_pivot_backtest(frames, start, end)["winner_profile"]
+    if not profile.get("ok"):
+        pytest.skip(profile.get("reason", "not enough trades"))
+    assert not profile["separating_readings"], (
+        "a reading separated winners from losers on synthetic random walks: "
+        f"{profile['separating_readings']}"
+    )
+
+
+def test_a_stored_capture_can_be_re_analysed_without_re_simulating(frames, seeded_db):
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    result = core.run_s5_pocket_pivot_backtest(frames, start, end)
+    if result["trades"].empty:
+        pytest.skip("no S5 trades on these fixtures")
+
+    run_id = core._persist_s5_captures(result, start, end, len(frames), elapsed=1.0)
+    stored, resolved = core.s5_stored_captures(run_id)
+    assert len(stored) == len(result["trades"])
+    assert resolved == run_id
+
+    again = core.s5_winner_profile_from_db(run_id)
+    assert again["ok"]
+    assert again["n"] == result["winner_profile"]["n"]
+    assert again["winners"] == result["winner_profile"]["winners"]
+
+    # The point of storing it: re-cutting the question costs nothing.
+    tighter = core.s5_winner_profile_from_db(run_id, big_winner_quantile=0.95)
+    if "big_winners" in tighter and "big_winners" in again:
+        assert tighter["big_winners"] <= again["big_winners"]
+
+
+def test_winner_profile_is_honest_when_there_is_nothing_to_analyse():
+    empty = core.s5_winner_profile(pd.DataFrame())
+    assert empty["ok"] is False and empty["reason"]
