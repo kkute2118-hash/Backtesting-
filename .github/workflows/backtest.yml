@@ -34,9 +34,15 @@ on:
           - '2 Years'
           - '3 Years'
       threshold:
+        # 71, not 85. Making the scoring components independent removed 15
+        # points that every candidate scored identically and rescaled the rest,
+        # so the distribution moved down: measured over 225 real qualified
+        # signals the new score tops out at 78 and NOTHING reaches 85. A run at
+        # the old default would trade nothing and report it as a flat result.
+        # 71 admits the same share of signals the old 85 gate did.
         description: 'Score gate — only setups at or above this are traded (backtest only)'
         required: true
-        default: '85'
+        default: '71'
         type: string
       study:
         description: 'Run a research study instead of the backtest'
@@ -45,6 +51,8 @@ on:
         type: choice
         options:
           - 'none — run the backtest'
+          - 'win_probability'
+          - 'target_calibration'
           - 'raw_signals'
           - 'sl_calibration'
           - 's4_extension'

@@ -43,7 +43,8 @@ def freshness(universes: list[str] | None = None, tickers: list[str] | None = No
         symbols = resolve(universes)
     if not symbols:
         return {"universe_size": 0, "latest": None, "expected": None,
-                "current": None, "days_behind": None, "severity": "unknown",
+                "published": None, "current": None, "days_behind": None,
+                "awaiting_publication": False, "severity": "unknown",
                 "message": "Select a universe to check local data freshness."}
 
     status = core.data_freshness_status(symbols)
@@ -53,22 +54,39 @@ def freshness(universes: list[str] | None = None, tickers: list[str] | None = No
         severity = "error"
         message = ("No local candle data for this universe yet. Run a full sync from "
                    "Data Manager before scanning.")
+    elif status["awaiting_publication"]:
+        # The exchange has traded since the newest stored candle, but Dhan
+        # publishes daily bars the next morning, so there is genuinely nothing
+        # to download yet. Flagging this red was the banner crying wolf every
+        # single weekday evening.
+        severity = "info"
+        message = (f"Stored candles current as of {latest.strftime('%d %b %Y')}. "
+                   f"{expected.strftime('%d %b %Y')} has closed but Dhan publishes daily "
+                   f"candles the next morning, so it is not downloadable yet.")
     elif status["current"]:
         severity = "ok"
-        message = f"Stored candles current as of {latest.strftime('%d %b %Y')} (last completed session)."
+        note = status.get("expected_note")
+        if note and expected > latest:
+            message = (f"Stored candles current as of {latest.strftime('%d %b %Y')} — "
+                       f"{expected.strftime('%d %b %Y')} was not a trading day ({note}).")
+        else:
+            message = f"Stored candles current as of {latest.strftime('%d %b %Y')} (last completed session)."
     else:
         n = status["days_behind"]
+        published = status["published"]
         severity = "error"
         message = (f"Stale data — the local cache ends {latest.strftime('%d %b %Y')} but "
-                   f"{expected.strftime('%d %b %Y')} has already closed "
+                   f"{published.strftime('%d %b %Y')} has closed and been published "
                    f"({n} session{'s' if n != 1 else ''} behind). Top up before scanning.")
 
     return {
         "universe_size": len(symbols),
         "latest": clean_value(latest),
         "expected": clean_value(expected),
+        "published": clean_value(status["published"]),
         "current": bool(status["current"]),
         "days_behind": status["days_behind"],
+        "awaiting_publication": bool(status["awaiting_publication"]),
         "severity": severity,
         "message": message,
     }
@@ -185,7 +203,8 @@ def overview() -> dict[str, Any]:
         fresh = freshness(universes=default_universe)
     except Exception as exc:
         fresh = {"severity": "unknown", "message": str(exc), "universe_size": 0,
-                 "latest": None, "expected": None, "current": None, "days_behind": None}
+                 "latest": None, "expected": None, "published": None,
+                 "current": None, "days_behind": None, "awaiting_publication": False}
 
     return {
         "market": status,

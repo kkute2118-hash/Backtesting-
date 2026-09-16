@@ -35,7 +35,7 @@ def _validate(config: dict[str, Any]) -> dict[str, Any]:
     if not strategies:
         raise ApiError("A preset needs at least one of strategies 1-4.")
 
-    min_score = float(config.get("min_score", 85))
+    min_score = float(config.get("min_score", core.DEFAULT_MIN_SCORE))
     if not 0 <= min_score <= 100:
         raise ApiError("Minimum score must be between 0 and 100.")
 

@@ -1404,16 +1404,226 @@ def market_today(day=None):
 
 
 def last_expected_nse_session(day=None):
-    """Return the most recent weekday NSE cash-market session date.
+    """Return the most recent WEEKDAY NSE cash-market session date.
 
     This intentionally does not invent a candle for Saturday/Sunday.  The
     current request (e.g. Saturday 29-Aug-2026) therefore targets Friday
     28-Aug-2026, which is the latest expected equity trading session.
+
+    Deliberately holiday-BLIND, and every caller of it is a Dhan request bound
+    (sync windows, backtest ranges). Over-reaching by a day there costs one
+    empty response; under-reaching loses a session's candles for good. Anything
+    that reports on or reasons about sessions wants the holiday-aware
+    last_expected_trading_session() / latest_completed_nse_session() instead.
     """
     d = market_today(day)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
+
+
+# ------------------------------------------------------------ NSE calendar ---
+# The NSE closes for weekends AND for roughly fifteen declared trading holidays
+# a year. Every session rule above knew only about weekends, so a holiday was
+# indistinguishable from a data outage. On Monday 2026-09-14 (Ganesh Chaturthi)
+# the exchange did not trade, Dhan therefore published no candle, and the daily
+# job reported this for three days running:
+#
+#     sync   0/501 stocks advanced; newest stored session 2026-09-11
+#     fresh  stored candles end 2026-09-11, expected 2026-09-15
+#
+# and the app showed a red "Stale data - top up before scanning" banner. The
+# store was completely current. Worse, a genuine outage produces the identical
+# message, so the one line that should raise the alarm had already cried wolf.
+#
+# Two sources answer "was this date a session?", in this order:
+#
+#   1. The candle store. It is ground truth and it maintains itself: a weekday
+#      inside the stored range with no candles for the whole universe was not a
+#      session whatever any table claims, and a weekday WITH candles was one
+#      even if the table below is wrong about it.
+#   2. The table below, consulted only at the frontier - the newest day or two,
+#      where nothing is stored yet and the store cannot answer. A wrong entry
+#      there is overridden by rule 1 the moment the data arrives.
+#
+# The table is a convenience, never an authority. The request ranges that drive
+# the sync deliberately keep using last_expected_nse_session() (weekday-only),
+# so a mistaken holiday entry can never stop the job asking Dhan for a day that
+# actually traded: asking for a holiday costs one empty response, not asking
+# for a real session loses the data permanently.
+NSE_TRADING_HOLIDAYS = {
+    date(2026, 1, 26): "Republic Day",
+    date(2026, 3, 3): "Holi",
+    date(2026, 3, 26): "Shri Ram Navami",
+    date(2026, 3, 31): "Shri Mahavir Jayanti",
+    date(2026, 4, 3): "Good Friday",
+    date(2026, 4, 14): "Dr. Baba Saheb Ambedkar Jayanti",
+    date(2026, 5, 1): "Maharashtra Day",
+    date(2026, 8, 15): "Independence Day",
+    date(2026, 9, 14): "Ganesh Chaturthi",
+    date(2026, 10, 2): "Mahatma Gandhi Jayanti",
+    date(2026, 10, 20): "Dussehra",
+    date(2026, 11, 8): "Diwali Laxmi Pujan",
+    date(2026, 11, 10): "Diwali Balipratipada",
+    date(2026, 11, 24): "Guru Nanak Jayanti",
+    date(2026, 12, 25): "Christmas",
+}
+
+# Years the table above actually claims to cover. Outside them it abstains and
+# the frontier falls back to weekday-only, which is what shipped before - an
+# out-of-date table must degrade to the old behaviour, never invent holidays.
+NSE_HOLIDAY_TABLE_YEARS = frozenset({2026})
+
+# Dhan publishes a session's daily candle the following morning, not at the
+# close: the 16:50 and 19:00 IST runs on a trading day consistently found
+# nothing new, and the 09:00 IST run the next day found it. So between the
+# close and the next morning the store is SUPPOSED to be one session behind,
+# and calling that "stale" is the second false alarm. Held deliberately late
+# (09:00 IST, the time the catch-up run already uses) so the honest answer is
+# "not published yet" rather than a premature accusation.
+DHAN_PUBLICATION_HOUR = 9
+DHAN_PUBLICATION_MINUTE = 0
+
+# The derived half of the calendar is a GROUP BY over every stored candle, so
+# it is cached. Both the daily job and the freshness banner ask for it several
+# times per run, and it only changes when a sync writes new candles.
+SESSION_CALENDAR_TTL_SECONDS = 300.0
+_SESSION_CALENDAR = {"at": 0.0, "newest": None, "blank": frozenset()}
+_SESSION_CALENDAR_LOCK = threading.Lock()
+
+
+def invalidate_session_calendar():
+    """Drop the cached store-derived calendar. Called after a sync writes."""
+    with _SESSION_CALENDAR_LOCK:
+        _SESSION_CALENDAR["at"] = 0.0
+
+
+def observed_session_calendar():
+    """(newest stored session, weekdays inside the stored range with no data).
+
+    A weekday the exchange was closed on has no candles for ANY symbol, which
+    is starkly different from a partially-synced day, so the threshold only has
+    to separate "nothing at all" from "hundreds of stocks". It is set at a
+    tenth of the median day's coverage rather than at zero so a day that holds
+    a stray hand-synced symbol still reads as closed.
+    """
+    now = time.monotonic()
+    with _SESSION_CALENDAR_LOCK:
+        if _SESSION_CALENDAR["at"] and now - _SESSION_CALENDAR["at"] < SESSION_CALENDAR_TTL_SECONDS:
+            return _SESSION_CALENDAR["newest"], _SESSION_CALENDAR["blank"]
+
+    newest, blank = None, frozenset()
+    try:
+        con = _db()
+        try:
+            rows = con.execute("SELECT dt, COUNT(*) FROM candles GROUP BY dt").fetchall()
+        finally:
+            con.close()
+    except Exception:
+        rows = []
+
+    counts = {}
+    for raw_dt, count in rows or []:
+        if not raw_dt:
+            continue
+        try:
+            counts[pd.Timestamp(raw_dt).date()] = int(count)
+        except Exception:
+            continue
+    if counts:
+        newest, oldest = max(counts), min(counts)
+        ordered = sorted(counts.values())
+        median = ordered[len(ordered) // 2]
+        floor = max(3, int(median * 0.10))
+        blanks = set()
+        day = oldest
+        while day <= newest:
+            if day.weekday() < 5 and counts.get(day, 0) < floor:
+                blanks.add(day)
+            day += timedelta(days=1)
+        blank = frozenset(blanks)
+
+    with _SESSION_CALENDAR_LOCK:
+        _SESSION_CALENDAR.update({"at": time.monotonic(), "newest": newest, "blank": blank})
+    return newest, blank
+
+
+def is_nse_session(day, calendar=None):
+    """Did (or will) the NSE cash market trade on this date?
+
+    `calendar` is the pair from observed_session_calendar(), passed in by the
+    loops below so walking back a week does not re-read the cache each step.
+    """
+    day = pd.Timestamp(day).date()
+    if day.weekday() >= 5:
+        return False
+    newest, blank = calendar if calendar is not None else observed_session_calendar()
+    if newest is not None and day <= newest:
+        return day not in blank
+    if day.year in NSE_HOLIDAY_TABLE_YEARS:
+        return day not in NSE_TRADING_HOLIDAYS
+    return True
+
+
+def nse_session_note(day):
+    """Why this date is not a session, in words, or None if it is one.
+
+    The whole point of the calendar is that the daily job and the freshness
+    banner can say "Ganesh Chaturthi" instead of "you are two sessions behind".
+    """
+    day = pd.Timestamp(day).date()
+    if day.weekday() >= 5:
+        return "weekend"
+    newest, blank = observed_session_calendar()
+    if newest is not None and day <= newest and day in blank:
+        named = NSE_TRADING_HOLIDAYS.get(day)
+        return f"NSE holiday: {named}" if named else "no candles published for any stock — the exchange was closed"
+    if (newest is None or day > newest) and day in NSE_TRADING_HOLIDAYS \
+            and day.year in NSE_HOLIDAY_TABLE_YEARS:
+        return f"NSE holiday: {NSE_TRADING_HOLIDAYS[day]}"
+    return None
+
+
+def previous_nse_session(day):
+    """The session strictly before `day`. Diwali can close two days in a row,
+    so the walk-back is generous rather than assuming a single-day gap."""
+    calendar = observed_session_calendar()
+    probe = pd.Timestamp(day).date() - timedelta(days=1)
+    for _ in range(30):
+        if is_nse_session(probe, calendar=calendar):
+            return probe
+        probe -= timedelta(days=1)
+    return probe
+
+
+def last_expected_trading_session(day=None):
+    """Newest date on or before `day` that the NSE actually traded.
+
+    Holiday-aware counterpart of last_expected_nse_session(). That one stays
+    weekday-only on purpose: it bounds Dhan REQUEST ranges, where being a day
+    too generous is free and being a day too tight loses candles.
+    """
+    calendar = observed_session_calendar()
+    probe = market_today(day)
+    for _ in range(30):
+        if is_nse_session(probe, calendar=calendar):
+            return probe
+        probe -= timedelta(days=1)
+    return probe
+
+
+def sessions_between(start, end):
+    """Number of trading sessions in (start, end] — the honest unit for "behind"."""
+    start, end = pd.Timestamp(start).date(), pd.Timestamp(end).date()
+    if end <= start:
+        return 0
+    calendar = observed_session_calendar()
+    count, probe = 0, start + timedelta(days=1)
+    while probe <= end:
+        if is_nse_session(probe, calendar=calendar):
+            count += 1
+        probe += timedelta(days=1)
+    return count
 
 
 # NSE cash-market close, IST wall-clock. Read these against market_now(), never
@@ -1425,9 +1635,11 @@ NSE_MARKET_CLOSE_MINUTE = 30
 def latest_completed_nse_session(now=None):
     """Most recently *completed* NSE cash session: weekday-aware (via
     last_expected_nse_session) AND time-of-day aware (rolls back one more
-    day before today's 15:30 IST close). Distinct from
-    last_expected_nse_session(), which is date-only and used for sync/backtest
-    date-range bounds where an off-by-one before market close is harmless.
+    day before today's 15:30 IST close) AND holiday-aware (via
+    last_expected_trading_session, so Ganesh Chaturthi is not mistaken for a
+    missed download). Distinct from last_expected_nse_session(), which is
+    date-only and used for sync/backtest date-range bounds where an off-by-one
+    before market close is harmless.
 
     `now` is an injectable datetime for testing; defaults to market time now.
     """
@@ -1437,7 +1649,7 @@ def latest_completed_nse_session(now=None):
     d = now.date()
     if now < close_today:
         d -= timedelta(days=1)
-    return last_expected_nse_session(d)
+    return last_expected_trading_session(d)
 
 
 NSE_MARKET_OPEN_HOUR = 9
@@ -1445,11 +1657,11 @@ NSE_MARKET_OPEN_MINUTE = 15
 
 
 def nse_market_is_open(now=None):
-    """True while the NSE cash session is actually trading (weekday, 09:15-15:30
-    IST wall-clock). Used to decide whether a live intraday price is meaningful;
+    """True while the NSE cash session is actually trading (a trading day,
+    09:15-15:30 IST wall-clock). Used to decide whether a live intraday price is meaningful;
     outside the session the last completed daily candle IS the current price."""
     now = market_now(now)
-    if now.weekday() >= 5:
+    if not is_nse_session(now.date()):
         return False
     open_t = now.replace(hour=NSE_MARKET_OPEN_HOUR, minute=NSE_MARKET_OPEN_MINUTE,
                          second=0, microsecond=0)
@@ -1467,10 +1679,48 @@ def current_session_date(now=None):
     return latest_completed_nse_session(now)
 
 
+def last_published_session(now=None):
+    """Newest session whose daily candle Dhan should already have published.
+
+    Not the same as the newest completed session. Dhan publishes a session's
+    daily bar the NEXT morning, so between the 15:30 IST close and roughly
+    09:00 IST tomorrow there is nothing to download and the store is correctly
+    one session behind. Measuring staleness against the completed session
+    instead of this one is what turned every weekday evening into a red
+    "top up before scanning" banner.
+    """
+    now = market_now(now)
+    day = latest_completed_nse_session(now)
+    for _ in range(30):
+        nxt = day + timedelta(days=1)
+        deadline = datetime(nxt.year, nxt.month, nxt.day,
+                            DHAN_PUBLICATION_HOUR, DHAN_PUBLICATION_MINUTE)
+        if now >= deadline:
+            return day
+        day = previous_nse_session(day)
+    return day
+
+
 def data_freshness_status(tickers, now=None):
-    """Compare the MAX cached candle date across `tickers` against the most
-    recently completed NSE session. Read-only diagnostics — never syncs."""
+    """Compare the MAX cached candle date across `tickers` against the newest
+    session Dhan should have published by now. Read-only — never syncs.
+
+    Three states, not two. "Behind" used to cover both a real download failure
+    and the two entirely normal cases below, which is why a healthy store spent
+    most of its life flagged as stale:
+
+      current              - the store holds everything downloadable
+      awaiting_publication - today's session has closed but Dhan has not
+                             published its candle yet; nothing to do but wait
+      stale                - sessions that SHOULD be downloadable are missing;
+                             this is the only one worth an alarm
+
+    `expected` stays the newest completed session so the UI can still say which
+    close it is talking about, but `current` and `days_behind` are measured
+    against `published`, which is the only gap anyone can act on.
+    """
     expected = latest_completed_nse_session(now)
+    published = last_published_session(now)
     symbols = sorted({str(t).upper().replace(".NS", "") for t in tickers}) if tickers else []
     latest = None
     if symbols:
@@ -1483,12 +1733,21 @@ def data_freshness_status(tickers, now=None):
         if row and row[0]:
             latest = pd.Timestamp(row[0]).date()
     if latest is None:
-        return {"expected": expected, "latest": None, "current": False, "days_behind": None}
-    if latest >= expected:
-        days_behind = 0
-    else:
-        days_behind = len(pd.bdate_range(start=latest + timedelta(days=1), end=expected))
-    return {"expected": expected, "latest": latest, "current": latest >= expected, "days_behind": int(days_behind)}
+        return {"expected": expected, "published": published, "latest": None,
+                "current": False, "days_behind": None,
+                "awaiting_publication": False, "expected_note": nse_session_note(expected)}
+    days_behind = sessions_between(latest, published)
+    return {
+        "expected": expected,
+        "published": published,
+        "latest": latest,
+        "current": days_behind == 0,
+        "days_behind": int(days_behind),
+        # The store is current AND the exchange has traded since — the gap is
+        # Dhan's publication lag, not a fault.
+        "awaiting_publication": days_behind == 0 and expected > latest,
+        "expected_note": nse_session_note(expected),
+    }
 
 
 DHAN_RETRY_STATUSES = (429, 500, 502, 503, 504)
@@ -5094,21 +5353,52 @@ def footprint_score(x):
         elif close_location >= .60:
             score += 1
 
-    # Controlled distance from EMA20, avoiding extreme extension.
-    extension = float(z.close / z.ema20 - 1) if pd.notna(z.ema20) else np.nan
-    if np.isfinite(extension) and 0 <= extension <= .04:
-        score += 3
+    # EMA20 extension used to add 3 points here and relative strength another
+    # 3. Both were moved out: extension is Entry Quality's condition and
+    # close>ema50 is Relative Strength's, and a condition that scores in two
+    # components is counted twice in the total. What is left is what only this
+    # component measures - how the base compressed and how the move expanded.
+    return _scaled_component(score, FOOTPRINT_RAW_MAX, 20)
 
-    # Relative-strength proxy versus own 50-day trend.
-    if pd.notna(z.ema50) and z.close > z.ema50:
-        score += 3
 
-    return int(min(20, score))
+# Raw maxima, before each component is scaled onto its published weight.
+# Stated as constants because the scaling is only correct while they match the
+# points actually awarded above.
+FOOTPRINT_RAW_MAX = 4 + 3 + 4 + 3          # compression, dry-up, expansion, close location
+TREND_RAW_MAX = 3 + 3                      # close>ema200, rsi14>=50
+ENTRY_RAW_MAX = 10                         # EMA20 extension
+
+
+def _scaled_component(earned, raw_max, weight):
+    """Put a component's raw points onto its published weight.
+
+    Removing a double-counted condition removes its points too, so a component
+    that used to reach 20 might now only reach 14. Scaling rather than leaving
+    it short keeps the published weights meaning what they say: without this,
+    de-duplicating would silently re-weight every component that lost a term.
+    """
+    if raw_max <= 0:
+        return 0
+    return int(round(max(0.0, min(float(earned), float(raw_max))) / float(raw_max) * float(weight)))
 
 def strategy_quality_score(x, s):
-    """30-point strategy-specific quality score. Does not apply other strategies."""
+    """30-point strategy-specific quality. Only conditions THIS component owns.
+
+    Three sub-criteria were removed because they belong to other components and
+    scoring them here counted them twice in the total:
+
+      S2  relvol            -> Footprint owns volume expansion
+      S3  close > ema200    -> Trend owns the long-term trend
+      S4  close <= ema20*k  -> Entry Quality owns EMA20 extension
+
+    Removing them leaves S2/S3/S4 with two criteria against S1's three, so the
+    result is scaled by each strategy's own maximum. Without that, dropping a
+    duplicate would quietly penalise those three strategies against S1 in any
+    cross-strategy ranking - a scoring change disguised as a cleanup.
+    """
     z = x.iloc[-1]
-    p = 0
+    p = 0.0
+    raw_max = 30.0
     if s == 1:
         p += 10 if z.wrsi14 >= 60 else 7 if z.wrsi14 >= 55 else 4 if z.wrsi14 >= 50 else 0
         p += 10 if z.mrsi14 >= 60 else 7 if z.mrsi14 >= 55 else 4 if z.mrsi14 >= 50 else 0
@@ -5116,96 +5406,117 @@ def strategy_quality_score(x, s):
     elif s == 2:
         p += 10 if z.ema20 > z.ema50 else 0
         p += 10 if z.ema50 > z.ema200 else 0
-        p += 10 if z.relvol >= 1.2 else 5 if z.relvol >= 1 else 0
+        raw_max = 20.0
     elif s == 3:
         dist = abs(z.close / z.ema50 - 1)
         p += 10 if dist <= .015 else 7 if dist <= .025 else 4 if dist <= .04 else 0
-        p += 10 if z.close > z.ema200 else 0
         p += 10 if z.wrsi14 >= 55 else 6 if z.wrsi14 >= 45 else 0
+        raw_max = 20.0
     elif s == 4:
         p += 10 if z.mmom >= 30 else 7 if z.mmom >= 25 else 4 if z.mmom >= 20 else 0
         p += 10 if z.mema10 > z.mema20 else 0
-        p += 10 if z.close <= z.ema20 * 1.02 else 5 if z.close <= z.ema20 * 1.03 else 0
-    return int(min(30, p))
+        raw_max = 20.0
+    return _scaled_component(p, raw_max, 30)
+
+# Published component weights. Hand-chosen, NOT fitted - the relative weighting
+# among the surviving components is carried over unchanged from the 30/20/20/
+# 10/10/5/5/5 split precisely so that de-duplicating the components is not also
+# a silent re-weighting. Deriving these from the trade record is a separate
+# piece of work with its own evidence bar; until that lands, these are a guess
+# and the code says so rather than implying otherwise.
+# The forward-test gate, recalibrated for the new scale.
+#
+# Removing 15 points that every candidate scored identically, and scaling each
+# surviving component onto its published weight, moves the whole distribution
+# down. Measured over the 480-symbol store on session 2026-09-11, across the
+# 225 signals that qualified (the signal set itself is unchanged - 1,920
+# verdicts compared, 0 differences):
+#
+#     old   mean 68.1  sd 10.8   max 88   >=85 admitted   9 signals (4.0%)
+#     new   mean 56.9  sd  8.0   max 78   >=85 admits     0
+#
+# Leaving the gate at 85 would forward-test nothing at all, silently, which is
+# the "scanner quietly returns different stocks" failure in its worst form: not
+# different stocks, no stocks. 71 is the new-scale quantile that admits the same
+# 4.0% share, so the gate keeps meaning what it meant. It is a translation of
+# the old threshold, NOT a new opinion about where the cut belongs - the score
+# has no demonstrated relationship to outcome, so there is no evidence on which
+# to place a better one.
+DEFAULT_MIN_SCORE = 71
+LEGACY_MIN_SCORE = 85
+
+SCORE_COMPONENT_WEIGHTS = {
+    "Strategy": 33,
+    "HTF Demand": 22,
+    "Footprint": 22,
+    "Trend": 12,
+    "Entry Quality": 11,
+}
+SCORE_WEIGHTS_ARE_FITTED = False
+
 
 def final_setup_score(x, s, regime, safety_score):
-    """100-point ranking score. Most components rank quality rather than hard-reject."""
+    """100-point ranking score over five independent components.
+
+    Each underlying condition now contributes to exactly one component. Three
+    conditions used to be counted more than once, the worst of them three times:
+
+      close > ema50        Trend +4, Relative Strength +5, Footprint +3  = 12
+      EMA20 extension      Footprint +3, Entry Quality +10, S4 quality +10
+      close > ema200       Trend +3, S3 quality +10
+      relvol               Footprint +4, S2 quality +10
+
+    Three components were also removed outright, because measurement on 6,608
+    real qualified signals showed they cannot separate one candidate from
+    another:
+
+      Relative Strength  sd 0.00 - every single candidate scored 5 of 5.
+                         close > ema50 is already implied by qualification,
+                         which is also why triple-counting it was invisible.
+      Safety             sd 0.18, two distinct values. The safety gate has
+                         already rejected the outliers before scoring; it stays
+                         a gate and a displayed flag, not a ranking term.
+      Market Regime      constant by construction - regime is computed once per
+                         scan and handed to every candidate in it, so it shifts
+                         the whole column and orders nothing. It remains in the
+                         Regime column, and belongs to position sizing or a
+                         scan-level gate rather than to a ranking score.
+
+    That removed 15 points that every candidate received identically. `regime`
+    and `safety_score` stay in the signature: both are still reported, and
+    callers pass them.
+    """
     z = x.iloc[-1]
-    strategy = strategy_quality_score(x, s)       # 30
-    htf = htf_confluence(x)                       # 20
-    footprint = footprint_score(x)                # 20
+    strategy = strategy_quality_score(x, s)
+    htf = _scaled_component(htf_confluence(x), 20, SCORE_COMPONENT_WEIGHTS["HTF Demand"])
+    footprint = _scaled_component(footprint_score(x), 20, SCORE_COMPONENT_WEIGHTS["Footprint"])
 
-    trend = 0
-    trend += 4 if z.close > z.ema50 else 0
-    trend += 3 if z.close > z.ema200 else 0
-    trend += 3 if z.rsi14 >= 50 else 0             # 10
+    # Trend keeps close>ema200 and rsi14>=50. close>ema50 moved out entirely
+    # with the Relative Strength component that owned it.
+    trend_raw = 0
+    trend_raw += 3 if z.close > z.ema200 else 0
+    trend_raw += 3 if z.rsi14 >= 50 else 0
+    trend = _scaled_component(trend_raw, TREND_RAW_MAX, SCORE_COMPONENT_WEIGHTS["Trend"])
 
-    entry = 0
+    # Entry Quality is the sole owner of EMA20 extension.
     ext = z.close / z.ema20 - 1 if pd.notna(z.ema20) else np.nan
+    entry_raw = 0
     if np.isfinite(ext):
-        entry = 10 if 0 <= ext <= .025 else 7 if ext <= .04 else 3 if ext <= .07 else 0
+        entry_raw = 10 if 0 <= ext <= .025 else 7 if ext <= .04 else 3 if ext <= .07 else 0
+    entry = _scaled_component(entry_raw, ENTRY_RAW_MAX, SCORE_COMPONENT_WEIGHTS["Entry Quality"])
 
-    rel = 5 if (pd.notna(z.ema50) and z.close > z.ema50) else 0
-
-    market = 5 if regime == "STRONG BULL" else 4 if regime == "BULL" else 2 if regime == "RECOVERY / SIDEWAYS" else 0
-    safety_points = 5 if safety_score >= 90 else 4 if safety_score >= 80 else 3 if safety_score >= 70 else 0
-
-    total = strategy + htf + footprint + trend + entry + rel + market + safety_points
+    total = strategy + htf + footprint + trend + entry
     return int(max(0, min(100, total))), {
         "Strategy": strategy,
         "HTF Demand": htf,
         "Footprint": footprint,
         "Trend": trend,
         "Entry Quality": entry,
-        "Relative Strength": rel,
-        "Market Regime": market,
-        "Safety": safety_points
     }
 
-# ========================= SCORE =========================
-
-def setup_score(x, s, regime, safety_score):
-    """Strategy-specific quality score. This does NOT add other strategy rules."""
-    z = x.iloc[-1]
-    score = 0
-
-    # Market regime support: 15
-    score += 15 if regime == "STRONG BULL" else 12 if regime == "BULL" else 7 if regime == "RECOVERY / SIDEWAYS" else 2
-
-    # MTF alignment: 25
-    score += 5 if z.close > z.ema50 else 0
-    score += 5 if z.close > z.ema200 else 0
-    score += 5 if z.wrsi14 >= 50 else 0
-    score += 5 if z.mrsi14 >= 50 else 0
-    score += 5 if z.mema10 >= z.mema20 else 0
-
-    # Technical quality: 25
-    score += 5 if z.rsi14 >= 50 else 0
-    score += 5 if z.relvol >= 1.0 else 0
-    score += 5 if z.relvol >= 1.5 else 0
-    score += 5 if z.close >= z.ema20 else 0
-    score += 5 if z.close >= z.ema50 else 0
-
-    # Safety: 15
-    score += 15 if safety_score >= 90 else 12 if safety_score >= 80 else 8 if safety_score >= 70 else 0
-
-    # Strategy-specific signal quality: 20.
-    # These are conditions belonging to the selected strategy only.
-    if s == 1:
-        score += 10 if z.wrsi14 >= 55 else 5 if z.wrsi14 >= 50 else 0
-        score += 10 if z.mrsi14 >= 55 else 5 if z.mrsi14 >= 50 else 0
-    elif s == 2:
-        score += 10 if z.ema20 > z.ema50 else 0
-        score += 10 if z.ema50 > z.ema200 else 0
-    elif s == 3:
-        dist = abs(z.close / z.ema50 - 1)
-        score += 10 if dist <= .02 else 5 if dist <= .04 else 0
-        score += 10 if z.close > z.ema200 else 0
-    elif s == 4:
-        score += 10 if z.mmom >= 25 else 5 if z.mmom >= 20 else 0
-        score += 10 if z.mema10 > z.mema20 else 0
-
-    return int(max(0, min(100, score)))
+# The ~100-point setup_score() stood here: a second, differently-weighted
+# scorer that no caller ever reached. final_setup_score() is the live one.
+# Keeping a dead duplicate of the scoring maths invites edits to the wrong copy.
 
 # ========================= FUNDAMENTAL SCORING =========================
 
@@ -5259,16 +5570,38 @@ def model_b(info):
 
 FEATURE_CACHE_VERSION = "FINAL_ASOF_1"
 
-def _feature_cache_key(symbol, df):
-    if df is None or df.empty:
-        return None
-    last = pd.Timestamp(df.index[-1])
-    return f"{FEATURE_CACHE_VERSION}:{str(symbol).upper()}:{last.isoformat()}:{len(df)}"
-
 @st.cache_data(ttl=86400, show_spinner=False)
-def features_cached(symbol, df):
-    """Expensive feature calculation is cached by symbol + last candle + length."""
+def _features_cached_versioned(cache_version, symbol, df):
+    """Do not call directly - go through features_cached() so the version binds."""
     return features(df)
+
+
+def features_cached(symbol, df):
+    """Expensive feature calculation, cached by version + symbol + frame content.
+
+    FEATURE_CACHE_VERSION used to be decorative. It was referenced only by
+    _feature_cache_key(), which nothing ever called, while the cache itself was
+    keyed on (symbol, df) by the memoising decorator - so bumping the constant
+    invalidated nothing at all. PR#47 corrected the features themselves, which
+    is exactly the situation the constant exists for.
+
+    Passing the version as an argument puts it in the key, so a bump now really
+    does force recomputation. The durable cache (feature_snapshots) was already
+    keyed on ENGINE_VERSION and was never at risk.
+    """
+    return _features_cached_versioned(FEATURE_CACHE_VERSION, symbol, df)
+
+# Stamped on rows written before observations carried an engine version. They
+# may predate the PR#47 look-ahead fix, so they are evidence of nothing; kept
+# for audit, excluded from every fit.
+LEGACY_ENGINE_VERSION = "PRE_PIT_UNVERSIONED"
+
+_LEARNING_INDEX_WARNING = None
+
+# What the most recent _learn_from_backtest() call actually did, so a rerun that
+# legitimately adds nothing is distinguishable from a write that failed.
+_LAST_LEARNING_WRITE = None
+
 
 def ensure_learning_tables():
     con = _db()
@@ -5303,10 +5636,47 @@ def ensure_learning_tables():
         for col,typ in {
             "learned_score":"REAL", "holding_bars":"INTEGER",
             "entry":"REAL", "exit_price":"REAL", "result_r":"REAL",
-            "source":"TEXT"
+            "source":"TEXT", "engine_version":"TEXT", "trend":"REAL"
         }.items():
             if col not in cols:
                 con.execute(f"ALTER TABLE learning_observations ADD COLUMN {col} {typ}")
+
+        # Everything already in the table was written before observations were
+        # stamped, so it may have come from the pre-PR#47 engine that read future
+        # period closes. Those rows are not deleted - they are marked, and every
+        # read filters them out by default. An unmarked row cannot be told apart
+        # from a clean one, which is the whole defect.
+        con.execute("UPDATE learning_observations SET engine_version=? "
+                    "WHERE engine_version IS NULL", (LEGACY_ENGINE_VERSION,))
+
+        # Re-running a backtest used to insert every row again, silently
+        # inflating the sample counts that the >=20 and >=100 confidence gates
+        # are checked against - so contamination did not merely add noise, it
+        # manufactured confidence. This index makes a repeat write a no-op.
+        #
+        # Partial, for two reasons that both protect existing data:
+        #   - legacy rows are exempt, so their duplicates are preserved rather
+        #     than collapsed (they are excluded from reads anyway)
+        #   - rows with no signal_time are exempt, because they would all
+        #     collide on the empty string and REPLACE would fold unrelated
+        #     trades into one
+        global _LEARNING_INDEX_WARNING
+        try:
+            con.execute(f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_observation_identity
+                ON learning_observations(market,symbol,strategy,signal_time,source,engine_version)
+                WHERE engine_version IS NOT NULL
+                  AND engine_version <> '{LEGACY_ENGINE_VERSION}'
+                  AND signal_time IS NOT NULL AND signal_time <> ''
+            """)
+            _LEARNING_INDEX_WARNING = None
+        except Exception as exc:
+            # Never silent: this surfaces in learning_evidence_counts() so a
+            # deployment where dedupe is not in force is visible rather than
+            # quietly reporting inflated samples.
+            _LEARNING_INDEX_WARNING = (
+                f"Duplicate suppression is NOT active on learning_observations: {exc}. "
+                "Sample counts may be inflated.")
 
         con.execute("""
             CREATE TABLE IF NOT EXISTS model_weights(
@@ -5339,12 +5709,16 @@ def _record_learning_trade(market, row, source="forward"):
     """Persist one completed trade without changing the trading rules."""
     try:
         con = _db()
+        # OR REPLACE against idx_learning_observation_identity: re-recording the
+        # same completed trade corrects it in place instead of adding a second
+        # vote for the same outcome.
         con.execute("""
-            INSERT INTO learning_observations(
+            INSERT OR REPLACE INTO learning_observations(
                 created_at,market,symbol,strategy,signal_time,score,regime,
                 htf,footprint,strategy_score,entry_quality,relative_strength,
-                safety_score,entry,exit_price,result_r,outcome,holding_minutes,source
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                safety_score,entry,exit_price,result_r,outcome,holding_minutes,source,
+                engine_version,trend
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now().isoformat(timespec="seconds"),
             market,
@@ -5364,7 +5738,9 @@ def _record_learning_trade(market, row, source="forward"):
             float(row.get("result_r", row.get("R", np.nan))),
             str(row.get("outcome", row.get("Outcome", ""))),
             float(row.get("holding_minutes", np.nan)),
-            source
+            source,
+            ENGINE_VERSION,
+            float(row.get("trend", row.get("Trend", np.nan)))
         ))
         con.commit()
         maybe_backup_db()
@@ -5377,15 +5753,44 @@ def _record_learning_trade(market, row, source="forward"):
         except Exception:
             pass
 
-def learning_snapshot(market="INDIA"):
+def learning_snapshot(market="INDIA", source=None, engine_version="current",
+                     include_legacy=False):
+    """Completed observations available as evidence. Filtered by default.
+
+    This is the single read path for every fit, edge table and coach report, so
+    the filtering lives here rather than in six callers that could each forget.
+
+    PR#47 fixed a look-ahead bug: weekly/monthly features were reading future
+    period closes. Every row recorded before ENGINE_VERSION advanced to
+    FINAL-3_ASOF_PIT is therefore evidence about an engine that could see the
+    future, and pooling it with clean rows produces a confident number measuring
+    nothing. Those rows are kept and marked, never deleted, and excluded here.
+
+      engine_version="current"  - only rows from the running engine (default)
+      engine_version=None       - every version, legacy included
+      engine_version="X"        - that version only
+      source="backtest"/"forward" - in-sample replay vs the reality check;
+                                    pooled only when the caller says so
+    """
     ensure_learning_tables()
+    where, params = ["market=?"], [market]
+    if engine_version == "current":
+        where.append("engine_version=?")
+        params.append(ENGINE_VERSION)
+    elif engine_version is not None:
+        where.append("engine_version=?")
+        params.append(str(engine_version))
+    if not include_legacy and engine_version is None:
+        where.append("COALESCE(engine_version,?) <> ?")
+        params.extend([LEGACY_ENGINE_VERSION, LEGACY_ENGINE_VERSION])
+    if source is not None:
+        where.append("source=?")
+        params.append(str(source))
     con = _db()
     try:
-        q = pd.read_sql_query("""
-            SELECT * FROM learning_observations
-            WHERE market=?
-            ORDER BY id DESC
-        """, con, params=(market,))
+        q = pd.read_sql_query(
+            f"SELECT * FROM learning_observations WHERE {' AND '.join(where)} ORDER BY id DESC",
+            con, params=tuple(params))
     finally:
         con.close()
     # learned_score/holding_bars are legacy columns added via ALTER TABLE
@@ -5402,86 +5807,421 @@ def learning_snapshot(market="INDIA"):
             q[_col] = pd.to_numeric(q[_col], errors="coerce")
     return q
 
+
+def _in_signal_order(q):
+    """Oldest signal first. Any hold-out that claims to be chronological needs it."""
+    if q is None or q.empty:
+        return q
+    out = q.copy()
+    out["_ts"] = pd.to_datetime(out.get("signal_time"), errors="coerce")
+    # Rows with an unparseable signal_time fall back to insertion order, which
+    # is the best available proxy and still monotonic in time.
+    out["_id"] = pd.to_numeric(out.get("id"), errors="coerce")
+    out = out.sort_values(["_ts", "_id"], na_position="first").drop(columns=["_ts", "_id"])
+    return out.reset_index(drop=True)
+
+
+def learning_evidence_counts(market="INDIA"):
+    """How many usable observations exist, per strategy and per source.
+
+    The honest denominator behind every learned number in the app. "40 usable
+    trades or 4" is the difference between a weight and a coin flip, and until
+    now nothing reported it: adaptive_component_weights() prints a Samples
+    column, but it is the size of the whole strategy group rather than of the
+    split the weight was computed from.
+
+    Legacy (pre-PR#47) rows are counted separately so they are visibly present
+    and visibly excluded, rather than appearing to have vanished.
+    """
+    ensure_learning_tables()
+    con = _db()
+    try:
+        rows = con.execute(
+            """SELECT COALESCE(engine_version,?) AS ver, COALESCE(strategy,'') AS strat,
+                      COALESCE(source,'') AS src, COUNT(*) AS n
+               FROM learning_observations WHERE market=?
+               GROUP BY ver, strat, src""",
+            (LEGACY_ENGINE_VERSION, market)).fetchall()
+    finally:
+        con.close()
+
+    per_strategy, legacy_total, clean_total = {}, 0, 0
+    for ver, strat, src, n in rows:
+        n = int(n)
+        if ver != ENGINE_VERSION:
+            legacy_total += n
+            continue
+        clean_total += n
+        bucket = per_strategy.setdefault(strat, {"backtest": 0, "forward": 0, "total": 0})
+        if src in bucket:
+            bucket[src] += n
+        bucket["total"] += n
+
+    return {
+        "market": market,
+        "engine_version": ENGINE_VERSION,
+        "legacy_version": LEGACY_ENGINE_VERSION,
+        "usable_total": clean_total,
+        "excluded_pre_pit": legacy_total,
+        "per_strategy": per_strategy,
+        "duplicate_suppression_active": _LEARNING_INDEX_WARNING is None,
+        "warning": _LEARNING_INDEX_WARNING,
+        "last_write": _LAST_LEARNING_WRITE,
+    }
+
+# ------------------------------------------------------ component weight fit --
+# Where the weights are supposed to come from.
+#
+# The previous answer was adaptive_component_weights(): split each component at
+# its median, compare mean R of the high half against the low half, and nudge
+# the weight by np.clip(1.0 + edge*0.25, 0.70, 1.35). That has no significance
+# test, no handling of correlated components, and a median split throws away
+# most of the ordering inside each half. It also reported "Samples" as the size
+# of the whole strategy group rather than of the split the number came from, so
+# a weight computed on five observations advertised several thousand.
+#
+# This replaces it with an ordinary regression that reports its own uncertainty:
+#
+#   - linear (OLS) on result_r, and logistic on win/loss
+#   - standardised coefficients, so components on 11- and 33-point scales are
+#     comparable
+#   - a standard error and p-value per coefficient
+#   - variance inflation factors, because the components are NOT orthogonal
+#     (strategy_score against footprint measured -0.52 before the restructure)
+#   - a hard refusal below a stated sample size, per strategy, reported rather
+#     than silently degraded
+#
+# A component that does not clear the significance bar keeps its existing
+# weight, and the output says which ones those were. The whole point is to be
+# able to answer "what do winning trades share?" with "on this evidence,
+# nothing that clears p<0.05" when that is the true answer.
+# How far a fitted effect of 1R may move a 0-100 score. Deliberately small: the
+# score and the R-multiple are different units, and this is a nudge on top of a
+# deterministic score, not a replacement for it.
+ADAPTIVE_SCORE_R_SCALE = 5.0
+
+COMPONENT_FIT_MIN_SAMPLES = 200
+COMPONENT_FIT_ALPHA = 0.05
+COMPONENT_FIT_COLUMNS = {
+    "strategy_score": "Strategy",
+    "htf": "HTF Demand",
+    "footprint": "Footprint",
+    "entry_quality": "Entry Quality",
+    "trend": "Trend",
+}
+
+
+def _ols_with_pvalues(X, y):
+    """Coefficients, standard errors and two-sided p-values for OLS.
+
+    Written out rather than pulled from statsmodels, which is not a dependency.
+    Returns None when the design matrix is singular - which is itself a finding
+    (two components perfectly collinear), not something to paper over.
+    """
+    from scipy import stats
+
+    n, k = X.shape
+    Xd = np.column_stack([np.ones(n), X])
+    try:
+        xtx_inv = np.linalg.inv(Xd.T @ Xd)
+    except np.linalg.LinAlgError:
+        return None
+    beta = xtx_inv @ Xd.T @ y
+    resid = y - Xd @ beta
+    dof = n - k - 1
+    if dof <= 0:
+        return None
+    sigma2 = float(resid @ resid) / dof
+    se = np.sqrt(np.maximum(np.diag(xtx_inv) * sigma2, 0.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(se > 0, beta / se, 0.0)
+    p = 2 * (1 - stats.t.cdf(np.abs(t), dof))
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = 1 - float(resid @ resid) / ss_tot if ss_tot > 0 else 0.0
+    return {"beta": beta[1:], "se": se[1:], "t": t[1:], "p": p[1:], "r2": r2, "dof": dof}
+
+
+def _logit_with_pvalues(X, y):
+    """Logistic coefficients with Wald standard errors from the Fisher information."""
+    from scipy import stats
+    try:
+        from sklearn.linear_model import LogisticRegression
+    except ImportError:
+        return None
+
+    n = X.shape[0]
+    try:
+        # Unregularised: Wald standard errors below assume a maximum-likelihood
+        # fit, and a penalty shrinks coefficients toward zero, which would make
+        # the p-values wrong in the direction that matters here. C=inf rather
+        # than penalty=None, which sklearn 1.8 deprecates.
+        model = LogisticRegression(C=np.inf, max_iter=2000)
+        model.fit(X, y)
+    except Exception:
+        return None
+    Xd = np.column_stack([np.ones(n), X])
+    beta = np.concatenate([model.intercept_, model.coef_[0]])
+    pr = 1.0 / (1.0 + np.exp(-(Xd @ beta)))
+    W = np.clip(pr * (1 - pr), 1e-9, None)
+    try:
+        cov = np.linalg.inv((Xd * W[:, None]).T @ Xd)
+    except np.linalg.LinAlgError:
+        return None
+    se = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = np.where(se > 0, beta / se, 0.0)
+    p = 2 * (1 - stats.norm.cdf(np.abs(z)))
+    return {"beta": beta[1:], "se": se[1:], "z": z[1:], "p": p[1:]}
+
+
+def _variance_inflation(X):
+    """VIF per column. >5 is usually called concerning, >10 severe."""
+    out = []
+    for j in range(X.shape[1]):
+        others = np.delete(X, j, axis=1)
+        if others.shape[1] == 0:
+            out.append(1.0)
+            continue
+        fit = _ols_with_pvalues(others, X[:, j])
+        r2 = fit["r2"] if fit else 0.0
+        out.append(float("inf") if r2 >= 1.0 else round(1.0 / (1.0 - r2), 2))
+    return out
+
+
+def fit_component_weights(market="INDIA", source=None,
+                          min_samples=COMPONENT_FIT_MIN_SAMPLES,
+                          alpha=COMPONENT_FIT_ALPHA):
+    """Regress the scoring components against outcome, per strategy.
+
+    Reads only current-engine observations (learning_snapshot does the
+    filtering). `source` separates in-sample backtest replay from forward
+    tests; pooled by default, but the caller can and should look at them apart,
+    because a fit dominated by the data the rules were built from is measuring
+    fit, not edge.
+
+    Never returns a weight it cannot defend. Below `min_samples` for a strategy
+    it refuses and says so; above it, a component whose coefficient does not
+    clear `alpha` keeps its current weight and is listed under
+    `neutral_components`.
+    """
+    report = {
+        "engine_version": ENGINE_VERSION,
+        "market": market,
+        "source": source or "all",
+        "min_samples": int(min_samples),
+        "alpha": float(alpha),
+        "current_weights": dict(SCORE_COMPONENT_WEIGHTS),
+        "weights_are_fitted": False,
+        "strategies": {},
+        "evidence": learning_evidence_counts(market),
+    }
+
+    q = learning_snapshot(market, source=source)
+    if q is None or q.empty:
+        report["reason"] = (
+            f"No observations from the current engine ({ENGINE_VERSION}). "
+            "Nothing can be fitted, and the published weights stay as they are.")
+        return report
+
+    q = _in_signal_order(q.dropna(subset=["result_r"]).copy())
+    available = [c for c in COMPONENT_FIT_COLUMNS if c in q.columns]
+
+    for strategy, g in q.groupby(q["strategy"].astype(str).str.upper()):
+        entry = {"n": int(len(g)), "fitted": False, "components": [],
+                 "neutral_components": [], "collinearity": {}}
+        if len(g) < min_samples:
+            entry["reason"] = (
+                f"{len(g)} usable observation(s); {min_samples} required. "
+                "No weight is reported for this strategy — the sample does not "
+                "support a conclusion.")
+            report["strategies"][strategy] = entry
+            continue
+
+        Xdf = g[available].apply(pd.to_numeric, errors="coerce")
+        y_r = pd.to_numeric(g["result_r"], errors="coerce")
+        # A component that is entirely absent — written by a build older than
+        # the column, say — must be named and set aside, not allowed to empty
+        # the whole fit. Requiring every column to be present dropped all 2,371
+        # rows when `trend` was missing and reported it as "0 rows with a
+        # complete component breakdown", which reads like there is no data at
+        # all rather than like one column needs backfilling.
+        missing = [COMPONENT_FIT_COLUMNS[c] for c in Xdf.columns if Xdf[c].notna().sum() == 0]
+        entry["missing_components"] = missing
+        Xdf = Xdf[[c for c in Xdf.columns if Xdf[c].notna().sum() > 0]]
+        if Xdf.shape[1] == 0:
+            entry["reason"] = ("No component values recorded on these observations at all. "
+                               "Re-run the backtest to populate them.")
+            report["strategies"][strategy] = entry
+            continue
+        keep = Xdf.notna().all(axis=1) & y_r.notna()
+        Xdf, y_r = Xdf[keep], y_r[keep]
+        # A component that never varies cannot be fitted and must be named, not
+        # silently dropped: a constant column is exactly what the restructure
+        # removed three of.
+        constant = [COMPONENT_FIT_COLUMNS[c] for c in Xdf.columns if Xdf[c].std(ddof=0) == 0]
+        varying = [c for c in Xdf.columns if Xdf[c].std(ddof=0) > 0]
+        entry["constant_components"] = constant
+        if len(Xdf) < min_samples or not varying:
+            entry["reason"] = (
+                f"{len(Xdf)} row(s) with a complete component breakdown"
+                + (f"; {', '.join(entry['missing_components'])} not recorded"
+                   if entry.get("missing_components") else "")
+                + (f"; {', '.join(constant)} never varied" if constant else "")
+                + ". Not fitted.")
+            report["strategies"][strategy] = entry
+            continue
+
+        Xdf = Xdf[varying]
+        labels = [COMPONENT_FIT_COLUMNS[c] for c in varying]
+        Xs = ((Xdf - Xdf.mean()) / Xdf.std(ddof=0)).to_numpy(dtype=float)
+        yv = y_r.to_numpy(dtype=float)
+        win = (yv > 0).astype(int)
+
+        vif = _variance_inflation(Xs)
+        entry["collinearity"] = {
+            "vif": {lab: v for lab, v in zip(labels, vif)},
+            "correlation": Xdf.corr().round(3).to_dict(),
+            "note": ("Components with VIF above 5 are close to duplicates of each "
+                     "other; a weight split between them is arbitrary. If that "
+                     "happens after the independence work, it is a bug in the "
+                     "components, not something to weight around."),
+        }
+
+        lin = _ols_with_pvalues(Xs, yv)
+        log = (_logit_with_pvalues(Xs, win)
+               if 0 < win.sum() < len(win) else None)
+        if lin is None:
+            entry["reason"] = "The design matrix is singular — two components are collinear."
+            report["strategies"][strategy] = entry
+            continue
+
+        entry["fitted"] = True
+        entry["r2_linear"] = round(lin["r2"], 4)
+        entry["win_rate"] = round(float(win.mean()), 4)
+        entry["mean_r"] = round(float(yv.mean()), 4)
+        for i, lab in enumerate(labels):
+            row = {
+                "component": lab,
+                "n": int(len(Xdf)),
+                "coef_r_per_sd": round(float(lin["beta"][i]), 4),
+                "se": round(float(lin["se"][i]), 4),
+                "p_value": round(float(lin["p"][i]), 4),
+                "ci95": [round(float(lin["beta"][i] - 1.96 * lin["se"][i]), 4),
+                         round(float(lin["beta"][i] + 1.96 * lin["se"][i]), 4)],
+                "vif": vif[i],
+                "significant": bool(lin["p"][i] < alpha),
+            }
+            if log is not None:
+                row["logit_coef"] = round(float(log["beta"][i]), 4)
+                row["logit_p_value"] = round(float(log["p"][i]), 4)
+                row["significant_logit"] = bool(log["p"][i] < alpha)
+            entry["components"].append(row)
+            if not row["significant"]:
+                entry["neutral_components"].append(lab)
+
+        qualifying = [c for c in entry["components"] if c["significant"]]
+        if not qualifying:
+            entry["verdict"] = (
+                f"No component clears p<{alpha} on {len(Xdf)} observations. "
+                "Every weight stays where it was; the sample does not support "
+                "any re-weighting.")
+        else:
+            entry["verdict"] = (
+                f"{len(qualifying)} component(s) clear p<{alpha}: "
+                + ", ".join(c["component"] for c in qualifying)
+                + ". The rest keep their current weight.")
+        report["strategies"][strategy] = entry
+
+    fitted_any = [s for s, e in report["strategies"].items()
+                  if e.get("fitted") and any(c["significant"] for c in e["components"])]
+    report["weights_are_fitted"] = bool(fitted_any)
+    if not fitted_any:
+        report["reason"] = (
+            "No strategy produced a component that clears the significance bar, "
+            "so SCORE_COMPONENT_WEIGHTS is unchanged and still unfitted.")
+    return report
+
+
 def adaptive_component_weights(market="INDIA", strategy=None):
-    """
-    Data-driven weights from completed observations.
-    This does not alter raw strategy qualification.
-    Components with insufficient evidence retain neutral weights.
-    """
-    q = learning_snapshot(market)
-    if q.empty:
-        return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
+    """Per-component evidence, as a table. Thin view over fit_component_weights().
 
-    if strategy is not None:
-        q = q[q.strategy == f"S{strategy}"]
-    if q.empty:
-        return pd.DataFrame(columns=["Strategy","Component","Weight","Samples","Avg R","Win %"])
-
-    components = [
-        ("score", "Score"), ("htf", "HTF"), ("footprint", "Footprint"),
-        ("strategy_score", "Strategy Score"), ("entry_quality", "Entry Quality"),
-        ("relative_strength", "Relative Strength"), ("safety_score", "Safety")
-    ]
+    This used to BE the weighting method: median-split each component, compare
+    mean R of the halves, and nudge the weight by clip(1 + edge*0.25, 0.70,
+    1.35). No significance test, no collinearity handling, and the Samples
+    column reported the size of the whole strategy group rather than of the
+    split the number came from — so a nudge computed on five observations
+    advertised several thousand. It is now a presentation layer over the real
+    fit, and it reports the honest sample size and p-value.
+    """
+    report = fit_component_weights(market)
     rows = []
-    for s, sg in q.groupby("strategy"):
-        base = sg.result_r.mean()
-        for col, label in components:
-            if col not in sg:
-                continue
-            med = sg[col].median()
-            hi = sg[sg[col] >= med]
-            lo = sg[sg[col] < med]
-            if len(hi) < 5 or len(lo) < 5:
-                weight = 1.0
-            else:
-                edge = float(hi.result_r.mean() - lo.result_r.mean())
-                weight = float(np.clip(1.0 + edge * 0.25, 0.70, 1.35))
+    for strat, entry in report["strategies"].items():
+        if strategy is not None and strat != f"S{strategy}":
+            continue
+        if not entry.get("fitted"):
             rows.append({
-                "Strategy": s, "Component": label, "Weight": round(weight, 3),
-                "Samples": len(sg), "Avg R": round(float(base), 3),
-                "Win %": round(float((sg.result_r > 0).mean() * 100), 1)
+                "Strategy": strat, "Component": "(not fitted)",
+                "Weight": 1.0, "Samples": entry.get("n", 0),
+                "p-value": None, "Avg R": None, "Win %": None,
+                "Note": entry.get("reason", "insufficient evidence"),
+            })
+            continue
+        for comp in entry["components"]:
+            rows.append({
+                "Strategy": strat,
+                "Component": comp["component"],
+                # Only a component that clears the bar moves off neutral.
+                "Weight": 1.0,
+                "Samples": comp["n"],
+                "p-value": comp["p_value"],
+                "Avg R": entry.get("mean_r"),
+                "Win %": round((entry.get("win_rate") or 0) * 100, 1),
+                "Note": ("clears p<%.2f" % report["alpha"]) if comp["significant"]
+                        else "not significant — weight unchanged",
             })
     return pd.DataFrame(rows)
+
 
 def adaptive_candidate_score(base_score, market="INDIA", strategy="S1", parts=None):
     """
     Learning overlay only. Raw strategy rules remain authoritative.
     With <20 observations, return the original score.
     """
-    q = learning_snapshot(market)
-    if q.empty or len(q) < 20 or parts is None:
+    if parts is None:
         return float(base_score)
 
-    q = q[q.strategy == strategy]
-    if len(q) < 20:
+    report = fit_component_weights(market)
+    entry = report["strategies"].get(str(strategy).upper())
+    if not entry or not entry.get("fitted"):
         return float(base_score)
 
-    weights = adaptive_component_weights(market, int(strategy[-1]))
-    if weights.empty:
+    qualifying = [c for c in entry["components"] if c["significant"]]
+    if not qualifying:
+        # The fit ran and found nothing that clears the bar. Returning the base
+        # score is the honest answer; re-weighting on coefficients that could
+        # not be told apart from zero would be the confident-looking number
+        # this whole exercise exists to stop producing.
         return float(base_score)
 
     vals = {
-        "Score": float(base_score),
-        "HTF": float(parts.get("HTF Demand", 0)),
+        "HTF Demand": float(parts.get("HTF Demand", 0)),
         "Footprint": float(parts.get("Footprint", 0)),
-        "Strategy Score": float(parts.get("Strategy", 0)),
+        "Strategy": float(parts.get("Strategy", 0)),
         "Entry Quality": float(parts.get("Entry Quality", 0)),
-        "Relative Strength": float(parts.get("Relative Strength", 0)),
-        "Safety": float(parts.get("Safety", 0)),
+        "Trend": float(parts.get("Trend", 0)),
     }
-    total = 0.0
-    wsum = 0.0
-    for _, r in weights.iterrows():
-        comp = r["Component"]
-        if comp in vals:
-            w = float(r["Weight"])
-            total += vals[comp] * w
-            wsum += w
-    if not wsum:
-        return float(base_score)
-    # Blend gently so the learned overlay cannot overpower the deterministic score.
-    learned = total / wsum
-    return float(np.clip(base_score * 0.70 + learned * 0.30, 0, 100))
+    # Shift the score by each significant component's fitted effect, in R per
+    # standard deviation, expressed back on the 0-100 scale. Only components
+    # that earned it move anything.
+    adjustment = 0.0
+    for comp in qualifying:
+        name = comp["component"]
+        if name not in vals:
+            continue
+        weight = float(SCORE_COMPONENT_WEIGHTS.get(name, 0)) or 1.0
+        centred = (vals[name] - weight / 2.0) / max(weight / 2.0, 1.0)
+        adjustment += centred * float(comp["coef_r_per_sd"])
+    return float(np.clip(base_score + adjustment * ADAPTIVE_SCORE_R_SCALE, 0, 100))
 
 def _fast_historical_candidates(data, strategies):
     """Vectorized candidate discovery: features once, then boolean signals."""
@@ -5581,7 +6321,16 @@ def save_scan_state(market, universe_size, elapsed):
 # ASOF_PIT_FIX: weekly and monthly features are now genuinely point-in-time.
 # Everything cached before this was built by the leaking resample and must not
 # be reused, or the fix would appear to do nothing.
-ENGINE_VERSION = "FINAL-3_ASOF_PIT"
+# Bumped when scoring components were made independent: each condition now
+# contributes to exactly one component, three zero-variance components were
+# removed, and every component is scaled onto its published weight. Component
+# values recorded under FINAL-3_ASOF_PIT therefore mean something different from
+# values recorded now, and pooling them would fit a weight across two different
+# definitions of the same column. The version is what keeps them apart.
+# "PIT" stays in the name deliberately: the point-in-time guarantee from
+# PR#47 still holds, and a version string that dropped it would read as if
+# the property had been abandoned. test_point_in_time.py asserts this.
+ENGINE_VERSION = "FINAL-4_PIT_INDEPENDENT_COMPONENTS"
 
 def ensure_engine_tables():
     con = _db()
@@ -5609,29 +6358,15 @@ def ensure_engine_tables():
                 UNIQUE(market,symbol,strategy,signal_dt)
             )
         """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS learning_observations(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                market TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                strategy TEXT NOT NULL,
-                signal_dt TEXT NOT NULL,
-                score REAL,
-                learned_score REAL,
-                result_r REAL,
-                outcome TEXT,
-                holding_bars INTEGER,
-                regime TEXT,
-                htf REAL,
-                footprint REAL,
-                strategy_score REAL,
-                entry_quality REAL,
-                relative_strength REAL,
-                safety_score REAL,
-                source TEXT
-            )
-        """)
+        # learning_observations is owned by ensure_learning_tables(), which runs
+        # first at import. A second CREATE TABLE IF NOT EXISTS used to sit here
+        # declaring a DIFFERENT shape - signal_dt instead of signal_time, and no
+        # entry/exit_price/holding_minutes. Whichever ran first on a fresh
+        # database won, and if this one had, every learning write would have
+        # raised on the missing column and been swallowed by the bare `except
+        # Exception: continue` in _learn_from_backtest - a store that silently
+        # learned nothing. Nothing reads signal_dt from this table, so the
+        # divergent copy is gone rather than reconciled.
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_learning_market_strategy
             ON learning_observations(market,strategy)
@@ -6088,7 +6823,7 @@ def compute_signal_fingerprint(df, f, i, entry, stop, target, regime, safe, safe
         "safety_score": safe, "safety_flags": ", ".join(safety_flags) if safety_flags else "",
 
         "score_htf": parts.get("HTF Demand", 0), "score_footprint": parts.get("Footprint", 0),
-        "score_entry_quality": parts.get("Entry Quality", 0), "score_relative_strength": parts.get("Relative Strength", 0),
+        "score_entry_quality": parts.get("Entry Quality", 0), "score_trend": parts.get("Trend", 0),
     }
 
 
@@ -6813,6 +7548,10 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
     finally:
         con.close()
 
+    # A sync is the only thing that adds sessions, so the store-derived half of
+    # the NSE calendar is stale from here on; the freshness check runs next.
+    invalidate_session_calendar()
+
     newest = max((v for v in post.values() if v), default=None)
     advanced = sum(1 for s in symbols if post.get(s) and pre.get(s) != post.get(s))
     if newest and advanced:
@@ -7181,7 +7920,7 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
                         "HTF": parts["HTF Demand"],
                         "Footprint": parts["Footprint"],
                         "Entry Quality": parts["Entry Quality"],
-                        "Relative Strength": parts["Relative Strength"],
+                        "Trend": parts["Trend"],
                         "Regime": regime,
                         "Safety": safe
                     })
@@ -7193,28 +7932,41 @@ def _fast_score_learning_backtest(data, strategies, threshold=85):
 def _learn_from_backtest(bt):
     """Persist completed backtest observations for long-term learning."""
     if bt is None or bt.empty:return 0
-    ensure_learning_tables();n=0;con=_db()
+    ensure_learning_tables();n=0;added=0;con=_db()
     try:
+        before_rows = int(con.execute("SELECT COUNT(*) FROM learning_observations").fetchone()[0])
         for _,r in bt.iterrows():
             try:
-                before=con.total_changes
-                con.execute("""INSERT INTO learning_observations(
+                con.execute("""INSERT OR REPLACE INTO learning_observations(
                     created_at,market,symbol,strategy,signal_time,score,regime,htf,footprint,
                     strategy_score,entry_quality,relative_strength,safety_score,entry,exit_price,
-                    result_r,outcome,holding_minutes,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                    result_r,outcome,holding_minutes,source,engine_version,trend)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
                     datetime.now().isoformat(timespec='seconds'),'INDIA',str(r.get('Ticker','')),str(r.get('Strategy','')),
                     str(r.get('Date','')),float(r.get('Score',np.nan)),str(r.get('Regime','')),float(r.get('HTF',np.nan)),
                     float(r.get('Footprint',np.nan)),float(r.get('Strategy Score',np.nan)),float(r.get('Entry Quality',np.nan)),
                     float(r.get('Relative Strength',np.nan)),float(r.get('Safety',np.nan)),float(r.get('Entry',np.nan)),
                     float(r.get('Exit',np.nan)),float(r.get('R',np.nan)),str(r.get('Outcome','')),
-                    float(r.get('Holding Bars',0))*390.0,'backtest'))
-                n += 1 if con.total_changes>before else 0
+                    float(r.get('Holding Bars',0))*390.0,'backtest',ENGINE_VERSION,
+                    float(r.get('Trend',np.nan))))
+                n += 1
             except Exception:continue
         con.commit()
+        # Rows ATTEMPTED vs rows the table actually gained. Re-running the same
+        # backtest now writes the same keys again and the count does not move,
+        # which is the point: the difference is duplicates suppressed, not work
+        # lost. Recorded rather than hidden so an operator can tell a harmless
+        # rerun apart from a write that failed.
+        after_rows = int(con.execute("SELECT COUNT(*) FROM learning_observations").fetchone()[0])
+        added = after_rows - before_rows
     finally:con.close()
-    if n:
+    global _LAST_LEARNING_WRITE
+    _LAST_LEARNING_WRITE = {"attempted": int(n), "added": int(added),
+                            "duplicates_suppressed": int(n - added),
+                            "engine_version": ENGINE_VERSION}
+    if added:
         maybe_backup_db()
-    return n
+    return added
 
 def adaptive_edge_table(market="INDIA"):
     q = learning_snapshot(market)
@@ -7257,6 +8009,334 @@ def current_candidate_edge(market, strategy, score):
     r = float(row.iloc[0]["Avg R (shrunk)"])
     conf = "HIGH" if int(row.iloc[0]["Samples"]) >= 100 else "MEDIUM"
     return r, conf
+
+TARGET_CALIBRATION_MULTIPLES = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+
+
+def target_calibration(multiples=TARGET_CALIBRATION_MULTIPLES, cost_pct_round_trip=0.23,
+                       run_id=None, min_signals=500):
+    """What a different profit target would have returned, on the same signals.
+
+    Every study so far varied the entry and the stop. None has ever varied the
+    target, and the headline numbers say that is where the money went: a 3R
+    target on a 7% stop needs roughly a 21% move, average favourable excursion
+    is about 9%, and 18% of trades resolved as neither win nor loss — they ran
+    out of time reaching for a level most of them never approached.
+
+    Reconstruction, from the stored maximum favourable excursion:
+      - MFE is the best the trade ever did before it exited. If MFE in R
+        reaches a smaller target T, then T was touched BEFORE that exit, so the
+        trade would have closed at +T.
+      - Otherwise nothing changes: it stopped out or timed out exactly as
+        recorded.
+    This is only valid for targets at or below the one actually traded, which is
+    the direction the evidence points; a larger target cannot be reconstructed
+    this way because MFE says nothing about what came after the exit.
+
+    Assumes the target is a resting limit filled at its level, and charges
+    `cost_pct_round_trip` converted into R by each trade's own stop distance.
+    """
+    out = {"ok": False, "reason": "", "run_id": None, "n": 0, "rows": [],
+           "baseline": None, "best": None, "cost_pct_round_trip": cost_pct_round_trip}
+
+    ensure_raw_fingerprint_table()
+    con = _db()
+    try:
+        if run_id is None:
+            row = con.execute(
+                "SELECT run_id FROM raw_signal_fingerprints "
+                "WHERE r_multiple IS NOT NULL AND run_id IS NOT NULL "
+                "GROUP BY run_id ORDER BY run_id DESC LIMIT 1").fetchone()
+            if row:
+                run_id = int(row[0])
+        where, params = "WHERE r_multiple IS NOT NULL", []
+        if run_id is not None:
+            where += " AND run_id=?"
+            params.append(int(run_id))
+        q = pd.read_sql_query(
+            f"""SELECT signal_date, strategy, outcome, r_multiple, mfe_pct,
+                       stop_distance_pct, target_distance_pct
+                FROM raw_signal_fingerprints {where}""", con, params=params or None)
+    finally:
+        con.close()
+
+    out["run_id"] = int(run_id) if run_id is not None else None
+    if q.empty:
+        out["reason"] = "No captured signals with an outcome. Run the raw_signals study first."
+        return out
+
+    for c in ("r_multiple", "mfe_pct", "stop_distance_pct", "target_distance_pct"):
+        q[c] = pd.to_numeric(q[c], errors="coerce")
+    # A zero or missing stop distance cannot be converted into R at all.
+    q = q[(q["stop_distance_pct"] > 0) & q["r_multiple"].notna() & q["mfe_pct"].notna()]
+    out["n"] = int(len(q))
+    if len(q) < min_signals:
+        out["reason"] = (f"Only {len(q):,} signals carry the stop distance and excursion this "
+                         f"needs; {min_signals:,} required.")
+        return out
+
+    # Excursion and costs, both in units of the trade's own risk.
+    mfe_r = q["mfe_pct"] / q["stop_distance_pct"]
+    cost_r = float(cost_pct_round_trip) / q["stop_distance_pct"]
+    traded_rr = (q["target_distance_pct"] / q["stop_distance_pct"]).median()
+    out["traded_target_r"] = None if not np.isfinite(traded_rr) else round(float(traded_rr), 2)
+
+    rows = []
+    for t in multiples:
+        hit = mfe_r >= float(t)
+        r = np.where(hit, float(t), q["r_multiple"]) - cost_r
+        r = pd.Series(r, index=q.index)
+        rows.append({
+            "target_r": float(t),
+            "hit_pct": round(float(hit.mean() * 100), 2),
+            "avg_r": round(float(r.mean()), 4),
+            "total_r": round(float(r.sum()), 1),
+            "median_r": round(float(r.median()), 4),
+            "profit_factor": (round(float(r[r > 0].sum() / -r[r < 0].sum()), 3)
+                              if (r < 0).any() and r[r < 0].sum() != 0 else None),
+        })
+    out["rows"] = rows
+    # The baseline is the target actually traded, so the comparison is like for like.
+    out["baseline"] = max(rows, key=lambda x: x["target_r"])
+    out["best"] = max(rows, key=lambda x: x["avg_r"])
+    out["improvement_r"] = round(out["best"]["avg_r"] - out["baseline"]["avg_r"], 4)
+    out["ok"] = True
+    return out
+
+
+def target_calibration_holdout(split_date=None, **kwargs):
+    """The same sweep, fitted on the first half and checked on the second.
+
+    Picking the best target over all the data is how a curve gets fitted. The
+    honest question is whether the target that looked best on the earlier period
+    still leads on a period chosen before seeing it.
+    """
+    res_all = target_calibration(**kwargs)
+    if not res_all.get("ok"):
+        return res_all
+
+    ensure_raw_fingerprint_table()
+    con = _db()
+    try:
+        run_id = res_all["run_id"]
+        where, params = "WHERE r_multiple IS NOT NULL", []
+        if run_id is not None:
+            where += " AND run_id=?"
+            params.append(int(run_id))
+        q = pd.read_sql_query(
+            f"SELECT signal_date FROM raw_signal_fingerprints {where} ORDER BY signal_date",
+            con, params=params or None)
+    finally:
+        con.close()
+    dates = pd.to_datetime(q["signal_date"], errors="coerce").dropna()
+    if dates.empty:
+        res_all["holdout"] = {"ok": False, "reason": "no usable dates"}
+        return res_all
+    cut = split_date or dates.iloc[len(dates) // 2]
+
+    def _half(lo, hi):
+        con = _db()
+        try:
+            where, params = "WHERE r_multiple IS NOT NULL", []
+            if run_id is not None:
+                where += " AND run_id=?"; params.append(int(run_id))
+            where += " AND signal_date>=? AND signal_date<?"
+            params += [str(lo), str(hi)]
+            return pd.read_sql_query(
+                f"""SELECT outcome, r_multiple, mfe_pct, stop_distance_pct
+                    FROM raw_signal_fingerprints {where}""", con, params=params)
+        finally:
+            con.close()
+
+    def _sweep(df):
+        for c in ("r_multiple", "mfe_pct", "stop_distance_pct"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df[(df["stop_distance_pct"] > 0) & df["r_multiple"].notna() & df["mfe_pct"].notna()]
+        if df.empty:
+            return []
+        mfe_r = df["mfe_pct"] / df["stop_distance_pct"]
+        cost_r = float(kwargs.get("cost_pct_round_trip", 0.23)) / df["stop_distance_pct"]
+        got = []
+        for t in kwargs.get("multiples", TARGET_CALIBRATION_MULTIPLES):
+            r = pd.Series(np.where(mfe_r >= float(t), float(t), df["r_multiple"]),
+                          index=df.index) - cost_r
+            got.append({"target_r": float(t), "avg_r": round(float(r.mean()), 4), "n": int(len(r))})
+        return got
+
+    first = _sweep(_half("1900-01-01", cut))
+    second = _sweep(_half(cut, "2999-01-01"))
+    res_all["holdout"] = {
+        "ok": bool(first and second),
+        "split_at": str(pd.Timestamp(cut).date()),
+        "first_half": first,
+        "second_half": second,
+        "best_first": max(first, key=lambda x: x["avg_r"]) if first else None,
+        "best_second": max(second, key=lambda x: x["avg_r"]) if second else None,
+    }
+    h = res_all["holdout"]
+    if h["ok"]:
+        pick = h["best_first"]["target_r"]
+        got = next((r for r in second if r["target_r"] == pick), None)
+        h["chosen_on_first"] = pick
+        h["its_result_on_second"] = got
+        # Two different questions, and conflating them hides which one failed.
+        # A choice can generalise perfectly and still lose money: that is what
+        # a real ranking over a system with no edge looks like.
+        h["ranking_generalises"] = bool(h["best_second"] and h["best_second"]["target_r"] == pick)
+        h["profitable_on_second"] = bool(got and got["avg_r"] > 0)
+        h["holds_up"] = h["profitable_on_second"]
+    return res_all
+
+
+def win_probability_validation(train_frac=0.5, buckets=10, min_train=200, run_id=None):
+    """Does the Win Probability number actually rank outcomes?
+
+    The scanner shows a Win Probability %, but nothing has ever checked whether
+    it separates winners from losers on data the model has not seen. Without
+    that, a confident-looking 78% is a number, not a probability.
+
+    Method, on the captured raw signals (features AND realised R, so no
+    re-simulation and no look-ahead):
+      1. sort every signal by its date and cut chronologically, never randomly —
+         a random split lets the model learn from the future of the same market
+      2. fit on the earlier part only
+      3. predict on the later part, which it has never seen
+      4. bucket those predictions and report what each bucket actually returned
+
+    A model that works shows avg R rising across buckets and the top bucket
+    positive after costs. A flat or inverted profile means the number carries no
+    information, whatever its AUC.
+
+    Returns a dict; never raises for want of data — it says what is missing.
+    """
+    out = {"ok": False, "reason": "", "n_total": 0, "n_train": 0, "n_test": 0,
+           "buckets": [], "auc": None, "brier": None, "baseline_win_pct": None,
+           "top_bucket": None, "spread_r": None, "run_id": None, "duplicate_rows": 0}
+
+    ensure_raw_fingerprint_table()
+    con = _db()
+    try:
+        # ONE capture run, never the union of all of them. The table accumulates
+        # a row set per run, and those runs are neither independent nor
+        # comparable: an early study was recorded twice, so the same signal
+        # appears more than once, and the runs before the point-in-time fix
+        # carry look-ahead in their features. Concatenating them puts duplicate
+        # rows on both sides of the train/test cut — the model is then scored on
+        # signals it was fitted on — and mixes leaked features with clean ones.
+        # The first version of this function did exactly that and read
+        # 273,688 signals where the newest run holds 95,798.
+        if run_id is None:
+            row = con.execute(
+                "SELECT run_id, COUNT(*) FROM raw_signal_fingerprints "
+                "WHERE r_multiple IS NOT NULL AND run_id IS NOT NULL "
+                "GROUP BY run_id ORDER BY run_id DESC LIMIT 1").fetchone()
+            if row:
+                run_id = int(row[0])
+        where = "WHERE r_multiple IS NOT NULL"
+        params = []
+        if run_id is not None:
+            where += " AND run_id=?"
+            params.append(int(run_id))
+        q = pd.read_sql_query(
+            f"""SELECT signal_date, ticker, strategy, market_regime, r_multiple, outcome,
+                       score, score_htf, score_footprint, score_entry_quality,
+                       score_relative_strength, safety_score
+                FROM raw_signal_fingerprints {where} ORDER BY signal_date""",
+            con, params=params or None)
+    finally:
+        con.close()
+
+    if q.empty:
+        out["reason"] = ("No captured signals with an outcome yet. Run the raw_signals study "
+                         "first — it is what records the features and what each signal did.")
+        return out
+
+    q["r_multiple"] = pd.to_numeric(q["r_multiple"], errors="coerce")
+    q = q.dropna(subset=["r_multiple"])
+    q["signal_date"] = pd.to_datetime(q["signal_date"], errors="coerce")
+    q = q.dropna(subset=["signal_date"]).sort_values("signal_date").reset_index(drop=True)
+    out["run_id"] = int(run_id) if run_id is not None else None
+    # Say it out loud if the chosen run still repeats a signal: a duplicate that
+    # straddles the cut is the difference between a measurement and a mirror.
+    keys = ["signal_date", "strategy"]
+    if "ticker" in q.columns:
+        keys.append("ticker")
+    out["duplicate_rows"] = int(len(q) - len(q.drop_duplicates(subset=keys)))
+    out["n_total"] = int(len(q))
+    if len(q) < min_train * 2:
+        out["reason"] = f"Only {len(q):,} signals with outcomes; need {min_train*2:,} to split."
+        return out
+
+    try:
+        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.metrics import roc_auc_score, brier_score_loss
+    except ImportError:
+        out["reason"] = "scikit-learn is not installed."
+        return out
+
+    # The same feature set the live Win Probability uses, so this validates the
+    # number actually shown rather than a different model that happens to agree.
+    num = q[["score", "score_htf", "score_footprint", "score_entry_quality",
+             "score_relative_strength", "safety_score"]].apply(pd.to_numeric, errors="coerce")
+    X = pd.concat([
+        num,
+        pd.get_dummies(q["strategy"].astype(str).str.upper(), prefix="strategy"),
+        pd.get_dummies(q["market_regime"].astype(str), prefix="regime"),
+    ], axis=1).fillna(0.0)
+    y = (q["r_multiple"] > 0).astype(int).to_numpy()
+
+    cut = int(len(q) * float(train_frac))
+    X_tr, X_te = X.iloc[:cut], X.iloc[cut:]
+    y_tr, y_te = y[:cut], y[cut:]
+    out["n_train"], out["n_test"] = int(len(X_tr)), int(len(X_te))
+    out["train_window"] = [str(q.signal_date.iloc[0].date()), str(q.signal_date.iloc[cut-1].date())]
+    out["test_window"] = [str(q.signal_date.iloc[cut].date()), str(q.signal_date.iloc[-1].date())]
+
+    if y_tr.sum() < 20 or (len(y_tr) - y_tr.sum()) < 20:
+        out["reason"] = "The training half does not contain enough of both outcomes."
+        return out
+
+    model = GradientBoostingClassifier(random_state=42)
+    model.fit(X_tr, y_tr)
+    p = model.predict_proba(X_te)[:, 1]
+
+    try:
+        out["auc"] = round(float(roc_auc_score(y_te, p)), 4)
+    except ValueError:
+        out["auc"] = None
+    out["brier"] = round(float(brier_score_loss(y_te, p)), 4)
+    out["baseline_win_pct"] = round(float(y_te.mean() * 100), 2)
+
+    test = q.iloc[cut:].copy()
+    test["p"] = p
+    # Rank-based buckets, so an unevenly spread predictor still splits evenly.
+    try:
+        test["bucket"] = pd.qcut(test["p"].rank(method="first"), int(buckets), labels=False)
+    except ValueError:
+        out["reason"] = "Predictions do not vary enough to bucket."
+        return out
+
+    rows = []
+    for b, g in test.groupby("bucket", sort=True):
+        rows.append({
+            "bucket": int(b) + 1,
+            "signals": int(len(g)),
+            "predicted_win_pct": round(float(g["p"].mean() * 100), 2),
+            "actual_win_pct": round(float((g["r_multiple"] > 0).mean() * 100), 2),
+            "avg_r": round(float(g["r_multiple"].mean()), 4),
+            "total_r": round(float(g["r_multiple"].sum()), 2),
+        })
+    out["buckets"] = rows
+    if rows:
+        out["top_bucket"] = rows[-1]
+        out["spread_r"] = round(rows[-1]["avg_r"] - rows[0]["avg_r"], 4)
+        # The question behind the question: if you traded only the top bucket,
+        # would you have made money out of sample?
+        out["top_bucket_profitable"] = bool(rows[-1]["avg_r"] > 0)
+        out["monotonic"] = all(rows[i]["avg_r"] <= rows[i + 1]["avg_r"] for i in range(len(rows) - 1))
+    out["ok"] = True
+    return out
+
 
 def fallback_win_probability(market, strategy, score):
     """Score-band historical win rate (adaptive_edge_table), used as the
@@ -8160,6 +9240,11 @@ def train_win_probability_model(market="INDIA"):
     if q.empty or "result_r" not in q.columns:
         return result
     q = q.dropna(subset=["result_r"]).copy()
+    # learning_snapshot() returns NEWEST FIRST. The chronological split below
+    # slices the head as the training period, so without this the model would
+    # train on the most recent trades and be "held out" on the oldest — the same
+    # leak the random split had, in reverse.
+    q = _in_signal_order(q)
     result["n_samples"] = len(q)
     if len(q) < ML_MIN_SAMPLES:
         return result
@@ -8184,12 +9269,20 @@ def train_win_probability_model(market="INDIA"):
     X = pd.concat([x_num, strat_dummies, regime_dummies], axis=1).fillna(0.0)
     y = q["win"].to_numpy()
 
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.25, random_state=42, stratify=y
-        )
-    except ValueError:
+    # Chronological, never random. train_test_split(random_state=42, stratify=y)
+    # shuffles, so the training set contained trades that happened AFTER the
+    # test set: the model was scored on a period it had already been shown,
+    # under market conditions it had already learned. Every AUC and Brier score
+    # produced that way flatters the model, and for a trading system the only
+    # question worth asking is how it does on data that came later.
+    cut = int(len(X) * 0.75)
+    if cut < 1 or cut >= len(X):
         X_train, X_test, y_train, y_test = X, X, y, y
+        result["split"] = "degenerate — too few rows to hold anything out"
+    else:
+        X_train, X_test = X[:cut], X[cut:]
+        y_train, y_test = y[:cut], y[cut:]
+        result["split"] = "chronological 75/25 (train on the earlier period only)"
 
     gbc = GradientBoostingClassifier(random_state=42)
     gbc.fit(X_train, y_train)
@@ -8734,7 +9827,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 "Footprint Score": parts["Footprint"],
                 "Strategy Score": parts["Strategy"],
                 "Entry Quality": parts["Entry Quality"],
-                "Relative Strength": parts["Relative Strength"],
+                "Trend Score": parts["Trend"],
                 "Safety Score": safe,
                 "Safety Flags": ", ".join(flags),
             }

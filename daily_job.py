@@ -37,7 +37,8 @@ Configuration comes from environment variables (see core._secret):
                                  core.UNIVERSE_CHOICES, including
                                  "NSE All Cash (~2000)" for the full list
                SCAN_STRATEGIES   default "1,2,3,4"
-               SCAN_MIN_SCORE    default "85"
+               SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
+                                 gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
 
 GitHub refuses to create secrets or variables whose NAME starts with "GITHUB_",
@@ -76,6 +77,13 @@ def log(step, message):
 def _env_int(name, default):
     try:
         return int(str(os.environ.get(name, "")).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(str(os.environ.get(name, "")).strip())
     except (TypeError, ValueError):
         return default
 
@@ -435,11 +443,15 @@ def run_daily():
     step_token(force=True)
 
     session = core.latest_completed_nse_session()
-    if session != core.last_expected_nse_session(core.market_today()):
-        # Runs before today's close (or on a weekend) target the previous
-        # session, which has already been processed.
-        log("guard", f"no new completed session to process (latest is {session}); "
-                     "syncing and backing up only")
+    today = core.market_today()
+    if session != today:
+        # Runs before today's close, at a weekend, or on a trading holiday all
+        # target an earlier session. Say WHICH of the three it is: "no new
+        # session" on its own reads like a fault, and on 2026-09-14 (Ganesh
+        # Chaturthi) three runs in a row said it about a perfectly healthy store.
+        why = core.nse_session_note(today) or "today's close has not happened yet"
+        log("guard", f"{today} is not a completed session ({why}); "
+                     f"working against {session}")
 
     universes = _universes()
     tickers = core.resolve_universes(universes)
@@ -449,7 +461,14 @@ def run_daily():
 
     freshness = core.data_freshness_status(tickers)
     stored = freshness["latest"]
-    log("fresh", f"stored candles end {stored}, expected {freshness['expected']}")
+    if freshness["awaiting_publication"]:
+        log("fresh", f"stored candles end {stored} — current. {freshness['expected']} has "
+                     f"closed but Dhan publishes daily candles the next morning.")
+    elif freshness["current"]:
+        log("fresh", f"stored candles end {stored} — current")
+    else:
+        log("fresh", f"stored candles end {stored}, but {freshness['published']} is published "
+                     f"and downloadable ({freshness['days_behind']} session(s) behind)")
     summary["traded"] = bool(freshness["current"])
     summary["session"] = str(stored) if stored else None
 
@@ -489,7 +508,7 @@ def run_daily():
         log("scan", f"the provider has not published {freshness['expected']} yet; scanning the "
                     f"newest session actually stored ({stored}) instead of skipping the day.")
 
-    min_score = _env_int("SCAN_MIN_SCORE", 85)
+    min_score = _env_int("SCAN_MIN_SCORE", core.DEFAULT_MIN_SCORE)
     result, regime = step_scan(tickers, _selected_strategies(), min_score, session_date=stored)
     summary["added"] = step_add(result, min_score, session_date=stored)
     summary["regime"] = regime
@@ -688,7 +707,93 @@ def _study_s4_recovery(data, tickers, start, end):
             "metrics": {str(k): v for k, v in (metrics or {}).items()}}
 
 
+def _study_win_probability(data, tickers, start, end):
+    """Check whether the scanner's Win Probability actually ranks outcomes.
+
+    Reads the already-captured signals rather than re-simulating: they carry the
+    features AND what each one went on to do, so this is a fit-and-measure over
+    stored evidence, not another walk-forward.
+    """
+    res = core.win_probability_validation(
+        train_frac=_env_float("WINPROB_TRAIN_FRAC", 0.5),
+        buckets=_env_int("WINPROB_BUCKETS", 10),
+    )
+    if not res.get("ok"):
+        log("study", f"could not validate: {res.get('reason')}")
+        return res
+
+    log("study", f"capture run {res.get('run_id')} — one run only, never the union: earlier "
+                 "runs repeat signals and predate the point-in-time fix")
+    if res.get("duplicate_rows"):
+        log("study", f"WARNING {res['duplicate_rows']:,} duplicate signals inside this run; "
+                     "a duplicate across the cut scores the model on rows it was fitted on")
+    log("study", f"{res['n_total']:,} signals with outcomes — fit on {res['n_train']:,} "
+                 f"({res['train_window'][0]} → {res['train_window'][1]}), "
+                 f"tested on {res['n_test']:,} it never saw "
+                 f"({res['test_window'][0]} → {res['test_window'][1]})")
+    log("study", f"AUC {res['auc']} (0.5 = no better than chance), Brier {res['brier']}, "
+                 f"base rate {res['baseline_win_pct']}% wins")
+    log("study", "bucket  signals  predicted%  actual%   avg R    total R")
+    for b in res["buckets"]:
+        log("study", f"  {b['bucket']:>2}   {b['signals']:>7,}   {b['predicted_win_pct']:>8.2f}"
+                     f"   {b['actual_win_pct']:>6.2f}  {b['avg_r']:>7.4f}  {b['total_r']:>9.2f}")
+    verdict = ("the top bucket is PROFITABLE out of sample"
+               if res.get("top_bucket_profitable") else
+               "even the highest-probability bucket LOSES money out of sample")
+    log("study", f"spread top-minus-bottom {res['spread_r']} R; {verdict}")
+    if not res.get("monotonic"):
+        log("study", "buckets are not monotonic — the ranking is not clean even where it helps")
+    return res
+
+
+def _study_target_calibration(data, tickers, start, end):
+    """What a different profit target would have returned on the same signals.
+
+    Stated before running, so the result cannot be rationalised after: the
+    system targets 3R on a 7% stop, which needs about a 21% move, while average
+    favourable excursion is about 9% and 18% of trades resolve as neither win
+    nor loss. If that is the binding constraint, a nearer target should lift
+    expectancy without touching entries at all.
+    """
+    res = core.target_calibration_holdout()
+    if not res.get("ok"):
+        log("study", f"could not calibrate: {res.get('reason')}")
+        return res
+
+    log("study", f"capture run {res['run_id']} — {res['n']:,} signals, "
+                 f"target actually traded {res.get('traded_target_r')}R, "
+                 f"costs {res['cost_pct_round_trip']}% round trip")
+    log("study", "target   hit%     avg R    median R    total R   profit factor")
+    for r in res["rows"]:
+        pf = "—" if r["profit_factor"] is None else f"{r['profit_factor']:.3f}"
+        log("study", f"  {r['target_r']:>4.2f}R  {r['hit_pct']:>6.2f}  {r['avg_r']:>8.4f}  "
+                     f"{r['median_r']:>9.4f}  {r['total_r']:>10.1f}   {pf:>8}")
+    b, base = res["best"], res["baseline"]
+    log("study", f"best {b['target_r']}R at {b['avg_r']:+.4f} R/trade vs "
+                 f"{base['target_r']}R at {base['avg_r']:+.4f} "
+                 f"({res['improvement_r']:+.4f} R per trade)")
+
+    h = res.get("holdout") or {}
+    if h.get("ok"):
+        log("study", f"hold-out split {h['split_at']}: best on the first half was "
+                     f"{h['chosen_on_first']}R")
+        got = h.get("its_result_on_second") or {}
+        log("study", f"  that same target on the second half: {got.get('avg_r')} R/trade "
+                     f"over {got.get('n')} signals")
+        log("study", "  ranking generalises: "
+                     + ("YES — the same target leads in both halves"
+                        if h.get("ranking_generalises") else "no — a different target leads"))
+        log("study", "  profitable out of sample: "
+                     + ("YES" if h.get("profitable_on_second")
+                        else "NO — the better target is still a smaller loss, not a gain"))
+        log("study", f"  (best on the second half in hindsight was "
+                     f"{(h.get('best_second') or {}).get('target_r')}R)")
+    return res
+
+
 STUDIES = {
+    "target_calibration": _study_target_calibration,
+    "win_probability": _study_win_probability,
     "raw_signals": _study_raw_signals,
     "sl_calibration": _study_sl_calibration,
     "s4_extension": _study_s4_extension,

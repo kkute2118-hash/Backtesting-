@@ -1,322 +1,804 @@
 {
-  "$comment": [
-    "PROPOSAL, NOT A DROP-IN CONFIGURATION. Regenerated 2026-09-06 after the",
-    "point-in-time fix, from gated backtest run 3 (3,147 trades) and ungated",
-    "capture run 3 (95,798 signals) over Nifty 500 daily candles, 2024-09-04 to",
-    "2026-09-04, on ENGINE_VERSION FINAL-3_ASOF_PIT.",
-    "",
-    "This file previously carried findings produced by a leaking feature engine.",
-    "Those findings are recorded under 'withdrawn_findings' rather than deleted,",
-    "so the record of what was believed and why it was wrong is preserved.",
-    "",
-    "Result on corrected data: no strategy, filter or parameter in this dataset",
-    "has a demonstrated edge. Every 'enabled' flag is false and there is no",
-    "recommended configuration to adopt. The next step is hypothesis generation",
-    "with pre-committed acceptance criteria, not deployment."
-  ],
-
-  "audit": {
-    "generated_at": "2026-09-06",
-    "engine_version": "FINAL-3_ASOF_PIT",
-    "universe": "Nifty 500",
-    "window": { "start": "2024-09-04", "end": "2026-09-04" },
-    "gated_trades": 3147,
-    "ungated_signals": 95798,
-    "symbols_with_history": 485,
-    "cost_model_pct_round_trip": 0.23,
-    "headline": {
-      "total_r": -395.4,
-      "expectancy_r": -0.1256,
-      "win_rate_pct": 27.6,
-      "profit_factor": 0.822,
-      "avg_winner_r": 2.107,
-      "avg_loser_r": -0.975,
-      "outcomes": { "loss": 2108, "timeout": 566, "win": 473 }
-    },
-    "by_year": {
-      "year1_2024_09_to_2025_09": { "trades": 1798, "avg_r": -0.279, "total_r": -501.9 },
-      "year2_2025_09_to_2026_09": { "trades": 1349, "avg_r": 0.079, "total_r": 106.5 }
-    },
-    "leaky_comparison": {
-      "$comment": "Same window, gate and universe on the pre-fix engine. The leak did not inflate headline P&L; it fabricated structure.",
-      "gated_trades": 2357,
-      "expectancy_r": -0.1885,
-      "total_r": -444.3,
-      "win_rate_pct": 26.1
-    }
+ "$comment": [
+  "PROPOSAL, NOT A DROP-IN CONFIGURATION. Regenerated 2026-09-06 after the",
+  "point-in-time fix, from gated backtest run 3 (3,147 trades) and ungated",
+  "capture run 3 (95,798 signals) over Nifty 500 daily candles, 2024-09-04 to",
+  "2026-09-04, on ENGINE_VERSION FINAL-3_ASOF_PIT.",
+  "",
+  "This file previously carried findings produced by a leaking feature engine.",
+  "Those findings are recorded under 'withdrawn_findings' rather than deleted,",
+  "so the record of what was believed and why it was wrong is preserved.",
+  "",
+  "Result on corrected data: no strategy, filter or parameter in this dataset",
+  "has a demonstrated edge. Every 'enabled' flag is false and there is no",
+  "recommended configuration to adopt. The next step is hypothesis generation",
+  "with pre-committed acceptance criteria, not deployment."
+ ],
+ "audit": {
+  "generated_at": "2026-09-06",
+  "engine_version": "FINAL-3_ASOF_PIT",
+  "universe": "Nifty 500",
+  "window": {
+   "start": "2024-09-04",
+   "end": "2026-09-04"
   },
-
-  "resolved_defects": [
-    {
-      "id": "higher_timeframe_lookahead",
-      "severity": "invalidating",
-      "status": "fixed",
-      "location": "backend/app/engine/core.py :: features_fast(), _weekly_asof_columns(), _monthly_asof_columns()",
-      "detail": "Weekly and monthly features were built by grouping whole finished periods, so a signal fired mid-period was evaluated against that period's eventual high, low and close. Both the weekly and the monthly path leaked; an earlier audit wrongly reported the weekly path as clean.",
-      "affected": ["S1", "S2", "S3", "S4"],
-      "fix": "_asof_period_blocks() exposes the last completed period's indicator state plus the in-progress period's OHLC as of the signal bar. _asof_ema() and _asof_rsi() apply one exact recursion step, so the in-progress value is exact rather than approximated.",
-      "verification": "backend/tests/regression/test_point_in_time.py computes every feature on the full history and on frames truncated at each date and requires equality at the truncation point. It also reconstructs the old grouping implementation and asserts the test rejects it.",
-      "confidence": "high"
-    },
-    {
-      "id": "silent_study_failure",
-      "severity": "invalidating",
-      "status": "fixed",
-      "detail": "A bare except turned 'every symbol crashed' into 'no signals found'. Two studies reported success while capturing nothing for their entire existence.",
-      "fix": "run_raw_signal_backtest() and run_sl_calibration_study() attach a diagnostics counter (symbols / no_data / short_history / no_features / failed / scanned) and raise when nothing was scanned.",
-      "confidence": "high"
-    },
-    {
-      "id": "candles_dated_one_day_early",
-      "severity": "invalidating",
-      "status": "fixed",
-      "detail": "Dhan returns IST-stamped epochs that were parsed as UTC.",
-      "fix": "_dhan_session_index() normalises through Asia/Kolkata.",
-      "confidence": "high"
-    },
-    {
-      "id": "duplicate_signal_persistence",
-      "severity": "data_quality",
-      "status": "fixed",
-      "detail": "177,890 rows written for 88,945 signals, from a redundant write in the job wrapper.",
-      "confidence": "high"
-    },
-    {
-      "id": "stale_feature_cache",
-      "severity": "invalidating",
-      "status": "fixed",
-      "detail": "The feature snapshot cache served pre-fix features to a post-fix run, briefly making the corrected engine appear to still leak.",
-      "fix": "Cache is keyed on ENGINE_VERSION, bumped to FINAL-3_ASOF_PIT.",
-      "confidence": "high"
-    }
-  ],
-
-  "open_defects": [
-    {
-      "id": "survivorship_bias",
-      "severity": "optimistic",
-      "location": "backend/app/engine/core.py :: index_universe()",
-      "detail": "Today's Nifty 500 constituent list is applied to the whole history. Demoted names are absent; promoted names are present for periods when they were not members.",
-      "affects": ["all"],
-      "fix": "Store index membership with effective dates from today forward; the past cannot be recovered.",
-      "measured_effect": null,
-      "confidence": "high"
-    },
-    {
-      "id": "stop_fills_through_gaps",
-      "severity": "optimistic_small",
-      "location": "backend/app/engine/core.py :: _professional_bt(), run_raw_signal_backtest()",
-      "detail": "Assumes a fill at exactly the stop price. 109 of 1,599 stop-outs (6.8%) opened below the stop; realistic fill on those averaged -9.74% against -7.00% modelled, worst -19.41%.",
-      "measured_effect_r_per_trade": -0.018,
-      "fix": "Fill at min(stop, bar.open).",
-      "confidence": "high"
-    },
-    {
-      "id": "corporate_actions_unverified",
-      "severity": "unknown",
-      "location": "no adjustment code exists",
-      "detail": "Nothing adjusts for splits or bonuses. Unadjusted history would manufacture false breakdowns and false volume spikes.",
-      "fix": "Reconcile known 2024-2026 split dates against stored candles.",
-      "confidence": "insufficient_evidence"
-    },
-    {
-      "id": "overlapping_samples",
-      "severity": "inferential",
-      "detail": "Many signals per stock with overlapping forward windows. The effective sample is far smaller than the row count, so any p-value computed on n is badly overstated.",
-      "fix": "Block bootstrap by symbol and date, or one-signal-per-symbol-per-window sampling, before any significance claim.",
-      "confidence": "high"
-    }
-  ],
-
-  "scoring_system": {
-    "enabled": false,
-    "current_gate": 85,
-    "recommended_gate": null,
-    "verdict": "uninformative",
-    "evidence": {
-      "method": "Average R by score band across 95,798 point-in-time ungated signals.",
-      "bands": [
-        { "range": "40-49", "signals": 2010,  "win_pct": 28.5, "avg_r": -0.128 },
-        { "range": "50-59", "signals": 20238, "win_pct": 28.0, "avg_r": -0.138 },
-        { "range": "60-69", "signals": 23136, "win_pct": 28.8, "avg_r": -0.121 },
-        { "range": "70-79", "signals": 37333, "win_pct": 30.2, "avg_r": -0.095 },
-        { "range": "80-89", "signals": 12821, "win_pct": 28.9, "avg_r": -0.102 },
-        { "range": "90-99", "signals": 255,   "win_pct": 24.7, "avg_r": -0.231 }
-      ],
-      "reading": "No ordering. The populated range spans about 0.05R against roughly 0.21R on the leaky engine. The score neither selects nor anti-selects; it carries no information about outcome.",
-      "quintile_spread_r": 0.023,
-      "years_agree": true
-    },
-    "confidence": "high"
+  "gated_trades": 3147,
+  "ungated_signals": 95798,
+  "symbols_with_history": 485,
+  "cost_model_pct_round_trip": 0.23,
+  "headline": {
+   "total_r": -395.4,
+   "expectancy_r": -0.1256,
+   "win_rate_pct": 27.6,
+   "profit_factor": 0.822,
+   "avg_winner_r": 2.107,
+   "avg_loser_r": -0.975,
+   "outcomes": {
+    "loss": 2108,
+    "timeout": 566,
+    "win": 473
+   }
   },
-
-  "strategies": [
-    {
-      "strategy_name": "S1",
-      "enabled": false,
-      "reason_disabled": "negative_expectancy",
-      "ungated": { "signals": 36748, "win_pct": 28.7, "avg_r": -0.090 },
-      "gated_2y": { "trades": 2310, "win_pct": 28.5, "avg_r": -0.081, "total_r": -186.6 },
-      "gated_by_year": { "year1": { "trades": 1335, "avg_r": -0.257 }, "year2": { "trades": 975, "avg_r": 0.160 } },
-      "robustness_score": 0,
-      "overfitting_risk": "low",
-      "confidence": "high",
-      "note": "Largest contributor to signal count. Loses on both the gated and ungated samples; the two years disagree in sign, so the year-two positive is not evidence of an edge."
-    },
-    {
-      "strategy_name": "S2",
-      "enabled": false,
-      "reason_disabled": "sample_too_small",
-      "ungated": { "signals": 3298, "win_pct": 30.4, "avg_r": -0.075 },
-      "gated_2y": { "trades": 44, "win_pct": 38.6, "avg_r": 0.146, "total_r": 6.4 },
-      "gated_by_year": { "year1": { "trades": 26, "avg_r": 0.009 }, "year2": { "trades": 18, "avg_r": 0.344 } },
-      "robustness_score": null,
-      "overfitting_risk": "high",
-      "confidence": "insufficient_evidence",
-      "note": "Positive gated on 44 trades, negative on 3,298 ungated signals. The gated positive is a small-sample artefact of the 85 gate, which the score evidence says is uninformative."
-    },
-    {
-      "strategy_name": "S3",
-      "enabled": false,
-      "reason_disabled": "negative_expectancy",
-      "ungated": { "signals": 53959, "win_pct": 29.3, "avg_r": -0.139 },
-      "gated_2y": { "trades": 793, "win_pct": 24.2, "avg_r": -0.271, "total_r": -215.2 },
-      "gated_by_year": { "year1": { "trades": 437, "avg_r": -0.365 }, "year2": { "trades": 356, "avg_r": -0.157 } },
-      "robustness_score": 0,
-      "overfitting_risk": "low",
-      "confidence": "high",
-      "note": "Now the worst performer, and negative in both years. Previously described as the one uncontaminated strategy; that was wrong, its weekly features leaked too."
-    },
-    {
-      "strategy_name": "S4",
-      "enabled": false,
-      "reason_disabled": "unstable_across_years",
-      "ungated": { "signals": 1793, "win_pct": 33.6, "avg_r": 0.161 },
-      "ungated_by_year": { "year1": { "signals": 726, "avg_r": -0.069 }, "year2": { "signals": 1067, "avg_r": 0.318 } },
-      "gated_2y": { "trades": 0, "note": "no S4 signal cleared the 85 gate in two years" },
-      "robustness_score": 0,
-      "overfitting_risk": "high",
-      "confidence": "insufficient_evidence",
-      "note": "The only positive number of any size left in the system, and it is carried entirely by year two. Its leaky record was +1.286R at a 62.4% win rate, which is what first exposed the look-ahead."
-    }
-  ],
-
-  "filters": [
-    {
-      "id": "ema200_proximity",
-      "status": "rejected",
-      "previous_status": "candidate",
-      "rule": "dist_ema200_atr <= bottom quintile",
-      "evidence_corrected": {
-        "quintile_cut_atr": 1.057,
-        "year1_near": { "signals": 9193, "win_pct": 30.8, "avg_r": -0.065 },
-        "year2_near": { "signals": 9972, "win_pct": 30.4, "avg_r": -0.083 },
-        "year1_extended": { "signals": 40253, "avg_r": -0.236 },
-        "year2_extended": { "signals": 36380, "avg_r": 0.005 }
-      },
-      "evidence_leaky_withdrawn": {
-        "quintile_cut_atr": 0.962,
-        "year1_near": { "signals": 8603, "win_pct": 35.1, "avg_r": 0.120 },
-        "year2_near": { "signals": 9195, "win_pct": 35.0, "avg_r": 0.102 }
-      },
-      "distance_sweep": "0.25 to 3.0+ ATR shows no plateau, and the two year-columns disagree in sign across most of the range.",
-      "confidence": "high",
-      "note": "The sign inverts in both years independently, and in year two the extended cohort is the marginally positive one. This was the audit's only surviving edge; it does not survive."
-    }
-  ],
-
-  "feature_screen": {
-    "$comment": "Average R in the bottom vs top quintile of each field over 95,798 point-in-time ungated signals, with the spread's sign checked separately in each year. A field qualifies only if the direction agrees across years AND one extreme quintile is positive-expectancy in both years. These are screens, not significance tests; see open_defects.overlapping_samples.",
-    "fields_screened": 28,
-    "direction_consistent_across_years": 17,
-    "qualifying": [],
-    "qualifying_count": 0,
-    "interpretation": "No feature captured at signal time identifies a cohort with positive expectancy in both years. The audit's conclusion that extension predicts underperformance does not survive either: dist_ema200_atr is no longer even direction-consistent (spread -0.073, years disagree), and dist_ema50_atr now reads the opposite way (+0.143).",
-    "notable": [
-      { "feature": "dist_ema50_atr",  "bottom_q": -0.199, "top_q": -0.056, "spread":  0.143, "years_agree": true,  "positive_cohort": false },
-      { "feature": "macd_hist",       "bottom_q": -0.044, "top_q": -0.203, "spread": -0.159, "years_agree": true,  "positive_cohort": false },
-      { "feature": "safety_score",    "bottom_q": -0.020, "top_q": -0.204, "spread": -0.184, "years_agree": true,  "positive_cohort": false },
-      { "feature": "dist_ema200_atr", "bottom_q": -0.074, "top_q": -0.148, "spread": -0.073, "years_agree": false, "positive_cohort": false },
-      { "feature": "score",           "bottom_q": -0.129, "top_q": -0.106, "spread":  0.023, "years_agree": true,  "positive_cohort": false }
-    ]
+  "by_year": {
+   "year1_2024_09_to_2025_09": {
+    "trades": 1798,
+    "avg_r": -0.279,
+    "total_r": -501.9
+   },
+   "year2_2025_09_to_2026_09": {
+    "trades": 1349,
+    "avg_r": 0.079,
+    "total_r": 106.5
+   }
   },
-
-  "exit_rules": {
-    "current": {
-      "stop": "entry * 0.93",
-      "target": "entry + 3 * (entry - stop)",
-      "timeout_bars": 60,
-      "applies_to": "all four strategies identically"
-    },
-    "evidence": {
-      "sample": "3,147 gated trades, corrected engine, two years",
-      "reach_target_pct": 15.0,
-      "hit_stop_pct": 67.0,
-      "timeout_pct": 18.0,
-      "avg_mfe_pct": 8.99,
-      "avg_mae_pct": -6.88,
-      "avg_realised_pct": -0.90,
-      "excursion_distribution": {
-        "+3%": 69.0, "+5%": 52.5, "+7%": 44.2, "+10%": 34.0, "+15%": 24.2, "+21%": 15.0
-      }
-    },
-    "stop_placement_study": {
-      "status": "invalid_pending_rerun",
-      "detail": "The five-scheme calibration ran on the leaky engine's signal set. Its conclusion — all five schemes lose, and the best beats the current fixed 7% stop by 0.011R — is not evidence until re-run point-in-time.",
-      "withdrawn_earlier_claim": "A six-symbol preview put a 1.5x ATR stop well ahead of the fixed stop. At full scale it was the worst ATR scheme of three. The preview was noise."
-    },
-    "recommendation": null,
-    "status": "untested",
-    "confidence": "insufficient_evidence",
-    "note": "Two thirds of trades reach +3% and 44% reach +7%, but the rule only pays at +21%, which 15% reach. The target half of the exit has never been varied in any study. It is the largest untested lever in the system and it says nothing about whether an edge exists."
+  "leaky_comparison": {
+   "$comment": "Same window, gate and universe on the pre-fix engine. The leak did not inflate headline P&L; it fabricated structure.",
+   "gated_trades": 2357,
+   "expectancy_r": -0.1885,
+   "total_r": -444.3,
+   "win_rate_pct": 26.1
+  }
+ },
+ "resolved_defects": [
+  {
+   "id": "higher_timeframe_lookahead",
+   "severity": "invalidating",
+   "status": "fixed",
+   "location": "backend/app/engine/core.py :: features_fast(), _weekly_asof_columns(), _monthly_asof_columns()",
+   "detail": "Weekly and monthly features were built by grouping whole finished periods, so a signal fired mid-period was evaluated against that period's eventual high, low and close. Both the weekly and the monthly path leaked; an earlier audit wrongly reported the weekly path as clean.",
+   "affected": [
+    "S1",
+    "S2",
+    "S3",
+    "S4"
+   ],
+   "fix": "_asof_period_blocks() exposes the last completed period's indicator state plus the in-progress period's OHLC as of the signal bar. _asof_ema() and _asof_rsi() apply one exact recursion step, so the in-progress value is exact rather than approximated.",
+   "verification": "backend/tests/regression/test_point_in_time.py computes every feature on the full history and on frames truncated at each date and requires equality at the truncation point. It also reconstructs the old grouping implementation and asserts the test rejects it.",
+   "confidence": "high"
   },
-
-  "withdrawn_findings": [
+  {
+   "id": "silent_study_failure",
+   "severity": "invalidating",
+   "status": "fixed",
+   "detail": "A bare except turned 'every symbol crashed' into 'no signals found'. Two studies reported success while capturing nothing for their entire existence.",
+   "fix": "run_raw_signal_backtest() and run_sl_calibration_study() attach a diagnostics counter (symbols / no_data / short_history / no_features / failed / scanned) and raise when nothing was scanned.",
+   "confidence": "high"
+  },
+  {
+   "id": "candles_dated_one_day_early",
+   "severity": "invalidating",
+   "status": "fixed",
+   "detail": "Dhan returns IST-stamped epochs that were parsed as UTC.",
+   "fix": "_dhan_session_index() normalises through Asia/Kolkata.",
+   "confidence": "high"
+  },
+  {
+   "id": "duplicate_signal_persistence",
+   "severity": "data_quality",
+   "status": "fixed",
+   "detail": "177,890 rows written for 88,945 signals, from a redundant write in the job wrapper.",
+   "confidence": "high"
+  },
+  {
+   "id": "stale_feature_cache",
+   "severity": "invalidating",
+   "status": "fixed",
+   "detail": "The feature snapshot cache served pre-fix features to a post-fix run, briefly making the corrected engine appear to still leak.",
+   "fix": "Cache is keyed on ENGINE_VERSION, bumped to FINAL-3_ASOF_PIT.",
+   "confidence": "high"
+  }
+ ],
+ "open_defects": [
+  {
+   "id": "survivorship_bias",
+   "severity": "optimistic",
+   "location": "backend/app/engine/core.py :: index_universe()",
+   "detail": "Today's Nifty 500 constituent list is applied to the whole history. Demoted names are absent; promoted names are present for periods when they were not members.",
+   "affects": [
+    "all"
+   ],
+   "fix": "Store index membership with effective dates from today forward; the past cannot be recovered.",
+   "measured_effect": null,
+   "confidence": "high"
+  },
+  {
+   "id": "stop_fills_through_gaps",
+   "severity": "optimistic_small",
+   "location": "backend/app/engine/core.py :: _professional_bt(), run_raw_signal_backtest()",
+   "detail": "Assumes a fill at exactly the stop price. 109 of 1,599 stop-outs (6.8%) opened below the stop; realistic fill on those averaged -9.74% against -7.00% modelled, worst -19.41%.",
+   "measured_effect_r_per_trade": -0.018,
+   "fix": "Fill at min(stop, bar.open).",
+   "confidence": "high"
+  },
+  {
+   "id": "corporate_actions_unverified",
+   "severity": "unknown",
+   "location": "no adjustment code exists",
+   "detail": "Nothing adjusts for splits or bonuses. Unadjusted history would manufacture false breakdowns and false volume spikes.",
+   "fix": "Reconcile known 2024-2026 split dates against stored candles.",
+   "confidence": "insufficient_evidence"
+  },
+  {
+   "id": "overlapping_samples",
+   "severity": "inferential",
+   "detail": "Many signals per stock with overlapping forward windows. The effective sample is far smaller than the row count, so any p-value computed on n is badly overstated.",
+   "fix": "Block bootstrap by symbol and date, or one-signal-per-symbol-per-window sampling, before any significance claim.",
+   "confidence": "high"
+  }
+ ],
+ "scoring_system": {
+  "enabled": false,
+  "current_gate": 85,
+  "recommended_gate": null,
+  "verdict": "uninformative",
+  "evidence": {
+   "method": "Average R by score band across 95,798 point-in-time ungated signals.",
+   "bands": [
     {
-      "claim": "The scoring system is inversely predictive; average R falls monotonically as score rises.",
-      "basis_at_the_time": "88,945 ungated signals on the leaky engine, ordering reproduced in both years.",
-      "why_withdrawn": "The gradient was an artefact of the look-ahead. Low-score signals were disproportionately those whose higher-timeframe context came from an unfinished period. Corrected, all bands sit between -0.09R and -0.14R with no ordering.",
-      "replacement": "scoring_system.verdict = uninformative"
+     "range": "40-49",
+     "signals": 2010,
+     "win_pct": 28.5,
+     "avg_r": -0.128
     },
     {
-      "claim": "Proximity to the 200 EMA is the one relationship that reproduces out of sample (+0.120R / +0.102R).",
-      "basis_at_the_time": "Bottom quintile of dist_ema200_atr, ~9,000 signals per year, win rates within 0.1 points.",
-      "why_withdrawn": "Recomputed point-in-time it is -0.065R and -0.083R. The sign inverted in both years independently and the distance sweep shows no plateau.",
-      "replacement": "filters[ema200_proximity].status = rejected"
+     "range": "50-59",
+     "signals": 20238,
+     "win_pct": 28.0,
+     "avg_r": -0.138
     },
     {
-      "claim": "S3 is the only strategy whose backtest is trustworthy, because it reads no monthly fields.",
-      "basis_at_the_time": "Field-level inventory of strategy inputs; the weekly path was read as correctly as-of.",
-      "why_withdrawn": "The weekly path used the same whole-completed-period grouping. Every strategy was contaminated, so S3 was never a valid control. Two arguments that leaned on it as a control - that the trustworthy strategy loses money, and that the bear-regime edge vanishes on clean data - happen to hold on corrected data, but as new results rather than confirmed ones.",
-      "replacement": "strategies[S3] with corrected figures"
+     "range": "60-69",
+     "signals": 23136,
+     "win_pct": 28.8,
+     "avg_r": -0.121
     },
     {
-      "claim": "The 90-94 score band is the edge (+28.9R on 73 trades).",
-      "basis_at_the_time": "One-year gated sample.",
-      "why_withdrawn": "Inverted out of sample: -37.4R in year one against +24.0R in year two on the same rule.",
-      "replacement": null
+     "range": "70-79",
+     "signals": 37333,
+     "win_pct": 30.2,
+     "avg_r": -0.095
+    },
+    {
+     "range": "80-89",
+     "signals": 12821,
+     "win_pct": 28.9,
+     "avg_r": -0.102
+    },
+    {
+     "range": "90-99",
+     "signals": 255,
+     "win_pct": 24.7,
+     "avg_r": -0.231
     }
-  ],
-
-  "not_assessed": {
-    "$comment": "Requested by the brief; the data cannot support them. Listed so nothing here is mistaken for a gap in the analysis rather than a gap in the data.",
-    "sector_analysis": "no sector mapping stored",
-    "market_cap_cohorts": "no capitalisation field",
-    "timeframe_comparison": "only daily candles stored; weekly and monthly are derived",
-    "parameter_sweeps": "thresholds hard-coded in strategy_signal(); must be parameterised first",
-    "sharpe_sortino_cagr": "backtest records R, not portfolio equity",
-    "monte_carlo": "resampling overlapping trades without a block scheme produces confident nonsense",
-    "walk_forward_optimisation": "there is no candidate with a positive in-sample edge to walk forward",
-    "survivorship_quantification": "point-in-time index membership was never stored; not recoverable for this window",
-    "corporate_action_reconciliation": "not yet run"
+   ],
+   "reading": "No ordering. The populated range spans about 0.05R against roughly 0.21R on the leaky engine. The score neither selects nor anti-selects; it carries no information about outcome.",
+   "quintile_spread_r": 0.023,
+   "years_agree": true
   },
-
-  "next_steps": [
-    "Re-run the stop-placement calibration on the point-in-time engine so the exit study becomes evidence.",
-    "Vary the target, which no study has ever varied, against the observed +9% average favourable excursion.",
-    "Begin storing point-in-time Nifty 500 membership with effective dates.",
-    "Reconcile known 2024-2026 split and bonus dates against stored candles.",
-    "Fill stops at min(stop, bar.open).",
-    "Before testing any new hypothesis, write down the acceptance criteria first: a stated mechanism, a pre-committed hold-out period, and a minimum effect size that clears realistic costs."
+  "confidence": "high"
+ },
+ "strategies": [
+  {
+   "strategy_name": "S1",
+   "enabled": false,
+   "reason_disabled": "negative_expectancy",
+   "ungated": {
+    "signals": 36748,
+    "win_pct": 28.7,
+    "avg_r": -0.09
+   },
+   "gated_2y": {
+    "trades": 2310,
+    "win_pct": 28.5,
+    "avg_r": -0.081,
+    "total_r": -186.6
+   },
+   "gated_by_year": {
+    "year1": {
+     "trades": 1335,
+     "avg_r": -0.257
+    },
+    "year2": {
+     "trades": 975,
+     "avg_r": 0.16
+    }
+   },
+   "robustness_score": 0,
+   "overfitting_risk": "low",
+   "confidence": "high",
+   "note": "Largest contributor to signal count. Loses on both the gated and ungated samples; the two years disagree in sign, so the year-two positive is not evidence of an edge."
+  },
+  {
+   "strategy_name": "S2",
+   "enabled": false,
+   "reason_disabled": "sample_too_small",
+   "ungated": {
+    "signals": 3298,
+    "win_pct": 30.4,
+    "avg_r": -0.075
+   },
+   "gated_2y": {
+    "trades": 44,
+    "win_pct": 38.6,
+    "avg_r": 0.146,
+    "total_r": 6.4
+   },
+   "gated_by_year": {
+    "year1": {
+     "trades": 26,
+     "avg_r": 0.009
+    },
+    "year2": {
+     "trades": 18,
+     "avg_r": 0.344
+    }
+   },
+   "robustness_score": null,
+   "overfitting_risk": "high",
+   "confidence": "insufficient_evidence",
+   "note": "Positive gated on 44 trades, negative on 3,298 ungated signals. The gated positive is a small-sample artefact of the 85 gate, which the score evidence says is uninformative."
+  },
+  {
+   "strategy_name": "S3",
+   "enabled": false,
+   "reason_disabled": "negative_expectancy",
+   "ungated": {
+    "signals": 53959,
+    "win_pct": 29.3,
+    "avg_r": -0.139
+   },
+   "gated_2y": {
+    "trades": 793,
+    "win_pct": 24.2,
+    "avg_r": -0.271,
+    "total_r": -215.2
+   },
+   "gated_by_year": {
+    "year1": {
+     "trades": 437,
+     "avg_r": -0.365
+    },
+    "year2": {
+     "trades": 356,
+     "avg_r": -0.157
+    }
+   },
+   "robustness_score": 0,
+   "overfitting_risk": "low",
+   "confidence": "high",
+   "note": "Now the worst performer, and negative in both years. Previously described as the one uncontaminated strategy; that was wrong, its weekly features leaked too."
+  },
+  {
+   "strategy_name": "S4",
+   "enabled": false,
+   "reason_disabled": "unstable_across_years",
+   "ungated": {
+    "signals": 1793,
+    "win_pct": 33.6,
+    "avg_r": 0.161
+   },
+   "ungated_by_year": {
+    "year1": {
+     "signals": 726,
+     "avg_r": -0.069
+    },
+    "year2": {
+     "signals": 1067,
+     "avg_r": 0.318
+    }
+   },
+   "gated_2y": {
+    "trades": 0,
+    "note": "no S4 signal cleared the 85 gate in two years"
+   },
+   "robustness_score": 0,
+   "overfitting_risk": "high",
+   "confidence": "insufficient_evidence",
+   "note": "The only positive number of any size left in the system, and it is carried entirely by year two. Its leaky record was +1.286R at a 62.4% win rate, which is what first exposed the look-ahead."
+  }
+ ],
+ "filters": [
+  {
+   "id": "ema200_proximity",
+   "status": "rejected",
+   "previous_status": "candidate",
+   "rule": "dist_ema200_atr <= bottom quintile",
+   "evidence_corrected": {
+    "quintile_cut_atr": 1.057,
+    "year1_near": {
+     "signals": 9193,
+     "win_pct": 30.8,
+     "avg_r": -0.065
+    },
+    "year2_near": {
+     "signals": 9972,
+     "win_pct": 30.4,
+     "avg_r": -0.083
+    },
+    "year1_extended": {
+     "signals": 40253,
+     "avg_r": -0.236
+    },
+    "year2_extended": {
+     "signals": 36380,
+     "avg_r": 0.005
+    }
+   },
+   "evidence_leaky_withdrawn": {
+    "quintile_cut_atr": 0.962,
+    "year1_near": {
+     "signals": 8603,
+     "win_pct": 35.1,
+     "avg_r": 0.12
+    },
+    "year2_near": {
+     "signals": 9195,
+     "win_pct": 35.0,
+     "avg_r": 0.102
+    }
+   },
+   "distance_sweep": "0.25 to 3.0+ ATR shows no plateau, and the two year-columns disagree in sign across most of the range.",
+   "confidence": "high",
+   "note": "The sign inverts in both years independently, and in year two the extended cohort is the marginally positive one. This was the audit's only surviving edge; it does not survive."
+  }
+ ],
+ "feature_screen": {
+  "$comment": "Average R in the bottom vs top quintile of each field over 95,798 point-in-time ungated signals, with the spread's sign checked separately in each year. A field qualifies only if the direction agrees across years AND one extreme quintile is positive-expectancy in both years. These are screens, not significance tests; see open_defects.overlapping_samples.",
+  "fields_screened": 28,
+  "direction_consistent_across_years": 17,
+  "qualifying": [],
+  "qualifying_count": 0,
+  "interpretation": "No feature captured at signal time identifies a cohort with positive expectancy in both years. The audit's conclusion that extension predicts underperformance does not survive either: dist_ema200_atr is no longer even direction-consistent (spread -0.073, years disagree), and dist_ema50_atr now reads the opposite way (+0.143).",
+  "notable": [
+   {
+    "feature": "dist_ema50_atr",
+    "bottom_q": -0.199,
+    "top_q": -0.056,
+    "spread": 0.143,
+    "years_agree": true,
+    "positive_cohort": false
+   },
+   {
+    "feature": "macd_hist",
+    "bottom_q": -0.044,
+    "top_q": -0.203,
+    "spread": -0.159,
+    "years_agree": true,
+    "positive_cohort": false
+   },
+   {
+    "feature": "safety_score",
+    "bottom_q": -0.02,
+    "top_q": -0.204,
+    "spread": -0.184,
+    "years_agree": true,
+    "positive_cohort": false
+   },
+   {
+    "feature": "dist_ema200_atr",
+    "bottom_q": -0.074,
+    "top_q": -0.148,
+    "spread": -0.073,
+    "years_agree": false,
+    "positive_cohort": false
+   },
+   {
+    "feature": "score",
+    "bottom_q": -0.129,
+    "top_q": -0.106,
+    "spread": 0.023,
+    "years_agree": true,
+    "positive_cohort": false
+   }
   ]
+ },
+ "exit_rules": {
+  "current": {
+   "stop": "entry * 0.93",
+   "target": "entry + 3 * (entry - stop)",
+   "timeout_bars": 60,
+   "applies_to": "all four strategies identically"
+  },
+  "evidence": {
+   "sample": "3,147 gated trades, corrected engine, two years",
+   "reach_target_pct": 15.0,
+   "hit_stop_pct": 67.0,
+   "timeout_pct": 18.0,
+   "avg_mfe_pct": 8.99,
+   "avg_mae_pct": -6.88,
+   "avg_realised_pct": -0.9,
+   "excursion_distribution": {
+    "+3%": 69.0,
+    "+5%": 52.5,
+    "+7%": 44.2,
+    "+10%": 34.0,
+    "+15%": 24.2,
+    "+21%": 15.0
+   }
+  },
+  "stop_placement_study": {
+   "status": "invalid_pending_rerun",
+   "detail": "The five-scheme calibration ran on the leaky engine's signal set. Its conclusion — all five schemes lose, and the best beats the current fixed 7% stop by 0.011R — is not evidence until re-run point-in-time.",
+   "withdrawn_earlier_claim": "A six-symbol preview put a 1.5x ATR stop well ahead of the fixed stop. At full scale it was the worst ATR scheme of three. The preview was noise."
+  },
+  "recommendation": "Do not adopt a 0.5R target as a fix. It is the least-bad point on a losing curve, not a profitable configuration. Treat it only as the measurement that closes exit tuning.",
+  "status": "target_tested_stop_still_pending",
+  "confidence": "insufficient_evidence",
+  "note": "Two thirds of trades reach +3% and 44% reach +7%, but the rule only pays at +21%, which 15% reach. The target half of the exit has never been varied in any study. It is the largest untested lever in the system and it says nothing about whether an edge exists.",
+  "target_study": {
+   "status": "complete",
+   "generated_at": "2026-09-12",
+   "engine_version": "FINAL-3_ASOF_PIT",
+   "sample": "95,798 point-in-time ungated signals, capture run 3, one run only",
+   "method": "Reconstructed from stored maximum favourable excursion: if MFE in R reaches a target at or below the 3R actually traded, that target was touched before the recorded exit and the trade closes there; otherwise the recorded outcome stands. Costs 0.23% round trip, charged in R by each trade's own stop distance.",
+   "hypothesis_stated_before_running": "3R on a 7% stop needs about a 21% move while average favourable excursion is about 9%, so the target should be the binding constraint and a nearer one should lift expectancy without touching any entry rule.",
+   "sweep": [
+    {
+     "target_r": 0.5,
+     "hit_pct": 66.1,
+     "break_even_pct": 66.67,
+     "shortfall_pt": -0.57,
+     "avg_r": -0.0305,
+     "profit_factor": 0.91
+    },
+    {
+     "target_r": 0.75,
+     "hit_pct": 53.32,
+     "break_even_pct": 57.14,
+     "shortfall_pt": -3.82,
+     "avg_r": -0.0795,
+     "profit_factor": 0.828
+    },
+    {
+     "target_r": 1.0,
+     "hit_pct": 44.68,
+     "break_even_pct": 50.0,
+     "shortfall_pt": -5.32,
+     "avg_r": -0.1037,
+     "profit_factor": 0.808
+    },
+    {
+     "target_r": 1.25,
+     "hit_pct": 38.07,
+     "break_even_pct": 44.44,
+     "shortfall_pt": -6.37,
+     "avg_r": -0.1205,
+     "profit_factor": 0.797
+    },
+    {
+     "target_r": 1.5,
+     "hit_pct": 32.94,
+     "break_even_pct": 40.0,
+     "shortfall_pt": -7.06,
+     "avg_r": -0.1259,
+     "profit_factor": 0.8
+    },
+    {
+     "target_r": 2.0,
+     "hit_pct": 24.93,
+     "break_even_pct": 33.33,
+     "shortfall_pt": -8.4,
+     "avg_r": -0.1293,
+     "profit_factor": 0.807
+    },
+    {
+     "target_r": 2.5,
+     "hit_pct": 18.88,
+     "break_even_pct": 28.57,
+     "shortfall_pt": -9.69,
+     "avg_r": -0.1331,
+     "profit_factor": 0.808
+    },
+    {
+     "target_r": 3.0,
+     "hit_pct": 14.23,
+     "break_even_pct": 25.0,
+     "shortfall_pt": -10.77,
+     "avg_r": -0.1407,
+     "profit_factor": 0.801
+    }
+   ],
+   "holdout": {
+    "split_at": "2025-08-22",
+    "best_first_half": {
+     "target_r": 0.5,
+     "avg_r": -0.0514,
+     "n": 47991
+    },
+    "best_second_half": {
+     "target_r": 0.5,
+     "avg_r": -0.0095,
+     "n": 47807
+    },
+    "ranking_generalises": true,
+    "profitable_out_of_sample": false,
+    "note": "The choice generalises and the profit does not. 0.5R leads in both halves, so the ranking is real; it is still a loss in both. The second half is also not monotonic — it worsens to 1.25R then improves back toward 3R — so the shape of the relationship is not stable even where its argmax is."
+   },
+   "verdict": "the_target_is_the_largest_lever_found_and_it_is_not_enough",
+   "reading": "Moving 3R to 0.5R is worth +0.1102 R per trade, about +10,550R over the sample — far larger than anything the score, the features or the win-probability model produced. Every target is still negative and no profit factor exceeds 0.91. Break-even for a target T against a 1R stop is 1/(1+T); the shortfall narrows monotonically from -10.77 points at 3R to -0.57 points at 0.5R and never crosses zero. A system whose every exit sits just below its own break-even line is one whose entries carry no information: changing the exit rearranges the loss, it does not create a gain.",
+   "implication": "Exit tuning is now closed as an avenue. The remaining question is entries, and nothing captured at signal time has yet separated winners from losers — 28 features screened, none qualifying, and the win-probability model scores AUC 0.4925 out of sample with its top decile the worst performer.",
+   "enabled": false,
+   "confidence": "high"
+  }
+ },
+ "withdrawn_findings": [
+  {
+   "claim": "The scoring system is inversely predictive; average R falls monotonically as score rises.",
+   "basis_at_the_time": "88,945 ungated signals on the leaky engine, ordering reproduced in both years.",
+   "why_withdrawn": "The gradient was an artefact of the look-ahead. Low-score signals were disproportionately those whose higher-timeframe context came from an unfinished period. Corrected, all bands sit between -0.09R and -0.14R with no ordering.",
+   "replacement": "scoring_system.verdict = uninformative"
+  },
+  {
+   "claim": "Proximity to the 200 EMA is the one relationship that reproduces out of sample (+0.120R / +0.102R).",
+   "basis_at_the_time": "Bottom quintile of dist_ema200_atr, ~9,000 signals per year, win rates within 0.1 points.",
+   "why_withdrawn": "Recomputed point-in-time it is -0.065R and -0.083R. The sign inverted in both years independently and the distance sweep shows no plateau.",
+   "replacement": "filters[ema200_proximity].status = rejected"
+  },
+  {
+   "claim": "S3 is the only strategy whose backtest is trustworthy, because it reads no monthly fields.",
+   "basis_at_the_time": "Field-level inventory of strategy inputs; the weekly path was read as correctly as-of.",
+   "why_withdrawn": "The weekly path used the same whole-completed-period grouping. Every strategy was contaminated, so S3 was never a valid control. Two arguments that leaned on it as a control - that the trustworthy strategy loses money, and that the bear-regime edge vanishes on clean data - happen to hold on corrected data, but as new results rather than confirmed ones.",
+   "replacement": "strategies[S3] with corrected figures"
+  },
+  {
+   "claim": "The 90-94 score band is the edge (+28.9R on 73 trades).",
+   "basis_at_the_time": "One-year gated sample.",
+   "why_withdrawn": "Inverted out of sample: -37.4R in year one against +24.0R in year two on the same rule.",
+   "replacement": null
+  }
+ ],
+ "not_assessed": {
+  "$comment": "Requested by the brief; the data cannot support them. Listed so nothing here is mistaken for a gap in the analysis rather than a gap in the data.",
+  "sector_analysis": "no sector mapping stored",
+  "market_cap_cohorts": "no capitalisation field",
+  "timeframe_comparison": "only daily candles stored; weekly and monthly are derived",
+  "parameter_sweeps": "thresholds hard-coded in strategy_signal(); must be parameterised first",
+  "sharpe_sortino_cagr": "backtest records R, not portfolio equity",
+  "monte_carlo": "resampling overlapping trades without a block scheme produces confident nonsense",
+  "walk_forward_optimisation": "there is no candidate with a positive in-sample edge to walk forward",
+  "survivorship_quantification": "point-in-time index membership was never stored; not recoverable for this window",
+  "corporate_action_reconciliation": "not yet run"
+ },
+ "next_steps": [
+  "Entries are the only remaining avenue: exits are now measured and closed.",
+  "Any new entry hypothesis needs a stated mechanism, a pre-committed hold-out, and a minimum effect size that clears 0.23% round-trip costs AND the 0.57-point gap that 0.5R leaves.",
+  "Re-run the stop-placement calibration point-in-time so the other half of the exit is evidence too.",
+  "Begin storing point-in-time Nifty 500 membership with effective dates.",
+  "Reconcile known 2024-2026 split and bonus dates against stored candles.",
+  "Fill stops at min(stop, bar.open)."
+ ],
+ "scoring_restructure": {
+  "$comment": "Items 1-7 of the scoring restructure. Measured on the production store, not estimated. Engine FINAL-4_PIT_INDEPENDENT_COMPONENTS.",
+  "engine_version": "FINAL-4_PIT_INDEPENDENT_COMPONENTS",
+  "data_integrity": {
+   "duplication_found": {
+    "rows": 6608,
+    "distinct_trades": 3543,
+    "surplus": 3065,
+    "pct_of_table": 46.4,
+    "cause": "three backtest runs on 2026-09-06 over overlapping windows, bare INSERT, no unique key"
+   },
+   "inflated_confidence_verdicts": [
+    {
+     "strategy": "S3",
+     "band": "90-94",
+     "rows": 124,
+     "distinct": 62,
+     "reported": "HIGH",
+     "earned": "MEDIUM"
+    },
+    {
+     "strategy": "S4",
+     "band": "85-89",
+     "rows": 22,
+     "distinct": 14,
+     "reported": "MEDIUM",
+     "earned": "insufficient"
+    }
+   ],
+   "resolution": "engine_version column stamped on write; 6,608 unversioned rows marked PRE_PIT_UNVERSIONED, retained, excluded from every read. Partial unique index makes writes idempotent — confirmed in production: a second backtest over the same window left the count at 2,371 rather than doubling it.",
+   "forward_evidence": "none — all rows are source='backtest'; forward_tests holds 15 ACTIVE, 0 resolved"
+  },
+  "component_variance_before": {
+   "$comment": "sd across 6,608 real qualified signals. Three components could not discriminate at all.",
+   "relative_strength": {
+    "max": 5,
+    "sd": 0.0,
+    "distinct": 1,
+    "note": "every candidate scored 5/5"
+   },
+   "safety": {
+    "max": 5,
+    "sd": 0.18,
+    "distinct": 2
+   },
+   "market_regime": {
+    "max": 5,
+    "sd": null,
+    "note": "constant per scan by construction"
+   },
+   "entry_quality": {
+    "max": 10,
+    "sd": 1.08,
+    "distinct": 3
+   },
+   "strategy_score": {
+    "max": 30,
+    "sd": 1.76,
+    "distinct": 8
+   },
+   "htf": {
+    "max": 20,
+    "sd": 1.29,
+    "distinct": 9
+   },
+   "footprint": {
+    "max": 20,
+    "sd": 2.22,
+    "distinct": 12
+   },
+   "total_score_sd": 1.73
+  },
+  "double_counting_removed": {
+   "close_gt_ema50": "Trend +4, Relative Strength +5, Footprint +3 = 12 points for one boolean",
+   "ema20_extension": "Footprint +3, Entry Quality +10, S4 strategy quality +10",
+   "close_gt_ema200": "Trend +3, S3 strategy quality +10 (audit said S2/S3; only S3)",
+   "relvol": "Footprint +4, S2 strategy quality +10 (not in the audit)"
+  },
+  "signal_invariance_check": {
+   "session": "2026-09-11",
+   "symbols": 480,
+   "verdicts_compared": 1920,
+   "verdicts_changed": 0,
+   "qualified_signals": 225,
+   "note": "both engines loaded side by side and every strategy_signal compared"
+  },
+  "score_rescaling": {
+   "old": {
+    "mean": 68.06,
+    "sd": 10.8,
+    "max": 88
+   },
+   "new": {
+    "mean": 56.91,
+    "sd": 8.02,
+    "max": 78
+   },
+   "spearman_old_vs_new": 0.864,
+   "gate_moved_from": 85,
+   "gate_moved_to": 71,
+   "reason": "85 admitted 9 of 225 (4.0%); on the new scale nothing reaches 85 at all, so the gate would have forward-tested zero candidates. 71 admits the same share."
+  },
+  "backtest_on_corrected_engine": {
+   "window": "2025-09-15 to 2026-09-15",
+   "universe": "Nifty 500",
+   "gate": 71,
+   "symbols_with_history": 485,
+   "trades": 2371,
+   "overall": {
+    "win_pct": 34.0,
+    "avg_r": 0.035,
+    "total_r": 81.97,
+    "ci95_avg_r": [
+     -0.0262,
+     0.0953
+    ],
+    "verdict": "crosses zero — not distinguishable from zero"
+   },
+   "per_strategy": [
+    {
+     "strategy": "S1",
+     "trades": 1544,
+     "win_pct": 36.3,
+     "avg_r": 0.124,
+     "profit_factor": 1.21,
+     "total_r": 191.0,
+     "naive_p": 0.002,
+     "clustered_by_month_p": 0.415,
+     "note": "the naive p treats ~119 concurrent trades per month as independent; clustering by month over 13 months gives t=0.85, p=0.415. Not significant."
+    },
+    {
+     "strategy": "S2",
+     "trades": 206,
+     "win_pct": 33.0,
+     "avg_r": -0.017,
+     "profit_factor": 0.97,
+     "total_r": -3.5,
+     "naive_p": 0.866
+    },
+    {
+     "strategy": "S3",
+     "trades": 620,
+     "win_pct": 28.5,
+     "avg_r": -0.168,
+     "profit_factor": 0.75,
+     "total_r": -104.4,
+     "naive_p": 0.002,
+     "clustered_by_month_p": 0.138,
+     "note": "same correction applies; not significant once overlap is accounted for"
+    },
+    {
+     "strategy": "S4",
+     "trades": 1,
+     "note": "one trade — nothing can be said"
+    }
+   ],
+   "caveats": [
+    "in-sample replay over the data the rules were built against",
+    "the 71 gate was derived from this data's own distribution",
+    "four strategies examined, so naive p-values are not multiple-comparison corrected",
+    "trades overlap heavily in time; the effective sample is far below the trade count"
+   ]
+  },
+  "component_fit": {
+   "$comment": "The answer to 'which characteristics do winning trades share?'",
+   "method": "OLS on result_r and unregularised logistic on win/loss, standardised, with Wald standard errors, 95% intervals and VIF. alpha=0.05, min 200 observations per strategy.",
+   "results": {
+    "S1": {
+     "n": 1544,
+     "r2": 0.0032,
+     "min_p": 0.3709,
+     "qualifying_components": 0
+    },
+    "S2": {
+     "n": 206,
+     "r2": 0.0104,
+     "min_p": 0.2023,
+     "qualifying_components": 0
+    },
+    "S3": {
+     "n": 620,
+     "r2": 0.0024,
+     "min_p": 0.568,
+     "qualifying_components": 0
+    },
+    "S4": {
+     "n": 1,
+     "fitted": false,
+     "reason": "below the 200-observation bar"
+    }
+   },
+   "max_vif": 1.95,
+   "collinearity_verdict": "components are genuinely independent now — max VIF 1.95, down from a -0.52 correlation between strategy_score and footprint before the restructure",
+   "verdict": "no_component_clears_p05_on_any_strategy",
+   "reading": "The components are independent and the score still carries no information about outcome. R-squared is 0.3% at best. Making the score honest did not make it informative: the double-counting was real and worth removing, but it was not what was wrong. SCORE_COMPONENT_WEIGHTS remains unfitted and unchanged.",
+   "score_still_does_not_rank_within_strategy": {
+    "S1_top_minus_bottom_quartile_r": -0.079,
+    "S3_top_minus_bottom_quartile_r": -0.141,
+    "note": "both negative — a higher score is, if anything, slightly worse"
+   }
+  },
+  "defects_found_while_implementing": [
+   "train_win_probability_model used train_test_split(random_state=42, stratify=y) — a random split on time-series data, training on trades that happened after the test set. Every AUC and Brier it has reported was measured that way. Now a chronological 75/25 hold-out.",
+   "learning_observations was CREATE TABLE'd twice with different schemas (signal_dt vs signal_time). The losing one would have made every learning write raise on a missing column and be swallowed by a bare except — a store that silently learned nothing.",
+   "FEATURE_CACHE_VERSION was decorative: its only reference, _feature_cache_key(), was never called, and the cache keyed on (symbol, df). Bumping it invalidated nothing.",
+   "setup_score() was a second, differently-weighted scorer with zero callers."
+  ],
+  "next_steps": [
+   "Entries remain the open question. Three studies (score bands, 28-feature screen, component regression) now agree that nothing captured at signal time separates winners from losers.",
+   "Forward evidence still does not exist. 15 positions are open and none have resolved; until they do, every number here is in-sample.",
+   "S4 produced one trade in a year. Either its rules are effectively never satisfied or something upstream is filtering it out — worth a look before any more effort goes into weighting it.",
+   "Do not tune the weights. The fit refuses for a reason, and the refusal is the finding."
+  ]
+ }
 }

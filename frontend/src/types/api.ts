@@ -107,10 +107,18 @@ export interface MarketStatus {
 export interface Freshness {
   universe_size: number;
   latest: string | null;
+  /** Newest completed NSE session — what closed most recently. */
   expected: string | null;
+  /** Newest session Dhan should already have published. Staleness is measured
+   *  against this, not against `expected`: daily candles land the next
+   *  morning, so a store that ends at yesterday's close is normal, not late. */
+  published: string | null;
   current: boolean | null;
   days_behind: number | null;
-  severity: "ok" | "error" | "unknown";
+  /** The market has traded since `latest`, but that candle is not downloadable
+   *  yet. Not a fault — shown as information rather than an alarm. */
+  awaiting_publication: boolean;
+  severity: "ok" | "info" | "error" | "unknown";
   message: string;
 }
 
