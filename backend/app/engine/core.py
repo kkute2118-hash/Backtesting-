@@ -8630,6 +8630,244 @@ _JUDGE_VERDICT_SCHEMA = {
 }
 
 
+# ----------------------------------------------------------- portfolio ------
+# Turning "which candidate is best" into "which SET is best".
+#
+# The scan returns ~225 qualified signals on a typical session and three
+# independent studies now agree that nothing measurable at signal time
+# separates the winners: score bands carry no ordering, 28 screened features
+# produced no qualifier, and the component regression clears p<0.05 nowhere.
+# Ranking is therefore not where the value is. Measured on 2,371 point-in-time
+# trades, holding more positions does not change expectancy but sharply reduces
+# how much it swings:
+#
+#     positions/month      mean R      sd of monthly return
+#            1             +0.045            1.536
+#            5             +0.054            0.798
+#           10             +0.056            0.638
+#           20             +0.060            0.531
+#          all             +0.054            0.446
+#
+# So breadth is the one improvement the data actually supports, and picking a
+# "best 3" out of 225 is concentration risk bought with nothing. The defaults
+# below come from that table: 20 slots captures most of the variance reduction
+# (2.9x against a single position) while staying sizeable enough to trade.
+PORTFOLIO_DEFAULT_SLOTS = 20
+PORTFOLIO_DEFAULT_RISK_PCT = 1.0
+PORTFOLIO_DEFAULT_CAPITAL = 1_000_000.0
+
+# Correlation stands in for the sector cap this system cannot build: the Dhan
+# instrument master carries symbol, security id, exchange and segment, and no
+# sector or industry at all. Measured return correlation is what a sector label
+# is a proxy for anyway, and it is available from candles already stored.
+#
+# Measured over 250 symbols and 59 daily returns, pairwise |correlation| runs
+# median 0.14, p95 0.38, and only 0.80% of pairs exceed 0.50. A 0.80 threshold
+# would never bind on this universe; 0.60 (0.16% of pairs) catches genuine
+# near-duplicates without pretending to constrain anything else.
+PORTFOLIO_MAX_CORRELATION = 0.60
+PORTFOLIO_CORRELATION_LOOKBACK = 60
+PORTFOLIO_MIN_CORRELATION_BARS = 40
+
+
+def _portfolio_frame(data, ticker):
+    """Look a candidate's price frame up under either naming convention.
+
+    Written out rather than `data.get(a) or data.get(b)`: a DataFrame has no
+    truth value, so the `or` raises "The truth value of a DataFrame is
+    ambiguous" the moment the first lookup actually succeeds — which is every
+    time it matters.
+    """
+    if not data:
+        return None
+    for key in (ticker, f"{ticker}.NS", str(ticker).replace(".NS", "")):
+        frame = data.get(key)
+        if frame is not None:
+            return frame
+    return None
+
+
+def _portfolio_liquidity(data, ticker, bars=20):
+    """Median daily traded value. A COST measure, not a return forecast.
+
+    Ordering by it is deliberate: at an expectancy of roughly +0.05R, slippage
+    decides more of the outcome than selection does, and there is no evidence
+    on which to order by anything else.
+    """
+    frame = _portfolio_frame(data, ticker)
+    if frame is None or len(frame) == 0:
+        return float("nan")
+    tail = frame.tail(bars)
+    try:
+        value = pd.to_numeric(tail["close"], errors="coerce") * pd.to_numeric(tail["volume"], errors="coerce")
+        return float(value.median())
+    except Exception:
+        return float("nan")
+
+
+def _portfolio_returns(data, tickers, lookback=PORTFOLIO_CORRELATION_LOOKBACK):
+    """Aligned daily returns for the correlation screen."""
+    series = {}
+    for t in tickers:
+        frame = _portfolio_frame(data, t)
+        if frame is None or len(frame) < PORTFOLIO_MIN_CORRELATION_BARS:
+            continue
+        close = pd.to_numeric(frame["close"], errors="coerce").tail(lookback + 1)
+        r = close.pct_change().dropna()
+        if len(r) >= PORTFOLIO_MIN_CORRELATION_BARS - 1:
+            series[t] = r.reset_index(drop=True)
+    if len(series) < 2:
+        return pd.DataFrame()
+    return pd.DataFrame(series).dropna()
+
+
+def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
+                    risk_pct=PORTFOLIO_DEFAULT_RISK_PCT,
+                    max_positions=PORTFOLIO_DEFAULT_SLOTS,
+                    max_correlation=PORTFOLIO_MAX_CORRELATION,
+                    allow_leverage=False, stop_column="SL 7%"):
+    """Select and size a SET of candidates, rather than ranking them.
+
+    Selection order is liquidity, and nothing else. Ordering by Score would
+    imply the score predicts outcome; it does not, and within a single strategy
+    it ranks slightly backwards (top quartile -0.079R against the bottom on S1).
+    Liquidity is a cost measure, so ordering by it is defensible without
+    claiming any forecasting power.
+
+    Sizing is equal risk, capped by equal notional. Both halves matter: on a 7%
+    stop, risking 1% of capital implies a position worth about 14% of it, so
+    twenty such positions would be roughly 2.9x leveraged. The notional cap is
+    what actually binds, and the summary reports the risk per position that
+    results rather than the risk that was requested - the difference is large
+    and is exactly the sort of thing that quietly ruins an account.
+
+    Returns {"positions": DataFrame, "skipped": [...], "summary": {...}}.
+    """
+    empty = {"positions": pd.DataFrame(), "skipped": [],
+             "summary": {"selected": 0, "reason": "No candidates supplied."}}
+    if result is None or len(result) == 0:
+        return empty
+
+    df = result.copy()
+    if "Ticker" not in df.columns or "Entry" not in df.columns:
+        return {**empty, "summary": {"selected": 0,
+                "reason": "Candidates need Ticker and Entry columns."}}
+    if stop_column not in df.columns:
+        return {**empty, "summary": {"selected": 0,
+                "reason": f"Candidates need a {stop_column!r} column to size by risk."}}
+
+    capital = float(capital)
+    max_positions = max(1, int(max_positions))
+    risk_budget = capital * float(risk_pct) / 100.0
+    notional_cap = capital / max_positions
+
+    df["_ticker"] = df["Ticker"].astype(str).str.upper().str.replace(".NS", "", regex=False)
+    df["_entry"] = pd.to_numeric(df["Entry"], errors="coerce")
+    df["_stop"] = pd.to_numeric(df[stop_column], errors="coerce")
+    df["_risk_unit"] = df["_entry"] - df["_stop"]
+    df["_liquidity"] = [_portfolio_liquidity(data, t) for t in df["_ticker"]]
+
+    skipped = []
+    bad = df[~(df["_risk_unit"] > 0) | ~(df["_entry"] > 0)]
+    for _, r in bad.iterrows():
+        skipped.append({"ticker": r["_ticker"], "reason": "stop is not below the entry"})
+    df = df[(df["_risk_unit"] > 0) & (df["_entry"] > 0)].copy()
+    if df.empty:
+        return {**empty, "skipped": skipped,
+                "summary": {"selected": 0, "reason": "No candidate had a usable stop."}}
+
+    # One position per symbol: the same stock qualifying under two strategies is
+    # one exposure, not two, and sizing it twice doubles the risk silently.
+    df = df.sort_values("_liquidity", ascending=False, na_position="last")
+    dup = df[df.duplicated("_ticker", keep="first")]
+    for _, r in dup.iterrows():
+        skipped.append({"ticker": r["_ticker"],
+                        "reason": "already held from another strategy"})
+    df = df.drop_duplicates("_ticker", keep="first")
+
+    returns = _portfolio_returns(data, list(df["_ticker"]))
+    corr = returns.corr().abs() if not returns.empty else pd.DataFrame()
+
+    chosen = []
+    for _, row in df.iterrows():
+        if len(chosen) >= max_positions:
+            skipped.append({"ticker": row["_ticker"], "reason": "no slots left"})
+            continue
+        clash = None
+        if not corr.empty and row["_ticker"] in corr.columns:
+            for held in chosen:
+                if held["_ticker"] in corr.columns:
+                    c = corr.at[row["_ticker"], held["_ticker"]]
+                    if pd.notna(c) and float(c) > max_correlation:
+                        clash = (held["_ticker"], float(c))
+                        break
+        if clash:
+            skipped.append({"ticker": row["_ticker"],
+                            "reason": f"correlation {clash[1]:.2f} with {clash[0]}"})
+            continue
+        chosen.append(row)
+
+    if not chosen:
+        return {**empty, "skipped": skipped,
+                "summary": {"selected": 0, "reason": "Every candidate was filtered out."}}
+
+    out = pd.DataFrame(chosen)
+    qty_risk = risk_budget / out["_risk_unit"]
+    qty_notional = notional_cap / out["_entry"]
+    out["Qty"] = np.floor(np.minimum(qty_risk, qty_notional)).astype(int)
+    out["Binding"] = np.where(qty_risk <= qty_notional, "risk", "notional")
+    out["Position Value"] = (out["Qty"] * out["_entry"]).round(2)
+    out["Risk Amount"] = (out["Qty"] * out["_risk_unit"]).round(2)
+    out["Risk % of Capital"] = (out["Risk Amount"] / capital * 100).round(3)
+
+    unfundable = out[out["Qty"] <= 0]
+    for _, r in unfundable.iterrows():
+        skipped.append({"ticker": r["_ticker"],
+                        "reason": "one share costs more than the position cap"})
+    out = out[out["Qty"] > 0].copy()
+
+    total_notional = float(out["Position Value"].sum())
+    total_risk = float(out["Risk Amount"].sum())
+    summary = {
+        "selected": int(len(out)),
+        "candidates_considered": int(len(result)),
+        "capital": capital,
+        "max_positions": max_positions,
+        "risk_pct_requested": float(risk_pct),
+        "risk_pct_actual_per_position": round(float(out["Risk % of Capital"].mean()), 3) if len(out) else 0.0,
+        "total_exposure": round(total_notional, 2),
+        "exposure_pct_of_capital": round(total_notional / capital * 100, 2),
+        "total_risk_if_all_stop_out": round(total_risk, 2),
+        "total_risk_pct": round(total_risk / capital * 100, 3),
+        "binding_constraint": (out["Binding"].mode().iat[0] if len(out) else None),
+        "max_correlation": float(max_correlation),
+        "correlation_screened": int(corr.shape[0]) if not corr.empty else 0,
+        "selection_order": "liquidity (a cost measure — the score does not predict outcome)",
+    }
+    if not allow_leverage and summary["exposure_pct_of_capital"] > 100.5:
+        summary["warning"] = (
+            f"Exposure is {summary['exposure_pct_of_capital']:.0f}% of capital — leveraged. "
+            "Reduce risk_pct or raise max_positions.")
+    if summary["binding_constraint"] == "notional":
+        summary["note"] = (
+            f"The position cap binds, not the risk budget: you asked to risk "
+            f"{risk_pct:.2f}% per trade but an equal-notional slot of "
+            f"{100.0/max_positions:.1f}% with these stops risks about "
+            f"{summary['risk_pct_actual_per_position']:.2f}%. Raising risk_pct alone "
+            "will not change the size.")
+    if not corr.empty and corr.shape[0] < len(df):
+        summary["correlation_note"] = (
+            f"{len(df) - corr.shape[0]} candidate(s) lacked "
+            f"{PORTFOLIO_MIN_CORRELATION_BARS} bars of history and skipped the "
+            "correlation screen rather than being silently trusted.")
+
+    cols = ["Ticker", "Strategy", "Entry", stop_column, "Qty", "Position Value",
+            "Risk Amount", "Risk % of Capital", "Binding"]
+    keep = [c for c in cols if c in out.columns]
+    return {"positions": out[keep].reset_index(drop=True), "skipped": skipped,
+            "summary": summary}
+
+
 def build_debate_shortlist(scan_result_df, max_candidates=15):
     """Filters scan results down to a cost-bounded shortlist: drops
     INSUFFICIENT SAMPLE learning confidence when better options exist,

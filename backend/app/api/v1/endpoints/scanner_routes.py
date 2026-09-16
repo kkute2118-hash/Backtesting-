@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query, status
 
 from app.schemas.common import JobEnvelope, RunSummary
 from app.schemas.scanner import (CustomStrategyRequest, CustomValidateRequest,
+                                 PortfolioRequest,
                                  FilteredResults, RadarRequest, ResultFilters,
                                  ScanRequest, SepaRequest)
 from app.services import radar, scanner
@@ -54,6 +55,25 @@ def filter_scan(run_id: str, filters: ResultFilters) -> Any:
         "stats": run.get("stats", {}),
         "confluence": scanner.confluence(matched),
     }
+
+
+@router.post("/scanner/runs/{run_id}/portfolio")
+def build_portfolio(run_id: str, payload: PortfolioRequest) -> dict[str, Any]:
+    """Size the filtered candidates as one portfolio.
+
+    Separate from the results endpoint on purpose: the table answers "what
+    qualified", this answers "what would I hold, and at what size". They are
+    different questions and the second one is the one the evidence supports —
+    nothing measurable at signal time ranks the candidates, but holding twenty
+    instead of one cuts the spread of monthly returns by about 2.9x.
+    """
+    run = scanner.get_run(run_id)
+    rows = run.get("rows", [])
+    if payload.filters is not None:
+        rows = scanner.filter_rows(rows, payload.filters.model_dump())
+    return scanner.portfolio(rows, capital=payload.capital, risk_pct=payload.risk_pct,
+                             max_positions=payload.max_positions,
+                             max_correlation=payload.max_correlation)
 
 
 @router.post("/scanner/sepa", response_model=JobEnvelope,
