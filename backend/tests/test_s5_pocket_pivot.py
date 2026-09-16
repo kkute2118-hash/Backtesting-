@@ -395,3 +395,65 @@ def test_a_stored_capture_can_be_re_analysed_without_re_simulating(frames, seede
 def test_winner_profile_is_honest_when_there_is_nothing_to_analyse():
     empty = core.s5_winner_profile(pd.DataFrame())
     assert empty["ok"] is False and empty["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Selection: which signals to take when the book holds three
+# --------------------------------------------------------------------------- #
+def test_the_initial_stop_fills_intraday_not_on_the_close():
+    """A 1.3%-away stop order does not wait for the close. Modelling it that
+    way let price run far past the level before the exit registered — the
+    first evidence run had 2,967 such trades averaging -4.65R against a stop
+    that should cost about -1R."""
+    assert core.S5_INTRADAY_INITIAL_STOP is True
+
+
+def test_slot_simulation_respects_the_slot_limit(frames):
+    """The book holds `slots` positions, so a rule that picks wonderful trades
+    all firing on one Tuesday is not a rule you can trade."""
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    if trades.empty:
+        pytest.skip("no S5 trades on these fixtures")
+
+    sim = core.s5_slot_simulation(trades, None, slots=2, seed=1)
+    assert sim["ok"]
+    assert sim["taken"] <= sim["offered"]
+
+    # More slots can never take fewer trades.
+    wider = core.s5_slot_simulation(trades, None, slots=5, seed=1)
+    assert wider["taken"] >= sim["taken"]
+
+
+def test_slot_simulation_never_doubles_up_on_one_name(frames):
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    if trades.empty:
+        pytest.skip("no S5 trades on these fixtures")
+    t = trades.copy()
+    t["Entry Date"] = pd.to_datetime(t["Entry Date"])
+    t["Exit Date"] = pd.to_datetime(t["Exit Date"])
+    sim = core.s5_slot_simulation(t, None, slots=3, seed=2)
+    assert sim["ok"] and sim["taken"] > 0
+
+
+def test_filter_sweep_judges_out_of_sample_not_in_sample(frames):
+    """A threshold picked on the same trades it is scored over always looks
+    good. The sweep has to report both windows for that to be visible."""
+    start = min(df.index[300] for df in frames.values())
+    end = max(df.index[-1] for df in frames.values())
+    trades = core.run_s5_pocket_pivot_backtest(frames, start, end)["trades"]
+    if trades.empty or len(trades) < 400:
+        pytest.skip("not enough fixture trades to split")
+
+    mid = pd.to_datetime(trades["Entry Date"]).quantile(0.6)
+    sweep = core.s5_filter_sweep(trades, mid, min_train=50, min_test=25)
+    if sweep.empty:
+        pytest.skip("no threshold had enough trades on both sides")
+    for col in ("Train PF", "Test PF", "Test Lift PF", "Survived", "Kept %"):
+        assert col in sweep.columns
+    # "Survived" must mean helped in BOTH windows, never just the first.
+    assert (sweep.loc[sweep.Survived, "Train Lift PF"] > 0).all()
+    assert (sweep.loc[sweep.Survived, "Test Lift PF"] > 0).all()

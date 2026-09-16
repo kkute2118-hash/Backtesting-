@@ -4630,6 +4630,16 @@ S5_MAX_CONCURRENT_POSITIONS = 3      # SOURCE_STATED (implied by the 30% floor)
 # circuit band from the Dhan feed, so what is implemented below is a proxy, and
 # an untuned one. It is OFF by default: an untuned exit rule that fires inside a
 # backtest would change the result we are trying to measure.
+S5_INTRADAY_INITIAL_STOP = True
+# ^ GTF_APPROXIMATION. The initial tight stop (module 5's entry_sl_override -
+# the trigger day's low, 1-3% away) is a resting STOP ORDER, so it fills
+# intraday at its level, or at the open on a gap through it. Modelling it on
+# closes instead, as the state machine's own close-based logic does, let price
+# run far past a 1.3% stop before the exit registered: the first evidence run
+# showed 2,967 such trades averaging -4.65R, worst -616R, against a stop that
+# by construction should cost about -1R. EMA violations stay close-based,
+# because "losing the 10 EMA" IS a close rule in the source and not an order
+# sitting in the book. Set False to reproduce the close-only behaviour.
 S5_ENABLE_CIRCUIT_OVERRIDE = False
 S5_CIRCUIT_DROP_PCT = 0.05           # NEEDS_TUNING — stand-in for the band
 S5_CIRCUIT_VOLUME_COLLAPSE = 0.40    # NEEDS_TUNING — volume vs 20d avg on a halt
@@ -5102,10 +5112,21 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
                 booked_fraction, booked = 0.0, False
                 max_high = min_low = entry
 
+                exit_price_override = None
                 for j in range(entry_i + 1, last + 1):
                     bar = f.iloc[j]
                     max_high = max(max_high, float(bar.high))
                     min_low = min(min_low, float(bar.low))
+
+                    # The tight initial stop is an order in the book, not a
+                    # close-based rule: it fills at its level, or at the open
+                    # when the bar gaps through it.
+                    level = machine.entry_sl_override
+                    if (S5_INTRADAY_INITIAL_STOP and level is not None
+                            and float(bar.low) <= float(level)):
+                        exit_i, reason = j, "initial_tight_stop_hit"
+                        exit_price_override = min(float(bar.open), float(level))
+                        break
 
                     if S5_ENABLE_PARTIAL_PROFIT_BOOKING and not booked:
                         prev_close = float(f.close.iloc[j - 1])
@@ -5123,7 +5144,8 @@ def run_s5_pocket_pivot_backtest(data, start, end, max_hold_bars=250,
                         exit_i, reason = j, detail
                         break
 
-                exit_price = float(f.close.iloc[exit_i])
+                exit_price = (exit_price_override if exit_price_override is not None
+                              else float(f.close.iloc[exit_i]))
                 gross_pct = (exit_price / entry - 1) * 100
                 return_pct = gross_pct - BT_COST_PCT
                 r_mult = (return_pct / ((risk / entry) * 100)) if (np.isfinite(risk) and risk > 0) else np.nan
@@ -5411,6 +5433,206 @@ def s5_winner_profile_from_db(run_id=None, **kwargs):
     profile = s5_winner_profile(trades, **kwargs)
     profile["run_id"] = resolved
     return profile
+
+
+# ========== S5 SELECTION: which signals to actually take ==========
+# The scan produces far more signals than the book can hold - about 109 a week
+# against three concurrent positions at a 30% minimum size. So S5's real
+# question is not "is this signal good" but "of the signals live today, which
+# three". Everything below answers that, and answers it out of sample, because
+# a filter chosen on the same trades it is measured over will always look good.
+
+def s5_filter_sweep(trades, split_date, min_train=200, min_test=100,
+                    quantiles=(0.2, 0.4, 0.6, 0.8)):
+    """Every single-reading threshold, fitted on one period and judged on the next.
+
+    For each numeric reading and each threshold, the subset it admits is scored
+    on the training window AND on a later window the threshold never saw. A
+    filter that improves the training profit factor and then fails out of
+    sample has not been found, it has been fitted - and this is the table that
+    says which is which.
+    """
+    if trades is None or trades.empty or "Entry Date" not in trades.columns:
+        return pd.DataFrame()
+    t = trades.copy()
+    t["_dt"] = pd.to_datetime(t["Entry Date"], errors="coerce")
+    t["_ret"] = pd.to_numeric(t.get("Return %"), errors="coerce")
+    t = t[t._dt.notna() & t._ret.notna()]
+    split = pd.Timestamp(split_date)
+    train, test = t[t._dt < split], t[t._dt >= split]
+    if len(train) < min_train or len(test) < min_test:
+        return pd.DataFrame()
+
+    def pf(x):
+        up, dn = x[x > 0].sum(), abs(x[x <= 0].sum())
+        return float(up / dn) if dn > 0 else np.nan
+
+    base = {"train_pf": pf(train._ret), "test_pf": pf(test._ret),
+            "train_avg": float(train._ret.mean()), "test_avg": float(test._ret.mean())}
+    rows = []
+    for col in [c for c in S5_FINGERPRINT_FEATURES if c in t.columns]:
+        v = pd.to_numeric(t[col], errors="coerce")
+        if v.notna().sum() < min_train + min_test or v.nunique() < 5:
+            continue
+        for q in quantiles:
+            thr = float(v.quantile(q))
+            for direction, mask in (("<=", v <= thr), (">=", v >= thr)):
+                tr, te = train[mask.loc[train.index]], test[mask.loc[test.index]]
+                if len(tr) < min_train or len(te) < min_test:
+                    continue
+                rows.append({
+                    "Reading": col, "Rule": f"{col} {direction} {round(thr, 4)}",
+                    "Train N": len(tr), "Train PF": round(pf(tr._ret), 3),
+                    "Train Avg %": round(float(tr._ret.mean()), 3),
+                    "Test N": len(te), "Test PF": round(pf(te._ret), 3),
+                    "Test Avg %": round(float(te._ret.mean()), 3),
+                    "Train Lift PF": round(pf(tr._ret) - base["train_pf"], 3),
+                    "Test Lift PF": round(pf(te._ret) - base["test_pf"], 3),
+                    "Kept %": round(100.0 * len(te) / len(test), 1),
+                })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    # Survivors first: helped in training AND still helped out of sample.
+    out["Survived"] = (out["Train Lift PF"] > 0) & (out["Test Lift PF"] > 0)
+    out.attrs["baseline"] = base
+    return out.sort_values(["Survived", "Test Lift PF"], ascending=[False, False]).reset_index(drop=True)
+
+
+def s5_slot_simulation(trades, rank_by=None, slots=3, ascending=False,
+                       seed=None, capital_per_slot=None):
+    """Trade the record the way the book actually works: N slots, first come.
+
+    Walks the signals in date order holding at most `slots` positions at once.
+    When a slot frees, the highest-ranked signal live that day takes it. This is
+    the only honest way to compare selection rules: a rule that picks great
+    trades which all fire on the same Tuesday cannot be traded, and a per-signal
+    average would never show that.
+
+    rank_by=None picks at random (with `seed`), which is the baseline every
+    ranking rule has to beat before it is worth anything.
+    """
+    if trades is None or trades.empty:
+        return {"ok": False, "reason": "no trades"}
+    # Column names without a leading underscore: DataFrame.itertuples() renames
+    # underscore-prefixed fields to positional _1, _2 ... and the attribute
+    # lookup below would silently miss them.
+    t = trades.copy()
+    t["sim_in"] = pd.to_datetime(t.get("Entry Date"), errors="coerce")
+    t["sim_out"] = pd.to_datetime(t.get("Exit Date"), errors="coerce")
+    t["sim_ret"] = pd.to_numeric(t.get("Return %"), errors="coerce")
+    t = t[t.sim_in.notna() & t.sim_out.notna() & t.sim_ret.notna()].sort_values("sim_in")
+    if t.empty:
+        return {"ok": False, "reason": "no dated trades"}
+
+    if rank_by is None:
+        rng = np.random.default_rng(seed)
+        t["sim_key"] = rng.random(len(t))
+        ascending = True
+    else:
+        if rank_by not in t.columns:
+            return {"ok": False, "reason": f"unknown ranking column {rank_by}"}
+        t["sim_key"] = pd.to_numeric(t[rank_by], errors="coerce")
+        t = t[t.sim_key.notna()]
+
+    share = float(capital_per_slot if capital_per_slot else 1.0 / slots)
+    open_until, held_tickers, taken = [], {}, []
+    for day, block in t.groupby(t.sim_in):
+        # Free any slot whose trade has closed by today.
+        still = []
+        for out_dt, tick in open_until:
+            if out_dt > day:
+                still.append((out_dt, tick))
+            else:
+                held_tickers.pop(tick, None)
+        open_until = still
+        free = slots - len(open_until)
+        if free <= 0:
+            continue
+        cand = block[~block["Ticker"].astype(str).isin(held_tickers)]
+        if cand.empty:
+            continue
+        cand = cand.sort_values("sim_key", ascending=ascending).head(free)
+        for tick, out_dt, ret in zip(cand["Ticker"].astype(str),
+                                     cand["sim_out"], cand["sim_ret"]):
+            open_until.append((out_dt, tick))
+            held_tickers[tick] = True
+            taken.append({"ret": float(ret), "out": out_dt})
+
+    if not taken:
+        return {"ok": False, "reason": "no trades were takeable"}
+    rets = pd.Series([x["ret"] for x in taken])
+    equity = float(np.prod(1.0 + rets.to_numpy() / 100.0 * share))
+    up, dn = rets[rets > 0].sum(), abs(rets[rets <= 0].sum())
+    return {
+        "ok": True,
+        "rank_by": rank_by or f"RANDOM(seed={seed})",
+        "slots": slots,
+        "taken": int(len(taken)),
+        "offered": int(len(t)),
+        "taken_pct": round(100.0 * len(taken) / len(t), 1),
+        "win_rate_pct": round(float((rets > 0).mean() * 100), 1),
+        "avg_return_pct": round(float(rets.mean()), 3),
+        "median_return_pct": round(float(rets.median()), 3),
+        "profit_factor": round(float(up / dn), 3) if dn > 0 else None,
+        "equity_multiple": round(equity, 3),
+    }
+
+
+def s5_selection_study(trades, split_date, slots=3, n_random=25,
+                       rank_candidates=None, seed0=0):
+    """Can ANY ranking beat picking at random, when only `slots` can be held?
+
+    Runs the slot simulation once per candidate ranking and `n_random` times at
+    random, over the out-of-sample window only. A ranking that does not clear
+    the random band is not a selection rule, however good its gap table looked.
+    """
+    if trades is None or trades.empty:
+        return {"ok": False, "reason": "no trades"}
+    t = trades.copy()
+    t["sim_dt"] = pd.to_datetime(t.get("Entry Date"), errors="coerce")
+    test = t[t.sim_dt >= pd.Timestamp(split_date)]
+    if test.empty:
+        return {"ok": False, "reason": "nothing after the split date"}
+
+    rank_candidates = rank_candidates or [
+        c for c in S5_FINGERPRINT_FEATURES if c in test.columns]
+    randoms = [s5_slot_simulation(test, None, slots=slots, seed=seed0 + k)
+               for k in range(n_random)]
+    randoms = [r for r in randoms if r.get("ok")]
+    if not randoms:
+        return {"ok": False, "reason": "random baseline could not be simulated"}
+    band = pd.Series([r["equity_multiple"] for r in randoms])
+
+    ranked = []
+    for col in rank_candidates:
+        for asc in (False, True):
+            sim = s5_slot_simulation(test, col, slots=slots, ascending=asc)
+            if sim.get("ok"):
+                sim["direction"] = "lowest first" if asc else "highest first"
+                sim["beats_random_pct"] = round(
+                    float((band < sim["equity_multiple"]).mean() * 100), 1)
+                ranked.append(sim)
+    ranked.sort(key=lambda r: -r["equity_multiple"])
+
+    return {
+        "ok": True,
+        "split_date": str(split_date),
+        "slots": slots,
+        "out_of_sample_signals": int(len(test)),
+        "random_baseline": {
+            "runs": len(randoms),
+            "equity_median": round(float(band.median()), 3),
+            "equity_p5": round(float(band.quantile(0.05)), 3),
+            "equity_p95": round(float(band.quantile(0.95)), 3),
+            "avg_return_pct": round(float(np.mean([r["avg_return_pct"] for r in randoms])), 3),
+            "win_rate_pct": round(float(np.mean([r["win_rate_pct"] for r in randoms])), 1),
+        },
+        "rankings": ranked,
+        "verdict": (
+            f"best ranking beats {ranked[0]['beats_random_pct']}% of random draws"
+            if ranked else "no ranking could be simulated"),
+    }
 
 
 def s5_tightness_diagnostic(data, min_bars=260):
