@@ -622,3 +622,60 @@ def test_priority_never_overrides_a_broken_stop():
                                max_positions=3, max_correlation=1.0)
     assert list(out["positions"]["Ticker"]) == ["BBB"]
     assert any(s["ticker"] == "AAA" for s in out["skipped"])
+
+
+# --------------------------------------------------------------------------- #
+# Market regime, index prices and sector membership
+# --------------------------------------------------------------------------- #
+def test_an_index_can_never_be_mistaken_for_a_stock():
+    assert core.index_store_symbol("NIFTY 500") == "^NIFTY 500"
+    assert core.is_index_symbol("^NIFTY 500")
+    assert not core.is_index_symbol("RELIANCE")
+
+
+def test_regime_says_where_it_read_the_market_from(frames, seeded_db):
+    """The regime used to come from `max(data.values(), key=len)` — the single
+    longest-history stock, which is not the market. The fallback still exists
+    (an index may not be synced yet) but it now has to announce itself."""
+    data = dict(frames)
+    proxy, source = core.market_regime_frame(data)
+    assert len(proxy) > 0
+    assert "FALLBACK" in source, source
+
+    # With no data at all, it refuses rather than inventing a regime.
+    empty, src = core.market_regime_frame({})
+    assert empty.empty and src == "unavailable"
+
+
+def test_the_regime_fallback_ignores_index_rows(frames):
+    """If an index is in the dataset it must not be picked as the 'longest
+    stock' — it is not tradable and would double-count as both."""
+    data = dict(frames)
+    longest = max(data.values(), key=len)
+    data["^NIFTY 500"] = pd.concat([longest, longest])   # longest frame by far
+    proxy, source = core.market_regime_frame(data)
+    assert "FALLBACK" in source
+    assert len(proxy) == len(longest), "an index frame was used as the stock fallback"
+
+
+def test_sector_membership_is_many_to_many(seeded_db):
+    """A bank belongs to Bank and to Financial Services. Collapsing that to one
+    sector per symbol would silently pick a winner."""
+    core.ensure_sector_table()
+    con = core._db()
+    try:
+        con.executemany(
+            "INSERT OR REPLACE INTO sector_membership(symbol,sector,updated_at) VALUES(?,?,?)",
+            [("HDFCBANK", "Bank", "x"), ("HDFCBANK", "Financial Services", "x"),
+             ("INFY", "IT", "x")])
+        con.commit()
+    finally:
+        con.close()
+    m = core.sector_map()
+    assert sorted(m["HDFCBANK"]) == ["Bank", "Financial Services"]
+    assert m["INFY"] == ["IT"]
+
+
+def test_the_sector_and_index_catalogues_are_populated():
+    assert len(core.SECTOR_INDEX_URLS) >= 10
+    assert core.REGIME_INDEX in core.INDEX_PRICE_SYMBOLS

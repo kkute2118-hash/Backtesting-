@@ -79,8 +79,12 @@ def _load(handle: JobHandle, tickers: list[str], use_live_prices: bool) -> tuple
         handle.progress(0.15, f"Live prices for {len(live_bars):,} of {len(data):,} stocks")
 
     handle.progress(0.18, "Reading market regime")
-    proxy = max(data.values(), key=len)
-    regime, regime_score = core.regime_from_index(proxy)
+    # Was `max(data.values(), key=len)` - the single stock with the longest
+    # history, which is not the market and never was. Prefers the stored index
+    # now, and says which source it used rather than implying one.
+    proxy, source = core.market_regime_frame(data)
+    regime, regime_score = core.regime_from_index(proxy) if len(proxy) else ("UNKNOWN", 0)
+    handle.progress(0.19, f"Market regime {regime} (from {source})")
     return data, regime, int(regime_score)
 
 

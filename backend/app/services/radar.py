@@ -39,8 +39,8 @@ def run(*, universes: list[str], strategies: list[int], max_missing: int,
         if not data:
             raise ApiError("No stock in this universe has 260+ stored bars yet.")
         handle.progress(0.15, "Reading market regime")
-        proxy = max(data.values(), key=len)
-        regime, _score = core.regime_from_index(proxy)
+        proxy, _source = core.market_regime_frame(data)
+        regime, _score = core.regime_from_index(proxy) if len(proxy) else ("UNKNOWN", 0)
 
         stats: dict[str, Any] = {}
 

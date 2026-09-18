@@ -261,3 +261,61 @@ The 50 EMA fills half the time and only once the trend has broken.
 S4 signals do spike on the first trading day of the month (12.2% of all
 signals, against ~5% for a uniform month) as the monthly candle closes, but
 64% arrive after day 13, because `mmom >= 20` accumulates through the month.
+
+---
+
+# Addendum — market timing, and what the regime label actually was
+
+## The breadth filter does not work
+
+No index prices existed in the store, so a market proxy was built from the
+universe itself: percent of the 485 stocks above their 200/50/20 EMA, advance
+ratio, and an equal-weighted composite. Joined to 204,407 replayed trades.
+
+Pooled, it looks decisive — trades in the top breadth quintile score PF 1.971
+against 0.976 in the low quintile. Within each year it disappears:
+
+| Year | lowest | low | mid | high | highest |
+| --- | --- | --- | --- | --- | --- |
+| 2022 | **3.15** | 1.37 | 1.38 | 0.78 | 0.61 |
+| 2023 | 3.20 | 4.52 | **5.94** | 2.85 | 2.21 |
+| 2024 | 0.71 | 1.08 | 1.08 | 0.90 | 1.19 |
+| 2025 | 0.83 | 0.91 | 0.82 | **1.02** | 0.83 |
+| 2026 | **1.32** | 1.10 | 0.80 | 0.70 | 0.61 |
+
+2022 and 2026 run the *opposite* way and decline monotonically. The pooled
+result is the calendar: 2023-24 averaged 73-82% of stocks above their 200 EMA
+and were the profitable years; 2025-26 averaged 46-50% and were flat. Sorting
+by breadth mostly sorts by year. `pct_above_50` and `adv_pct` behave the same.
+
+**Not shipped.** Breadth is computed and available, but it is not a filter.
+
+## The market regime was one arbitrary stock
+
+`scanner.py` read it as `max(data.values(), key=len)` — whichever single stock
+had the longest history. Every regime label in the database, in every
+fingerprint, and in every regime table quoted during this work, was one
+company. That is why regime never separated anything.
+
+`market_regime_frame()` now prefers the stored `REGIME_INDEX` prices, falls
+back to any stored index, and only then to the longest-history stock — which it
+labels `FALLBACK` so the substitution can never be silent again. Index rows are
+excluded from that fallback.
+
+## Index and sector ingestion — written, NOT run
+
+- `sync_index_history()` stores index OHLC under a `^` prefix so an index can
+  never enter a scan or the breadth calculation as a tradable stock.
+- `dhan_history()` takes `segment`/`instrument`; indices need `IDX_I`/`INDEX`.
+- `dhan_index_map()` reads the master's index segment, which `dhan_map()`
+  filters out by design.
+- `sync_sector_membership()` builds symbol→sector from 14 NSE sector-index
+  constituent CSVs. Membership is many-to-many on purpose.
+- `sector_relative_strength()` ranks sectors against the benchmark over 21/63/
+  126 days, using index prices where available and an equal-weighted composite
+  of members where not.
+
+**None of this has run against the live feeds** — no Dhan credentials and no
+outbound access in the environment it was written in. The two things most
+likely to need adjusting on first run are the index segment spelling in the
+scrip master and the sector CSV URLs.
