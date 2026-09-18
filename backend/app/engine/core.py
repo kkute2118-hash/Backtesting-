@@ -9986,6 +9986,33 @@ def _portfolio_returns(data, tickers, lookback=PORTFOLIO_CORRELATION_LOOKBACK):
     return pd.DataFrame(series).dropna()
 
 
+# Which strategy gets a slot when more candidates qualify than there is room
+# for. EVIDENCE_DERIVED, and it is a claim about the STRATEGY, not about any
+# individual candidate - unlike Score, which was measured and does not predict
+# outcome (see build_portfolio's docstring).
+#
+# Measured on 485 NSE symbols, 2022-06 to 2026-09, trades actually taken through
+# a 3-slot book: S4 returned +5.20% per trade against S5's +0.56%, at a 57.1%
+# win rate against 30.1%. But S5 fires constantly and S4 about 12 times a week,
+# so first-come allocation spent the slots on S5 and took only 12-21 S4 trades
+# in 4.3 years. Preferring S4 raised that to 38-53 and moved median CAGR from
+# 10.3% to 19.1%, with the spread across runs collapsing from 27-154% to
+# 78-125% - the allocation stops being a lottery.
+#
+# It costs drawdown: median peak-to-trough went from -28% to -34%, worst run
+# -58%. Concentrating into the better strategy concentrates its bad patches too.
+#
+# Strategies not listed sort after those that are, and liquidity breaks every
+# remaining tie. Re-measure before reordering: this is one book over one period.
+STRATEGY_SLOT_PRIORITY = {"S4_SEPA": 0, "S4": 0, "S5_POCKETPIVOT": 1}
+STRATEGY_SLOT_PRIORITY_DEFAULT = 2
+
+
+def _slot_priority(label):
+    return STRATEGY_SLOT_PRIORITY.get(str(label).upper().strip(),
+                                      STRATEGY_SLOT_PRIORITY_DEFAULT)
+
+
 def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
                     risk_pct=PORTFOLIO_DEFAULT_RISK_PCT,
                     max_positions=PORTFOLIO_DEFAULT_SLOTS,
@@ -9993,11 +10020,15 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
                     allow_leverage=False, stop_column="SL 7%"):
     """Select and size a SET of candidates, rather than ranking them.
 
-    Selection order is liquidity, and nothing else. Ordering by Score would
-    imply the score predicts outcome; it does not, and within a single strategy
-    it ranks slightly backwards (top quartile -0.079R against the bottom on S1).
-    Liquidity is a cost measure, so ordering by it is defensible without
-    claiming any forecasting power.
+    Selection order is strategy priority first, then liquidity. Ordering by
+    Score would imply the score predicts outcome; it does not, and within a
+    single strategy it ranks slightly backwards (top quartile -0.079R against
+    the bottom on S1). Neither key claims to forecast an individual candidate:
+    liquidity is a cost measure, and STRATEGY_SLOT_PRIORITY is a measured
+    statement about which STRATEGY is worth a scarce slot - S4 earned +5.20%
+    per trade against S5's +0.56% over the same book. The distinction matters,
+    because ranking candidates is the thing that keeps failing here and
+    ranking strategies is not the same operation.
 
     Sizing is equal risk, capped by equal notional. Both halves matter: on a 7%
     stop, risking 1% of capital implies a position worth about 14% of it, so
@@ -10031,6 +10062,7 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
     df["_stop"] = pd.to_numeric(df[stop_column], errors="coerce")
     df["_risk_unit"] = df["_entry"] - df["_stop"]
     df["_liquidity"] = [_portfolio_liquidity(data, t) for t in df["_ticker"]]
+    df["_priority"] = [_slot_priority(v) for v in df.get("Strategy", pd.Series(index=df.index, dtype=object))]
 
     skipped = []
     bad = df[~(df["_risk_unit"] > 0) | ~(df["_entry"] > 0)]
@@ -10043,7 +10075,11 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
 
     # One position per symbol: the same stock qualifying under two strategies is
     # one exposure, not two, and sizing it twice doubles the risk silently.
-    df = df.sort_values("_liquidity", ascending=False, na_position="last")
+    # Sorting by priority BEFORE the de-duplication is deliberate: when one
+    # stock qualifies under both S4 and S5, the row that survives should be the
+    # higher-priority strategy's, not whichever happened to come first.
+    df = df.sort_values(["_priority", "_liquidity"], ascending=[True, False],
+                        na_position="last")
     dup = df[df.duplicated("_ticker", keep="first")]
     for _, r in dup.iterrows():
         skipped.append({"ticker": r["_ticker"],
@@ -10056,7 +10092,9 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
     chosen = []
     for _, row in df.iterrows():
         if len(chosen) >= max_positions:
-            skipped.append({"ticker": row["_ticker"], "reason": "no slots left"})
+            skipped.append({"ticker": row["_ticker"],
+                            "reason": f"no slots left (strategy {row.get('Strategy', '?')} "
+                                      f"sorts after higher-priority ones)"})
             continue
         clash = None
         if not corr.empty and row["_ticker"] in corr.columns:

@@ -569,3 +569,56 @@ def test_the_win_probability_model_refuses_to_guess_for_s5():
 
 def test_a_thinly_evidenced_strategy_needs_real_samples_before_the_model_speaks():
     assert core.ML_MIN_STRATEGY_SAMPLES >= 20
+
+
+# --------------------------------------------------------------------------- #
+# Slot priority: which strategy gets a scarce slot
+# --------------------------------------------------------------------------- #
+def _cand(ticker, strategy, entry=100.0, stop=95.0):
+    return {"Ticker": ticker, "Strategy": strategy, "Entry": entry, "SL 7%": stop}
+
+
+def test_s4_takes_the_slot_before_s5():
+    """S4 earned +5.20% per trade against S5's +0.56% over the same book, but
+    S5 fires constantly and crowded it out of a 3-slot portfolio. Preferring S4
+    moved median CAGR from 10.3% to 19.1%. S5 is listed first here on purpose:
+    the priority must reorder the input, not follow it."""
+    cand = pd.DataFrame([
+        _cand("AAA", "S5_POCKETPIVOT"), _cand("BBB", "S5_POCKETPIVOT"),
+        _cand("CCC", "S5_POCKETPIVOT"), _cand("DDD", "S4_SEPA"),
+    ])
+    out = core.build_portfolio(cand, data=None, capital=100_000,
+                               max_positions=2, max_correlation=1.0)
+    picked = list(out["positions"]["Strategy"])
+    assert picked[0] == "S4_SEPA", picked
+
+
+def test_one_stock_under_two_strategies_keeps_the_higher_priority_one():
+    """De-duplication happens after the priority sort, so the surviving row is
+    S4's — not whichever happened to be listed first."""
+    dup = pd.DataFrame([_cand("ZZZ", "S5_POCKETPIVOT"), _cand("ZZZ", "S4_SEPA")])
+    out = core.build_portfolio(dup, data=None, capital=100_000,
+                               max_positions=3, max_correlation=1.0)
+    assert len(out["positions"]) == 1
+    assert out["positions"].iloc[0]["Strategy"] == "S4_SEPA"
+
+
+def test_an_unlisted_strategy_sorts_after_the_ranked_ones():
+    cand = pd.DataFrame([_cand("AAA", "S1"), _cand("BBB", "S5_POCKETPIVOT"),
+                         _cand("CCC", "S4_SEPA")])
+    out = core.build_portfolio(cand, data=None, capital=100_000,
+                               max_positions=3, max_correlation=1.0)
+    assert list(out["positions"]["Strategy"]) == ["S4_SEPA", "S5_POCKETPIVOT", "S1"]
+    assert core._slot_priority("NOT_A_STRATEGY") == core.STRATEGY_SLOT_PRIORITY_DEFAULT
+    assert core._slot_priority("s4_sepa") == 0, "matching must be case-insensitive"
+
+
+def test_priority_never_overrides_a_broken_stop():
+    """Priority decides ordering, not eligibility: an S4 row whose stop is not
+    below its entry is still rejected."""
+    cand = pd.DataFrame([_cand("AAA", "S4_SEPA", entry=100.0, stop=105.0),
+                         _cand("BBB", "S5_POCKETPIVOT", entry=100.0, stop=95.0)])
+    out = core.build_portfolio(cand, data=None, capital=100_000,
+                               max_positions=3, max_correlation=1.0)
+    assert list(out["positions"]["Ticker"]) == ["BBB"]
+    assert any(s["ticker"] == "AAA" for s in out["skipped"])

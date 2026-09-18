@@ -197,3 +197,67 @@ fixed level is kept because it is simpler and marginally better.
 
 It beats no filter in 11 of 16 quarters, not 16. This is an edge, not a
 certainty.
+
+
+---
+
+# Addendum — S4 priority in the 3-slot book
+
+Run 2026-09-18, 485 symbols, 2022-06 → 2026-09. S4 exits on a 50 EMA trail,
+S5 on its own state machine. ₹1,00,000, 3 slots, 25% per position.
+
+Five runs differing **only** in which same-day signal takes a free slot:
+
+| Allocation | ROI across 5 runs | Median CAGR | S4 trades taken | Median max DD |
+| --- | --- | --- | --- | --- |
+| First-come (random) | 154 / 52 / 27 / 147 / 52% | 10.3% | 12–21 | −28% |
+| **S4 priority** | 125 / 112 / 78 / 108 / 116% | **19.1%** | **38–53** | −34% |
+
+Median ROI 52% → 112%, and the spread collapses from 27–154% to 78–125%. The
+allocation stops being a lottery. Cost: drawdown worsens (worst run −58%).
+
+Why it works, and why it is not the same mistake as scoring: S4 returned
+**+5.20% per trade at a 57.1% win rate** against S5's **+0.56% at 30.1%**, but
+S5 fires constantly and S4 about 12 times a week, so first-come spent the slots
+on the weaker strategy. This ranks *strategies*, which is measured; it does not
+rank *candidates*, which repeatedly fails.
+
+Implemented as `STRATEGY_SLOT_PRIORITY` in `build_portfolio()`.
+
+## S4 rule-drop test — nothing can be removed for free
+
+Each of S4's six conditions dropped in turn, same exit, same window:
+
+| Variant | Signals | Pool | Win % | PF | vs base |
+| --- | --- | --- | --- | --- | --- |
+| ALL (current S4) | 2,763 | 1.00× | 46.0 | **2.969** | — |
+| drop `close>=20` | 2,824 | 1.02× | 46.4 | 3.104 | +0.134 |
+| drop `vol30` | 2,844 | 1.03× | 45.6 | 2.957 | −0.012 |
+| drop `mrsi>=50` | 2,812 | 1.02× | 45.6 | 2.894 | −0.075 |
+| drop `cross/reclaim` | 7,831 | **2.83×** | 46.8 | 2.913 | −0.057 |
+| drop `mEMA10>=mEMA20` | 3,622 | 1.31× | 45.3 | 2.782 | −0.187 |
+| drop `mom>=20` | 30,921 | **11.2×** | 33.6 | 2.192 | −0.778 |
+
+`mom>=20` is the strategy — dropping it gives 11× the pool but 2025 turns
+losing (PF 0.93). The monthly EMA rule buys only 1.31× for −0.19 PF.
+`cross/reclaim` is the one real candidate (2.83× the pool for −0.057 PF) but
+2022 falls 2.31 → 0.91 and 2024 falls 2.08 → 1.16, so it is not shipped.
+
+**S4's rules are left exactly as they are.**
+
+## Entry timing — waiting for a pullback is worse
+
+| Entry rule | Fill rate | Win % | Avg ret | PF |
+| --- | --- | --- | --- | --- |
+| Enter next bar (current) | 100% | 46.0 | +8.48% | **2.969** |
+| Wait for close within 2% of 10 EMA | 99.6% | 43.5 | +7.48% | 2.805 |
+| Wait for close within 2% of 50 EMA | 48.1% | 30.0 | +2.12% | 2.079 |
+| Touch 10 EMA then close up | 98.8% | 41.8 | +6.78% | 2.566 |
+
+The 10 EMA pullback fills 99.6% of the time, which tells you S4 names are
+already at their 10 EMA when they signal — there is no pullback to wait for.
+The 50 EMA fills half the time and only once the trend has broken.
+
+S4 signals do spike on the first trading day of the month (12.2% of all
+signals, against ~5% for a uniform month) as the monthly candle closes, but
+64% arrive after day 13, because `mmom >= 20` accumulates through the month.
