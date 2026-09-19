@@ -527,6 +527,66 @@ def run_daily():
     return summary
 
 
+def run_market_data():
+    """Store index OHLC and sector membership, the two things the engine had
+    no way to get.
+
+    Separate from the history build because it is minutes, not hours: fourteen
+    index histories and fourteen constituent lists, against a universe build
+    that walks thousands of symbols at five requests a second. Running it on
+    its own means sector strength can be refreshed weekly without touching the
+    candle store.
+
+    Sector membership needs outbound access only; index prices need Dhan. A
+    failure of one is reported and does not stop the other, because a sector
+    ranking built from member composites is useful on its own.
+    """
+    years = _env_int("INDEX_YEARS", 5)
+    summary = {"index_years": years}
+    step_restore()
+
+    log("sectors", "fetching NSE sector constituent lists")
+    try:
+        rep = core.sync_sector_membership()
+        ok = [k for k, v in rep.items() if isinstance(v, dict) and v.get("ok")]
+        bad = {k: v.get("reason") for k, v in rep.items()
+               if isinstance(v, dict) and not v.get("ok")}
+        summary["sectors_ok"] = len(ok)
+        summary["sector_rows"] = rep.get("_total_rows", 0)
+        summary["symbols_mapped"] = len(core.sector_map())
+        log("sectors", f"{len(ok)} list(s) fetched, {summary['symbols_mapped']:,} symbols mapped")
+        for k, why in bad.items():
+            log("sectors", f"  FAILED {k}: {why}")
+        summary["sectors_failed"] = list(bad)
+    except Exception as exc:
+        summary["sectors_error"] = str(exc)[:300]
+        log("sectors", f"FAILED: {exc}")
+
+    if not core.dhan_configured():
+        log("index", "Dhan is not configured — skipping index prices. Sector strength will "
+                     "fall back to equal-weighted composites of each sector's members.")
+        summary["indices_skipped"] = "dhan not configured"
+    else:
+        step_token(force=True)
+        log("index", f"fetching {len(core.INDEX_PRICE_SYMBOLS)} index histories, {years}y")
+        try:
+            rep = core.sync_index_history(years=years)
+            ok = {k: v for k, v in rep.items() if v.get("ok")}
+            bad = {k: v.get("reason") for k, v in rep.items() if not v.get("ok")}
+            for name, info in ok.items():
+                log("index", f"  {name}: {info['rows']:,} bars {info['from']} -> {info['to']}")
+            for name, why in bad.items():
+                log("index", f"  FAILED {name}: {why}")
+            summary["indices_ok"] = len(ok)
+            summary["indices_failed"] = list(bad)
+        except Exception as exc:
+            summary["indices_error"] = str(exc)[:300]
+            log("index", f"FAILED: {exc}")
+
+    backup_or_fail()
+    return summary
+
+
 def run_bootstrap():
     """Build the candle history from nothing. Run once, by hand.
 
@@ -955,16 +1015,19 @@ def run_study():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("job", choices=["token", "daily", "bootstrap", "backtest", "study"],
+    parser.add_argument("job", choices=["token", "daily", "bootstrap", "backtest", "study",
+                                        "market-data"],
                         help="token = renew the Dhan token only; daily = the full post-close "
                              "run; bootstrap = build the candle history from scratch, once; "
                              "backtest = replay the strategies over the stored history; "
-                             "study = one research study, named by BACKTEST_STUDY")
+                             "study = one research study, named by BACKTEST_STUDY; "
+                             "market-data = index prices and sector membership")
     args = parser.parse_args(argv)
 
     log("start", f"job={args.job}")
     jobs = {"token": run_token_only, "daily": run_daily, "bootstrap": run_bootstrap,
-            "backtest": run_backtest, "study": run_study}
+            "backtest": run_backtest, "study": run_study,
+            "market-data": run_market_data}
     try:
         summary = jobs[args.job]()
     except Exception:
