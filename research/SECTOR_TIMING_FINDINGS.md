@@ -270,3 +270,135 @@ their 10 EMA, so the condition only removes trades.
 * **Do not add the 10 EMA condition** to a sector filter.
 * Watch the decay. S5's sector edge shrank every year and went negative in 2026. Re-measure
   before relying on it.
+
+---
+
+# Addendum 2: inferring a sector for the other 62% of the universe
+
+Request: work out which sector each unclassified stock belongs to, so all ~500 stocks can
+be traded under the sector filter instead of only the 183 in a sector index.
+
+Built and measured. **The inference classifies well, and the trading edge does not survive
+it.** A separate, better route exists and is now wired up.
+
+## The classifier
+
+For each stock, at each quarter start, take the trailing 250 days of returns **in excess
+of NIFTY 500** (excess, so the score is sector co-movement and not market beta), correlate
+against each of the 14 sector composites, and take the highest. Only trailing data is
+used, so there is no lookahead. When scoring a stock that is a known member of a sector,
+that stock is removed from the sector's composite first - otherwise it is being correlated
+with itself.
+
+Validated leave-one-out on the 183 stocks whose sector is actually known, 18 quarterly
+snapshots, 2,844 classifications:
+
+| metric | result | random |
+|---|---|---|
+| top-1 accuracy | **67.0%** | 7.1% |
+| top-3 accuracy | **86.6%** | 21.4% |
+| always-guess-biggest-sector | - | 14.2% |
+
+By sector: IT 100%, PSU Bank 86%, FMCG 84%, Realty 81%, Healthcare 81% ... Financial
+Services 45%, Consumer Durables 44%, Pharma 41%, Media 29%. Pharma's misses are nearly all
+Healthcare (top-3 96%), which is a distinction without much difference for ranking.
+
+Accuracy tracks confidence almost perfectly - the top quintile by margin between the 1st
+and 2nd sector is 99.5% correct, the bottom quintile 37.1%.
+
+So as a classifier it works. Coverage goes from **38% to 93-100% of signals** per strategy.
+
+## Two warnings the validation gives
+
+**The unknowns are harder than the knowns.** Across the 18 quarters, a known stock's
+predicted sector takes a median of 2 distinct values and 37% never change. An unknown
+stock's takes a median of **4** and only **7%** never change. The 302 stocks outside every
+sector index are outside them for a reason - conglomerates and niche businesses with no
+strong sector co-movement - so 67% is an optimistic read of what they get.
+
+**It is not a hidden momentum filter.** Stocks assigned to a top-3 sector do have higher
+own 21-day relative strength (+1.49 vs +0.32). Controlling for that - comparing top-3 vs
+rest *inside* each quintile of the stock's own RS - leaves the effect intact (+0.55
+controlled against +0.57 uncontrolled). Whatever the inferred rank is picking up, it is
+not just recent strength.
+
+## The test that matters: does the edge replicate?
+
+Split every strategy's trades by whether the sector was **known** or **inferred**:
+
+| strategy | sector | top-3 PF | rest PF | top-3 years won |
+|---|---|---|---|---|
+| S1 | known | 1.53 | 1.37 | 2/5 |
+| S1 | inferred | 1.38 | 1.23 | 4/5 |
+| S2 | known | 1.44 | 1.38 | 2/5 |
+| S2 | inferred | 1.39 | 1.37 | 1/5 |
+| S3 | known | 1.45 | **1.63** | **0/5** |
+| S3 | inferred | 1.28 | 1.12 | 4/5 |
+| **S4** | known | **3.07** | 1.98 | 3/4 |
+| **S4** | inferred | **1.27** | **1.41** | 2/4 |
+| **S5** | known | **2.06** | 1.95 | 4/5 |
+| **S5** | inferred | **1.88** | **2.13** | 3/5 |
+
+**For S4 and S5 - the only two strategies where the sector filter worked - it reverses on
+inferred sectors.** Top-3 becomes *worse* than the rest under both.
+
+S1 and S3 show the opposite: nothing on known sectors (S3 is 0/5 and negative on known)
+but 4/5 on inferred. Two contradictory signs for the same claimed mechanism inside the
+same strategy. At least one of them is noise, and the pair together is not evidence of
+anything.
+
+## ROI on Rs 1,00,000, S4 + S5, full universe
+
+3 slots, 25% per position, 12 seeds, median reported.
+
+| setup | stocks | signals | taken | win% | final Rs | CAGR% | maxDD% | CAGR/DD |
+|---|---|---|---|---|---|---|---|---|
+| no filter | 485 | 27,241 | 226 | 37.2 | 1,79,148 | 14.6 | -24.5 | 0.59 |
+| **top-3, real sectors only** | **183** | 2,514 | 140 | **44.5** | **2,11,684** | **19.1** | **-16.6** | **1.15** |
+| top-3, real + inferred | 485 | 5,498 | 168 | 40.9 | 1,66,515 | 12.6 | -20.3 | 0.62 |
+| top-3 by best of 2 inferred | 485 | 8,138 | 186 | 38.3 | 1,95,856 | 17.0 | -23.9 | 0.71 |
+| top-3, high-confidence only | 334 | 4,230 | 166 | 41.2 | 1,55,364 | 10.8 | -23.7 | 0.46 |
+
+Extending the filter to all 500 via inference does not just fail to add - it **dilutes the
+working filter back to roughly no filter at all** (0.62 against 0.59). Restricting to
+high-confidence assignments does not rescue it. Taking the best of the top-2 inferred
+sectors gets closest (0.71) and is still well below real-only (1.15).
+
+## The route that does work: NSE's own Industry column
+
+The sector-index constituent files were the wrong source for full coverage. The **broad**
+index files (`ind_nifty500list.csv`, midcap 150, smallcap 250) carry an `Industry` column
+for **every** row - NSE's own classification, not index membership. That is a real sector
+for the whole 500, not a correlation guess.
+
+Implemented in `sync_sector_membership`:
+
+* sector-index lists run first and still give many-to-many membership;
+* the broad lists then backfill `Industry` **only** for symbols no index list placed, so a
+  real membership always wins - it is what the sector index price actually tracks;
+* rows are tagged `source='index'` or `source='industry'`, and `sector_map(source=...)`
+  can ask for either, so this finding stays measurable rather than being mixed in
+  invisibly;
+* industries with no sector index to rank them against (Capital Goods, Chemicals,
+  Construction, Services, Telecom, Textiles, ...) are left **unclassified** rather than
+  forced into the nearest-looking bucket;
+* an industry string not in the map is reported as `_unmapped_industries` instead of
+  silently dropping those stocks, because NSE renaming one would otherwise be invisible.
+
+`INDUSTRY_TO_SECTOR` is NEEDS_TUNING - the strings are from NSE's published taxonomy but
+were not verifiable from this sandbox (niftyindices.com is blocked by the egress proxy).
+The `_unmapped_industries` report is what confirms them on the first real sync.
+
+Expected coverage after that sync is roughly 11 of NSE's 20 macro industries, so more than
+38% and less than 100% - the remainder genuinely has no sector index to be ranked against.
+**Whether the S4/S5 edge holds on industry-classified stocks is an open question and must
+be re-measured after the sync**, with the same per-year control. The inference result above
+is the reason to expect it might not.
+
+## Recommendation
+
+* Do **not** trade the sector filter on correlation-inferred sectors. Keep S4/S5's top-3
+  filter restricted to the 183 stocks with real index membership, and trade the rest of the
+  universe unfiltered.
+* Run the sector sync again to pick up the Industry backfill, then re-measure - split by
+  `source`, exactly as this addendum splits known from inferred.

@@ -679,3 +679,103 @@ def test_sector_membership_is_many_to_many(seeded_db):
 def test_the_sector_and_index_catalogues_are_populated():
     assert len(core.SECTOR_INDEX_URLS) >= 10
     assert core.REGIME_INDEX in core.INDEX_PRICE_SYMBOLS
+
+
+# ---------------------------------------------------------------------------
+# Industry backfill: getting a sector onto the ~62% of the universe that sits
+# in no sector index. Measurement (research/SECTOR_TIMING_FINDINGS.md) showed a
+# correlation-inferred sector is not a substitute for a real one, so the
+# backfill has to come from NSE's own Industry column and must never displace
+# real index membership.
+# ---------------------------------------------------------------------------
+
+def _clear_sectors():
+    """The seeded_db fixture keeps one database for the module, so rows another
+    test inserted would otherwise be read back as this sync's output."""
+    core.ensure_sector_table()
+    con = core._db()
+    try:
+        con.execute("DELETE FROM sector_membership")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _stub_csv(monkeypatch, pages):
+    """Serve each URL a canned CSV instead of hitting niftyindices.com."""
+    class R:
+        def __init__(self, text): self.content = text.encode()
+        def raise_for_status(self): pass
+    def get(url, **kw):
+        if url not in pages:
+            raise AssertionError(f"unexpected fetch: {url}")
+        return R(pages[url])
+    monkeypatch.setattr(core.requests, "get", get)
+
+
+def test_industry_backfill_reaches_stocks_no_sector_index_contains(seeded_db, monkeypatch):
+    _clear_sectors()
+    idx_url, broad_url = "http://idx/bank.csv", "http://broad/500.csv"
+    _stub_csv(monkeypatch, {
+        idx_url: "Company Name,Industry,Symbol\nHDFC Bank,Financial Services,HDFCBANK\n",
+        broad_url: ("Company Name,Industry,Symbol\n"
+                    "HDFC Bank,Financial Services,HDFCBANK\n"
+                    "Infosys,Information Technology,INFY\n"
+                    "Tata Motors,Automobile and Auto Components,TATAMOTORS\n"),
+    })
+    report = core.sync_sector_membership(urls={"Bank": idx_url},
+                                         industry_urls={"NIFTY 500": broad_url})
+    assert report["Bank"]["members"] == 1
+    assert report["NIFTY 500"]["backfilled"] == 2, report
+    m = core.sector_map()
+    assert m["INFY"] == ["IT"]
+    assert m["TATAMOTORS"] == ["Auto"]
+
+
+def test_real_index_membership_is_not_displaced_by_the_industry_column(seeded_db, monkeypatch):
+    """HDFCBANK is in the Bank index. The NIFTY 500 file calls its industry
+    Financial Services. The index membership has to win - it is what the Bank
+    sector index price actually tracks."""
+    _clear_sectors()
+    idx_url, broad_url = "http://idx/bank.csv", "http://broad/500.csv"
+    _stub_csv(monkeypatch, {
+        idx_url: "Symbol\nHDFCBANK\n",
+        broad_url: "Industry,Symbol\nFinancial Services,HDFCBANK\n",
+    })
+    core.sync_sector_membership(urls={"Bank": idx_url},
+                                industry_urls={"NIFTY 500": broad_url})
+    assert core.sector_map()["HDFCBANK"] == ["Bank"]
+    assert core.sector_map(source="industry") == {}
+
+
+def test_an_industry_with_no_sector_index_is_left_unclassified(seeded_db, monkeypatch):
+    """Capital Goods has no index to rank it against. Forcing it into the
+    nearest-looking bucket would put the stock under a rank that does not
+    describe it."""
+    _clear_sectors()
+    broad_url = "http://broad/500.csv"
+    _stub_csv(monkeypatch, {broad_url: "Industry,Symbol\nCapital Goods,ABB\nRealty,DLF\n"})
+    report = core.sync_sector_membership(urls={}, industry_urls={"NIFTY 500": broad_url})
+    assert report["NIFTY 500"]["backfilled"] == 1
+    m = core.sector_map()
+    assert "ABB" not in m
+    assert m["DLF"] == ["Realty"]
+
+
+def test_an_unrecognised_industry_string_is_reported_not_swallowed(seeded_db, monkeypatch):
+    """If NSE renames an industry, stocks silently lose their sector. Only this
+    report would show it."""
+    _clear_sectors()
+    broad_url = "http://broad/500.csv"
+    _stub_csv(monkeypatch, {broad_url: "Industry,Symbol\nQuantum Widgets,ACME\n"})
+    report = core.sync_sector_membership(urls={}, industry_urls={"NIFTY 500": broad_url})
+    assert report["_unmapped_industries"] == {"QUANTUM WIDGETS": 1}
+    assert "ACME" not in core.sector_map()
+
+
+def test_passing_no_urls_means_none_rather_than_the_whole_catalogue(seeded_db, monkeypatch):
+    def boom(url, **kw):
+        raise AssertionError(f"nothing should have been fetched, got {url}")
+    monkeypatch.setattr(core.requests, "get", boom)
+    report = core.sync_sector_membership(urls={}, industry_urls={})
+    assert report["_total_rows"] == 0

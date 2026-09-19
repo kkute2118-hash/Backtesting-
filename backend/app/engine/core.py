@@ -95,6 +95,46 @@ SECTOR_INDEX_URLS = {
     "Oil Gas": "https://www.niftyindices.com/IndexConstituent/ind_niftyoilgaslist.csv",
 }
 
+# The sector indices above only cover the stocks NSE puts in them - about 230
+# names, roughly 38% of a 500-stock universe. The broad-index constituent files
+# carry an "Industry" column for EVERY row, which is NSE's own classification
+# rather than index membership, so it reaches the other 62%. Sectors are taken
+# from the index lists first and only backfilled from Industry, because index
+# membership is what the sector index price actually tracks.
+BROAD_INDEX_INDUSTRY_URLS = {
+    "NIFTY 500": "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+    "NIFTY MIDCAP 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
+    "NIFTY SMALLCAP 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
+}
+
+# NSE's Industry strings mapped onto the 14 sectors we can price. Anything not
+# listed here (Services, Diversified, Construction and so on) has no sector
+# index to rank it against, so it stays unclassified rather than being forced
+# into the nearest-looking bucket.
+INDUSTRY_TO_SECTOR = {
+    "AUTOMOBILE AND AUTO COMPONENTS": "Auto",
+    "CAPITAL GOODS": None,
+    "CHEMICALS": None,
+    "CONSTRUCTION": None,
+    "CONSTRUCTION MATERIALS": None,
+    "CONSUMER DURABLES": "Consumer Durables",
+    "CONSUMER SERVICES": None,
+    "DIVERSIFIED": None,
+    "FAST MOVING CONSUMER GOODS": "FMCG",
+    "FINANCIAL SERVICES": "Financial Services",
+    "FOREST MATERIALS": None,
+    "HEALTHCARE": "Healthcare",
+    "INFORMATION TECHNOLOGY": "IT",
+    "MEDIA ENTERTAINMENT & PUBLICATION": "Media",
+    "METALS & MINING": "Metal",
+    "OIL GAS & CONSUMABLE FUELS": "Oil Gas",
+    "POWER": "Energy",
+    "REALTY": "Realty",
+    "SERVICES": None,
+    "TELECOMMUNICATION": None,
+    "TEXTILES": None,
+}
+
 # Index OHLC to store. The key is the name the engine uses; the value is the
 # symbol as Dhan's scrip master spells it in its INDEX segment. Stored under an
 # INDEX_SYMBOL_PREFIX so an index can never be mistaken for a tradable stock by
@@ -1525,55 +1565,117 @@ def ensure_sector_table():
         con.execute("""CREATE TABLE IF NOT EXISTS sector_membership(
             symbol TEXT NOT NULL, sector TEXT NOT NULL, updated_at TEXT,
             PRIMARY KEY(symbol, sector))""")
+        cols = {r[1] for r in con.execute("PRAGMA table_info(sector_membership)")}
+        if "source" not in cols:
+            # Pre-existing rows all came from the sector-index lists.
+            con.execute("ALTER TABLE sector_membership ADD COLUMN source TEXT")
+            con.execute("UPDATE sector_membership SET source='index' WHERE source IS NULL")
         con.commit()
     finally:
         con.close()
 
 
-def sync_sector_membership(urls=None):
-    """Build symbol -> sector from the NSE sector-index constituent lists.
+def sync_sector_membership(urls=None, industry_urls=None):
+    """Build symbol -> sector from the NSE constituent lists.
 
-    A stock can legitimately sit in more than one sector index (a bank is in
-    Bank and in Financial Services), so membership is many-to-many and the
-    caller decides how to collapse it. Storing one sector per symbol here would
-    silently pick a winner.
+    Two passes. The sector-index lists give membership: a stock can legitimately
+    sit in more than one (a bank is in Bank and in Financial Services), so this
+    is many-to-many and the caller decides how to collapse it. Storing one
+    sector per symbol here would silently pick a winner.
+
+    The broad-index lists then backfill from their Industry column, which NSE
+    publishes for every constituent. That is what takes coverage from the ~230
+    stocks inside a sector index to the whole 500. A backfilled row is written
+    with source='industry' and only for a symbol no index list already placed,
+    so a real membership always wins - measurement showed an inferred sector is
+    not a substitute for a real one (research/SECTOR_TIMING_FINDINGS.md).
 
     UNTESTED: needs outbound access to niftyindices.com.
     """
-    urls = dict(urls or SECTOR_INDEX_URLS)
+    # `or` would turn an explicit empty dict back into the full catalogue,
+    # so "sync nothing from here" has to be expressible.
+    urls = dict(SECTOR_INDEX_URLS if urls is None else urls)
+    industry_urls = dict(BROAD_INDEX_INDUSTRY_URLS if industry_urls is None
+                         else industry_urls)
     ensure_sector_table()
     now = datetime.now().isoformat(timespec="seconds")
     report, rows = {}, []
+
+    def _fetch(url):
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        r.raise_for_status()
+        return pd.read_csv(io.BytesIO(r.content))
+
+    def _col(df, name):
+        return next(c for c in df.columns if str(c).strip().upper() == name)
+
     for sector, url in urls.items():
         try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-            r.raise_for_status()
-            df = pd.read_csv(io.BytesIO(r.content))
-            col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
-            members = sorted({str(x).strip().upper() for x in df[col].dropna()})
-            rows += [(m, sector, now) for m in members]
+            df = _fetch(url)
+            members = sorted({str(x).strip().upper()
+                              for x in df[_col(df, "SYMBOL")].dropna()})
+            rows += [(m, sector, now, "index") for m in members]
             report[sector] = {"ok": True, "members": len(members)}
         except Exception as exc:
             report[sector] = {"ok": False, "reason": str(exc)[:200]}
+
+    placed = {m for m, _, _, _ in rows}
+    unmapped = {}
+    for label, url in industry_urls.items():
+        try:
+            df = _fetch(url)
+            sym_c, ind_c = _col(df, "SYMBOL"), _col(df, "INDUSTRY")
+            added = 0
+            for sym, ind in zip(df[sym_c], df[ind_c]):
+                sym = str(sym).strip().upper()
+                key = str(ind).strip().upper()
+                if not sym or sym in placed:
+                    continue
+                sector = INDUSTRY_TO_SECTOR.get(key, "__missing__")
+                if sector is None:
+                    continue                      # known industry, no index to price it
+                if sector == "__missing__":
+                    unmapped[key] = unmapped.get(key, 0) + 1
+                    continue
+                rows.append((sym, sector, now, "industry"))
+                placed.add(sym)
+                added += 1
+            report[label] = {"ok": True, "backfilled": added}
+        except Exception as exc:
+            report[label] = {"ok": False, "reason": str(exc)[:200]}
+
     if rows:
         con = _db()
         try:
-            con.executemany("""INSERT INTO sector_membership(symbol,sector,updated_at)
-                VALUES(?,?,?) ON CONFLICT(symbol,sector) DO UPDATE SET
-                updated_at=excluded.updated_at""", rows)
+            con.executemany("""INSERT INTO sector_membership(symbol,sector,updated_at,source)
+                VALUES(?,?,?,?) ON CONFLICT(symbol,sector) DO UPDATE SET
+                updated_at=excluded.updated_at, source=excluded.source""", rows)
             con.commit()
         finally:
             con.close()
     report["_total_rows"] = len(rows)
+    if unmapped:
+        # Surfaced rather than swallowed: a new NSE industry string means stocks
+        # silently lost their sector, and only this report would show it.
+        report["_unmapped_industries"] = dict(sorted(unmapped.items(),
+                                                     key=lambda kv: -kv[1]))
     return report
 
 
-def sector_map():
-    """{symbol: [sectors]} from the stored membership, empty until synced."""
+def sector_map(source=None):
+    """{symbol: [sectors]} from the stored membership, empty until synced.
+
+    source="index" restricts it to real sector-index membership; "industry" to
+    the NSE Industry backfill; None returns both.
+    """
     ensure_sector_table()
     con = _db()
     try:
-        rows = con.execute("SELECT symbol, sector FROM sector_membership").fetchall()
+        if source:
+            rows = con.execute("SELECT symbol, sector FROM sector_membership "
+                               "WHERE source=?", (source,)).fetchall()
+        else:
+            rows = con.execute("SELECT symbol, sector FROM sector_membership").fetchall()
     finally:
         con.close()
     out = {}
