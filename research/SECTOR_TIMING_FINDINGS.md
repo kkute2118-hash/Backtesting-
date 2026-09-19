@@ -514,3 +514,141 @@ filtering helps.
   selecting *when the market is allowed to trade* has not, in any form tested - 50 EMA
   proximity, 200 EMA proximity, swing-low proximity, range position, drawdown, or the
   uptrend-plus-pullback composite.
+
+---
+
+# Addendum 4: sector support + ATR, and whether to go to ~2000 stocks
+
+Proposal: filter on sector support plus the ATR change, and if the NIFTY 500 leaves too few
+candidates, expand to ~2000 NSE stocks, which move faster.
+
+Three separable claims. Measured all three.
+
+## 1. Does sector support add anything on top of ATR >= 4%?
+
+The right test is nested: take only the ATR >= 4% trades, then ask whether sector support
+improves them. Four sector-support definitions x five strategies, within-year permutation
+(15 usable comparisons, 15,172 trades):
+
+| strategy | sector definition | n on | n off | avg on | avg off | years won | p(sign) | p(mean) |
+|---|---|---|---|---|---|---|---|---|
+| S1 | within 3% of 50 EMA | 3,647 | 3,937 | +1.83 | +2.31 | 3/5 | 0.50 | 0.93 |
+| S1 | bottom 40% of 60d range | 2,248 | 5,336 | +1.51 | +2.40 | 2/5 | 0.82 | 0.99 |
+| S1 | either | 4,999 | 2,585 | +1.80 | +2.94 | 1/5 | 0.98 | 1.00 |
+| S1 | above 200 EMA and at 50 | 3,010 | 4,574 | +1.62 | +2.45 | 3/5 | 0.49 | 0.99 |
+| S2 | within 3% of 50 EMA | 184 | 278 | +4.31 | +2.50 | 4/5 | 0.17 | 0.088 |
+| S2 | above 200 EMA and at 50 | 109 | 291 | +5.12 | +2.14 | 4/4 | **0.055** | **0.021** |
+| S3 | within 3% of 50 EMA | 2,961 | 2,498 | +2.98 | +2.00 | 4/5 | 0.18 | **0.009** |
+| S3 | bottom 40% of 60d range | 1,901 | 3,558 | +1.21 | +3.69 | 1/5 | 0.97 | 1.00 |
+| S5 | within 3% of 50 EMA | 497 | 821 | +5.26 | +3.25 | 4/5 | 0.18 | 0.115 |
+| S5 | bottom 40% of 60d range | 670 | 648 | +2.58 | +5.06 | 2/5 | 0.82 | 0.95 |
+
+Best p(sign) is 0.055, which against best-of-15 is **0.57**. Best p(mean) is 0.009, against
+best-of-15 **0.124**. Neither survives. The wins land on a different sector definition for
+each strategy - S2 likes "above 200 EMA and at 50", S3 likes "within 3% of 50 EMA", S5's
+best definition is S3's worst. That scatter is what search noise looks like.
+
+**Sector support adds nothing on top of ATR.** For S1 it actively subtracts, in every
+definition.
+
+## 2. Are less liquid stocks faster, and do they pay better?
+
+Splitting the 485-stock universe into liquidity quintiles by average daily turnover:
+
+| liquidity | median turnover | n | ATR% | win% | avg% | PF |
+|---|---|---|---|---|---|---|
+| Q1 least liquid | Rs 28.8 cr | 45,965 | **3.59** | 30.5 | +0.88 | **1.19** |
+| Q2 | Rs 59.4 cr | 45,868 | 3.56 | 33.0 | +1.87 | 1.41 |
+| Q3 | Rs 100.1 cr | 46,072 | 3.34 | 32.4 | +1.65 | 1.36 |
+| Q4 | Rs 159.6 cr | 45,257 | 3.20 | 33.9 | +2.09 | 1.47 |
+| Q5 most liquid | Rs 347.3 cr | 45,723 | **2.73** | 35.2 | +2.45 | **1.56** |
+
+**The "faster" half of the intuition is correct** - ATR rises monotonically as liquidity
+falls, 2.73% to 3.59%. **The "pays better" half is backwards.** Profit factor falls
+monotonically the other way, 1.56 to 1.19, and it is monotone within S3 (1.59 -> 1.09),
+S4 (2.38 -> 1.43) and S5 (2.59 -> 1.58) individually.
+
+Higher ATR is good and lower liquidity is bad, and the two are correlated. Separating them
+- does ATR >= 4% still work inside each liquidity bucket:
+
+| liquidity | n ATR>=4 | avg ATR>=4 | avg ATR<4 | diff | PF>=4 | PF<4 | years won |
+|---|---|---|---|---|---|---|---|
+| Q1 least | 13,405 | +0.53 | +1.03 | **-0.49** | 1.11 | 1.23 | 3/5 |
+| Q2 | 13,451 | +2.37 | +1.66 | **+0.71** | 1.52 | 1.36 | 4/5 |
+| Q3 | 10,946 | +2.31 | +1.45 | **+0.86** | 1.50 | 1.32 | 4/5 |
+| Q4 | 8,944 | +2.47 | +2.00 | +0.47 | 1.54 | 1.45 | 3/5 |
+| Q5 most | 5,350 | +2.37 | +2.47 | -0.10 | 1.51 | 1.57 | 3/5 |
+
+The ATR edge lives in the **middle** of the liquidity range, Rs 40-250 cr a day. In the
+least liquid quintile - already only Rs 28.8 cr median - high ATR **loses**: PF 1.11
+against 1.23 for the calm names.
+
+NSE ranks 500-2000 sit well below that quintile. Expanding there moves the universe into
+the one band where the filter that is being relied on stops working.
+
+## 3. Is there actually a shortage of candidates?
+
+No. ATR >= 4% across the current universe:
+
+| year | S1 | S2 | S3 | S4 | S5 |
+|---|---|---|---|---|---|
+| 2022 | 3,090 | 231 | 1,532 | 115 | 611 |
+| 2023 | 4,359 | 292 | 2,437 | 249 | 679 |
+| 2024 | 10,718 | 523 | 7,806 | 373 | 1,488 |
+| 2025 | 4,546 | 477 | 3,693 | 517 | 1,321 |
+| 2026 | 3,012 | 306 | 2,424 | 471 | 826 |
+
+**49 signals a day on average, median 38, and 100% of the 1,064 trading days offer at
+least 3 candidates.** 437 of 485 stocks are touched. With 3 slots the constraint is
+capital, not candidates. The premise that the 500 universe is too thin does not hold.
+
+## What the ATR filter is actually worth, per strategy
+
+Within-year permutation on ATR >= 4% itself:
+
+| strategy | n>=4 | n<4 | years won | mean diff | p(sign) | p(mean) |
+|---|---|---|---|---|---|---|
+| S1 | 25,725 | 58,024 | 3/5 | +0.87 | 0.50 | <0.0001 |
+| S2 | 1,829 | 4,368 | 3/5 | +1.24 | 0.50 | 0.0005 |
+| S3 | 17,892 | 93,806 | 3/5 | +0.62 | 0.51 | <0.0001 |
+| S4 | 1,725 | 1,038 | 4/5 | +0.19 | 0.22 | 0.40 |
+| **S5** | 4,925 | 19,549 | **5/5** | **+2.91** | **0.031** | **<0.0001** |
+
+**S5 is the standout** - every year, and the only filter in this entire study to pass the
+sign test outright. S1/S2/S3 have large, highly significant means but only 3/5 years, so
+the effect is real on average and not dependable year to year. **S4 gets nothing from
+ATR** - its filter is the top-3 sector rank (4/4 years, Addendum 1).
+
+## ROI on Rs 1,00,000 - 3 slots, 25% per position, no marking system
+
+| portfolio | signals | taken | win% | final Rs | CAGR% | CAGR range | maxDD% | C/DD |
+|---|---|---|---|---|---|---|---|---|
+| all 5, no filter | 228,881 | 108 | 33.3 | 1,64,025 | 12.2 | 3.5 to 18.3 | -24.9 | 0.49 |
+| **all 5, ATR >= 4%** | 52,096 | 152 | 35.9 | **2,60,308** | **25.0** | 4.5 to 37.6 | -25.6 | 0.97 |
+| all 5, ATR + sector support | 10,462 | 180 | 30.4 | 1,28,093 | 5.9 | 1.5 to 14.9 | -38.0 | 0.16 |
+| all 5, ATR but illiquid (<Rs 40 cr) | 13,020 | 156 | 29.8 | 1,19,411 | 4.2 | -13.7 to 18.6 | -30.5 | 0.14 |
+| S4+S5, no filter | 27,237 | 231 | 37.5 | 1,80,207 | 14.6 | 2.7 to 26.4 | -24.0 | 0.61 |
+| S4+S5, top-3 real sector | 2,514 | 140 | 44.5 | 2,11,684 | 19.1 | 4.1 to 28.9 | **-16.6** | **1.15** |
+| **S4+S5, ATR >= 4%** | 6,650 | 218 | 40.0 | **2,61,106** | **25.1** | 12.6 to 45.8 | -33.0 | 0.76 |
+| **S4+S5, ATR + turnover Rs 40-250 cr** | 4,249 | 206 | 43.8 | **2,88,009** | **28.0** | **16.8 to 50.2** | -32.2 | 0.87 |
+
+Adding sector support to ATR costs Rs 1.3 lakh (25.0% -> 5.9% CAGR) and nearly doubles the
+drawdown. Taking ATR into illiquid names costs about as much.
+
+The liquidity band helps S4+S5 - and is the only row whose worst seed still returns 16.8%
+- but 40-250 cr was read off the quintile table above, so it is a fitted parameter on one
+sample. Treat it as promising, not settled.
+
+## Recommendation
+
+* **Keep ATR >= 4%.** It is the strongest thing in this study. Per strategy: essential for
+  S5 (5/5 years), worthwhile for S1/S2/S3, useless for S4.
+* **S4 keeps the top-3 sector rank instead.** The two filters belong to different
+  strategies; do not apply both to both.
+* **Drop sector support.** It adds nothing on top of ATR and subtracts from S1.
+* **Do not expand to ~2000 stocks for this system.** The intuition about faster moves is
+  right, but returns fall monotonically with liquidity and the ATR filter inverts in the
+  least liquid quintile. There is also no candidate shortage to solve - 49 a day, three
+  slots.
+* If the wider universe is wanted for other reasons, gate it on turnover, not on count:
+  the evidence supports roughly Rs 40 cr a day as a floor.
