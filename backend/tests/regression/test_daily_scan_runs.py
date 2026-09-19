@@ -64,6 +64,7 @@ STATE = {
     "cached_token": ("tok", "2026-09-09T08:00:00"),
     "added_signal_date": None,
     "persist_signal_date": None,
+    "persist_rejected": None,
 }
 
 
@@ -96,14 +97,19 @@ def install_stubs(daily_job):
     def scan(data, strat, regime, stats=None, **k):
         CALLS.append("scan")
         if stats is not None:
-            stats.update({"usable": 5, "signals": {1: 2, 2: 0, 3: 1, 4: 0}})
+            stats.update({"usable": 5, "signals": {1: 2, 2: 0, 3: 1, 4: 0},
+                          "entry_filter_reject": {1: 4, 3: 2},
+                          "rejected_rows": [{"Ticker": "QUIET", "Strategy": "S1"}]})
         return pd.DataFrame({"Score": [92.0, 88.0], "Ticker": ["HAL", "ASTERDM"],
                              "Strategy": ["S1", "S3"]})
     core.scan_dataset = scan
 
-    def persist(result, min_score, signal_date=None):
+    def persist(result, min_score=None, signal_date=None, rejected=None):
         CALLS.append("persist")
         STATE["persist_signal_date"] = signal_date
+        # The filter-rejected signals have to reach the record too, so the
+        # job must pass them on rather than let them fall on the floor.
+        STATE["persist_rejected"] = rejected
     core.persist_scanner_signals = persist
 
     def add(df, signal_date=None):
@@ -133,6 +139,7 @@ def run():
     CALLS.clear()
     STATE["added_signal_date"] = None
     STATE["persist_signal_date"] = None
+    STATE["persist_rejected"] = None
     return daily_job.run_daily(), list(CALLS)
 
 
@@ -151,6 +158,11 @@ check("forward candidates are dated by the session scanned",
 check("persisted signals are dated by the session scanned",
       STATE["persist_signal_date"] == date(2026, 9, 8), str(STATE["persist_signal_date"]))
 check("that is NOT the run date", STATE["added_signal_date"] != STATE["expected"])
+# The record has to include what the entry filter turned away; if the job drops
+# it, the only trace of a scan is the part that already agrees with the filter.
+check("filter-rejected signals reach the record too",
+      STATE["persist_rejected"] == [{"Ticker": "QUIET", "Strategy": "S1"}],
+      str(STATE["persist_rejected"]))
 
 # ------------------- 3. re-running the same session is a no-op
 summary2, calls2 = run()

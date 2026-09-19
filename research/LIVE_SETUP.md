@@ -60,3 +60,56 @@ returned 24.8% a year. That is the claim with the most support, not the 34.2%.
 
 `core.APPLY_ENTRY_EVIDENCE_FILTER = False` restores the unfiltered scan, which
 is what any future measurement run should use.
+
+---
+
+## The signal log vs the traded book
+
+Two tables, two jobs. Conflating them was distorting the forward-test record.
+
+**`scanner_signals` is the RECORD.** Every signal every strategy produced, on
+every date, keyed `date|symbol|strategy`. A stock firing under S1 and S3 on one
+day is two rows. Three columns say what became of each:
+
+| column | meaning |
+|---|---|
+| `passed_filter` | 0 = the entry evidence filter rejected it; `filter_reason` says which reading |
+| `selected_for_forward` | 1 = it became a position |
+| `skip_reason` | why a qualifying signal was not taken - "already held", or "another strategy took the slot this day" |
+
+Filter-rejected signals are stored too. Without them the only trace of a scan
+is the part that already agrees with the filter, and the filter stops being
+measurable.
+
+**`forward_tests` is the BOOK: at most one open position per stock**, across
+every strategy and every date. Two things used to break that, and both weighted
+the record toward whichever stock happened to keep signalling:
+
+* the same stock under two strategies on one day became two positions - the
+  dedupe keyed on symbol AND strategy AND date;
+* a stock that kept signalling on later days was enrolled again each time while
+  the first position was still open.
+
+Now a symbol with an ACTIVE forward test is skipped whatever the strategy or
+date, and when several strategies fire the same stock on one day the highest
+priority wins (S4, then S5, then the rest) - the same rule `build_portfolio`
+uses to fill a slot, so the book and the portfolio agree about who gets a stock.
+
+One scan of 2026-09-18 across all five strategies, for scale: **201 signals
+recorded** (22 passed the filter, 179 rejected), **10 became positions**, 8
+skipped because another strategy took the slot, 4 because the stock was already
+held. **57 stocks fired under more than one strategy that day.**
+
+`core.signal_history(symbol=..., strategy=..., start=..., end=...)` reads the
+log, and the app shows it under Forward -> Signal log with Outcome / Why / ATR %
+/ Turnover / Sector rank columns.
+
+### Rows written before this change
+
+The fix stops new duplicates; it does not rewrite history. At the time of the
+change the live book held **39 ACTIVE rows across 27 distinct stocks - 12
+duplicate positions**, e.g. NEULANDLAB open 4 times (S1 on four dates), HAL and
+GLENMARK 3 times each, LTF and SIEMENS twice each (S1 and S3 the same day).
+Those 12 still overweight their stocks in any statistic drawn from the book.
+Cleaning them is a destructive edit to recorded results and is left as an
+explicit decision, not done automatically.

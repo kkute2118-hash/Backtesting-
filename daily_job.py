@@ -287,9 +287,12 @@ def step_scan(tickers, strategies, min_score, session_date=None):
             "The local candle store has no stock with 260+ bars. Build the history once from "
             "the app's Data Manager (SYNC ONLY MISSING DATA) before relying on this job."
         )
-    proxy = max(data.values(), key=len)
+    # NOT max(data.values(), key=len) - that read the market regime off
+    # whichever single stock happened to have the longest history. The same
+    # bug was fixed in the scanner service; this copy was missed.
+    proxy, proxy_src = core.market_regime_frame(data)
     regime, regime_score = core.regime_from_index(proxy)
-    log("scan", f"{len(data):,} stocks loaded; regime {regime} ({regime_score})")
+    log("scan", f"{len(data):,} stocks loaded; regime {regime} ({regime_score}) from {proxy_src}")
 
     stats = {}
     result = core.scan_dataset(data, strategies, regime, stats=stats)
@@ -299,8 +302,16 @@ def step_scan(tickers, strategies, min_score, session_date=None):
     # Deliberately scanned AFTER the close, on the finished daily candle. An
     # intraday scan can show a signal at 11:00 that is gone by 15:30, which
     # would record forward tests against setups that never actually existed.
-    core.persist_scanner_signals(result, min_score, signal_date=session_date)
-    log("scan", f"{len(result):,} qualified setup(s) persisted for session {session_date}")
+    # stats carries the signals the entry filter turned away; they belong in
+    # the record too, or the only trace of a scan is the part that already
+    # agrees with the filter.
+    core.persist_scanner_signals(result, min_score, signal_date=session_date,
+                                 rejected=stats.get("rejected_rows"))
+    rej = stats.get("entry_filter_reject", {})
+    log("scan", f"{len(result):,} passed the entry filter, "
+                f"{sum(rej.values()):,} rejected ("
+                + ", ".join(f"S{k}={v}" for k, v in sorted(rej.items()) if v) + ")")
+    log("scan", f"persisted for session {session_date}")
     return result, regime
 
 

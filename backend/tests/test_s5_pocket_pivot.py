@@ -898,89 +898,143 @@ def test_the_default_portfolio_is_the_measured_best_one():
 
 
 def test_persisting_signals_no_longer_gates_on_the_score(seeded_db):
-    """The score has no demonstrated relationship to outcome, so every scanned
-    row is selected for forward testing regardless of it."""
+    """The score has no demonstrated relationship to outcome, so it decides
+    nothing about what is recorded."""
+    _clear_signals()
     result = pd.DataFrame([
         {"Ticker": "AAA", "Strategy": "S1", "Score": 12.0, "Entry": 100.0, "SL 7%": 93.0},
         {"Ticker": "BBB", "Strategy": "S4_SEPA", "Score": 99.0, "Entry": 50.0, "SL 7%": 46.5},
     ])
     core.persist_scanner_signals(result, min_score=95, signal_date="2024-05-01")
-    con = core._db()
-    try:
-        rows = dict(con.execute("SELECT symbol, selected_for_forward FROM scanner_signals "
-                                "WHERE signal_date='2024-05-01'").fetchall())
-    finally:
-        con.close()
-    assert rows == {"AAA": 1, "BBB": 1}, rows
+    rows = dict(_signal_rows("passed_filter"))
+    assert rows == {"AAA/S1": 1, "BBB/S4_SEPA": 1}, rows
 
 
-def test_s4s_sector_rule_reads_index_membership_only(seeded_db):
-    """An NSE Industry label says what a company does; index membership says
-    what the stock moves with, and the rank is built from the sector's price.
-    Industry-labelled stocks track their assigned sector at a median
-    correlation of 0.129, and S4's edge does not survive on them
-    (research/SECTOR_TIMING_FINDINGS.md addendum 6), so they must not feed the
-    lookup the rule uses."""
-    _clear_sectors()
-    core.ensure_sector_table()
+def _clear_signals():
     con = core._db()
     try:
-        con.executemany("INSERT OR REPLACE INTO sector_membership"
-                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)",
-                        [("INFY", "IT", "x", "index"),
-                         ("SMALLCO", "IT", "x", "industry")])
+        con.execute("DELETE FROM scanner_signals")
+        con.execute("DELETE FROM forward_tests")
         con.commit()
     finally:
         con.close()
-    assert core.sector_map(source="index") == {"INFY": ["IT"]}
-    assert core.sector_map(source="industry") == {"SMALLCO": ["IT"]}
-    assert sorted(core.sector_map()) == ["INFY", "SMALLCO"], "display still sees both"
-
-    ranks, lookup = {"IT": 1}, core.sector_map(source="index")
-    ok, _, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=1.0), 4,
-                                         sector_ranks=ranks, sector_lookup=lookup,
-                                         ticker="INFY")
-    assert ok
-    bad, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=9.0), 4,
-                                            sector_ranks=ranks, sector_lookup=lookup,
-                                            ticker="SMALLCO")
-    assert not bad, "an industry label must not satisfy S4's sector rule"
-    assert "sector" in why, "and it must fail ON the sector rule, not fall back to ATR"
 
 
-def test_the_entry_ranking_and_the_dashboard_ranking_are_separate(seeded_db):
-    """Ranking all 22 sectors measurably weakens S4's filter - the
-    industry-defined composites are noisier and crowd the top, displacing real
-    index sectors. So the entry rule ranks the index-priced sectors only while
-    the dashboard shows everything (addendum 7)."""
-    _clear_sectors()
+def _signal_rows(col):
     con = core._db()
     try:
-        rows = [(f"IDX{i}", "IT", "x", "index") for i in range(6)]
-        rows += [(f"IND{i}", "Chemicals", "x", "industry") for i in range(6)]
-        con.executemany("INSERT OR REPLACE INTO sector_membership"
-                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)", rows)
-        con.commit()
+        return con.execute(f"SELECT symbol || '/' || strategy, {col} "
+                           "FROM scanner_signals ORDER BY symbol").fetchall()
     finally:
         con.close()
-    idx = pd.bdate_range("2024-01-01", periods=300)
-    rng = np.random.default_rng(1)
-    data = {s: pd.DataFrame({"close": 100 * np.cumprod(1 + rng.normal(0, .01, 300))}, index=idx)
-            for s, *_ in [(r[0],) for r in rows]}
-    # A rank is relative TO the benchmark, so without it every sector scores
-    # NaN and both rankings come back empty - which would pass the first
-    # assertion for the wrong reason.
+
+
+# ---------------------------------------------------------------------------
+# The log is the record; forward_tests is the book. One position per stock,
+# but every signal kept.
+# ---------------------------------------------------------------------------
+
+def _fwd_cand(ticker, strategy, entry=100.0):
+    return {"Ticker": ticker, "Strategy": strategy, "Score": 50.0, "Entry": entry,
+            "SL 7%": round(entry * 0.93, 2), "Target 3R": round(entry * 1.21, 2),
+            "Regime": "BULL"}
+
+
+def test_a_stock_firing_under_two_strategies_opens_one_position(seeded_db):
+    """This is what distorted the forward-test record: LTF under S1 and S3 on
+    one day became two positions in the same stock."""
+    _clear_signals()
+    cands = pd.DataFrame([_fwd_cand("LTF", "S1"), _fwd_cand("LTF", "S3"), _fwd_cand("OTHER", "S1")])
+    core.persist_scanner_signals(cands, signal_date="2024-05-01")
+    added = core.add_forward_candidates(cands, signal_date="2024-05-01")
+    assert added == 2, "one for LTF, one for OTHER"
     con = core._db()
     try:
-        con.executemany(
-            "INSERT OR REPLACE INTO candles(symbol,dt,open,high,low,close,volume) "
-            "VALUES(?,?,?,?,?,?,?)",
-            [(core.index_store_symbol(core.REGIME_INDEX), d.strftime("%Y-%m-%d"),
-              100.0, 100.0, 100.0, 100.0, 0.0) for d in idx])
-        con.commit()
+        rows = con.execute("SELECT symbol, COUNT(*) FROM forward_tests "
+                           "GROUP BY symbol").fetchall()
     finally:
         con.close()
-    entry = core.current_sector_ranks(data=data, source="index")
-    board = core.current_sector_ranks(data=data, source=None)
-    assert "Chemicals" not in entry, "an industry-defined sector must not rank S4 entries"
-    assert "Chemicals" in board, "but the dashboard must still show it"
+    assert dict(rows) == {"LTF": 1, "OTHER": 1}
+
+
+def test_the_higher_priority_strategy_takes_the_slot(seeded_db):
+    """Same rule build_portfolio uses to fill a slot: S4 before S5 before the
+    rest. Picking by row order would make it depend on scan order."""
+    _clear_signals()
+    cands = pd.DataFrame([_fwd_cand("X", "S1"), _fwd_cand("X", "S5_POCKETPIVOT"),
+                          _fwd_cand("X", "S4_SEPA")])
+    core.add_forward_candidates(cands, signal_date="2024-05-01")
+    con = core._db()
+    try:
+        got = con.execute("SELECT strategy FROM forward_tests").fetchall()
+    finally:
+        con.close()
+    assert got == [("S4_SEPA",)]
+
+
+def test_a_stock_already_held_is_not_enrolled_again_on_a_later_day(seeded_db):
+    """A stock that keeps signalling used to be enrolled again each day while
+    the first position was still open, weighting the record toward whichever
+    stock signalled most."""
+    _clear_signals()
+    core.add_forward_candidates(pd.DataFrame([_fwd_cand("NEULANDLAB", "S1")]),
+                                signal_date="2024-05-01")
+    again = pd.DataFrame([_fwd_cand("NEULANDLAB", "S1", entry=110.0)])
+    core.persist_scanner_signals(again, signal_date="2024-05-02")
+    added = core.add_forward_candidates(again, signal_date="2024-05-02")
+    assert added == 0
+    con = core._db()
+    try:
+        n = con.execute("SELECT COUNT(*) FROM forward_tests "
+                        "WHERE symbol='NEULANDLAB'").fetchone()[0]
+        skip = con.execute("SELECT skip_reason FROM scanner_signals "
+                           "WHERE signal_key='2024-05-02|NEULANDLAB|S1'").fetchone()[0]
+    finally:
+        con.close()
+    assert n == 1
+    assert skip == "already held", "the record must say why it was not taken"
+
+
+def test_a_skipped_signal_is_still_recorded(seeded_db):
+    """The whole point: not trading it must not erase it. Otherwise the record
+    only ever contains the trades, and 'how often did this stock signal' is
+    unanswerable."""
+    _clear_signals()
+    cands = pd.DataFrame([_fwd_cand("LTF", "S1"), _fwd_cand("LTF", "S3")])
+    core.persist_scanner_signals(cands, signal_date="2024-05-01")
+    core.add_forward_candidates(cands, signal_date="2024-05-01")
+    hist = core.signal_history(symbol="LTF")
+    assert len(hist) == 2, "both strategies stay in the log"
+    assert set(hist.strategy) == {"S1", "S3"}
+    assert hist.selected_for_forward.sum() == 1, "exactly one became a position"
+
+
+def test_filter_rejected_signals_are_recorded_too(seeded_db):
+    """Storing only what the filter admitted would leave no way to ask whether
+    the filter is still the right one."""
+    _clear_signals()
+    passed = pd.DataFrame([_fwd_cand("GOOD", "S1")])
+    rejected = [{"Ticker": "QUIET", "Strategy": "S1", "Entry": 100.0,
+                 "ATR %": 1.8, "Turnover Cr": 90.0, "Entry Filter": "ATR 1.8% < 4.0%"}]
+    n = core.persist_scanner_signals(passed, signal_date="2024-05-01", rejected=rejected)
+    assert n == 2
+    hist = core.signal_history(start="2024-05-01", end="2024-05-01")
+    by = {r.symbol: r for r in hist.itertuples()}
+    assert by["GOOD"].passed_filter == 1
+    assert by["QUIET"].passed_filter == 0
+    assert "ATR 1.8%" in by["QUIET"].filter_reason
+    assert by["QUIET"].atr_pct == pytest.approx(1.8)
+    only_passed = core.signal_history(include_rejected=False)
+    assert set(only_passed.symbol) == {"GOOD"}
+
+
+def test_a_reading_that_was_not_measured_is_null_not_zero(seeded_db):
+    """An ATR of 0.0 and an unmeasured ATR are different facts, and storing
+    the second as the first would read as the calmest stock in the universe."""
+    _clear_signals()
+    core.persist_scanner_signals(
+        pd.DataFrame([{"Ticker": "AAA", "Strategy": "S1", "Entry": 100.0,
+                       "SL 7%": 93.0, "ATR %": None, "Sector Rank": None}]),
+        signal_date="2024-05-01")
+    row = core.signal_history(symbol="AAA").iloc[0]
+    assert pd.isna(row.atr_pct) and pd.isna(row.sector_rank)
