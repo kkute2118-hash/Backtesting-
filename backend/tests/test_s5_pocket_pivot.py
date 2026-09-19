@@ -569,3 +569,113 @@ def test_the_win_probability_model_refuses_to_guess_for_s5():
 
 def test_a_thinly_evidenced_strategy_needs_real_samples_before_the_model_speaks():
     assert core.ML_MIN_STRATEGY_SAMPLES >= 20
+
+
+# --------------------------------------------------------------------------- #
+# Slot priority: which strategy gets a scarce slot
+# --------------------------------------------------------------------------- #
+def _cand(ticker, strategy, entry=100.0, stop=95.0):
+    return {"Ticker": ticker, "Strategy": strategy, "Entry": entry, "SL 7%": stop}
+
+
+def test_s4_takes_the_slot_before_s5():
+    """S4 earned +5.20% per trade against S5's +0.56% over the same book, but
+    S5 fires constantly and crowded it out of a 3-slot portfolio. Preferring S4
+    moved median CAGR from 10.3% to 19.1%. S5 is listed first here on purpose:
+    the priority must reorder the input, not follow it."""
+    cand = pd.DataFrame([
+        _cand("AAA", "S5_POCKETPIVOT"), _cand("BBB", "S5_POCKETPIVOT"),
+        _cand("CCC", "S5_POCKETPIVOT"), _cand("DDD", "S4_SEPA"),
+    ])
+    out = core.build_portfolio(cand, data=None, capital=100_000,
+                               max_positions=2, max_correlation=1.0)
+    picked = list(out["positions"]["Strategy"])
+    assert picked[0] == "S4_SEPA", picked
+
+
+def test_one_stock_under_two_strategies_keeps_the_higher_priority_one():
+    """De-duplication happens after the priority sort, so the surviving row is
+    S4's — not whichever happened to be listed first."""
+    dup = pd.DataFrame([_cand("ZZZ", "S5_POCKETPIVOT"), _cand("ZZZ", "S4_SEPA")])
+    out = core.build_portfolio(dup, data=None, capital=100_000,
+                               max_positions=3, max_correlation=1.0)
+    assert len(out["positions"]) == 1
+    assert out["positions"].iloc[0]["Strategy"] == "S4_SEPA"
+
+
+def test_an_unlisted_strategy_sorts_after_the_ranked_ones():
+    cand = pd.DataFrame([_cand("AAA", "S1"), _cand("BBB", "S5_POCKETPIVOT"),
+                         _cand("CCC", "S4_SEPA")])
+    out = core.build_portfolio(cand, data=None, capital=100_000,
+                               max_positions=3, max_correlation=1.0)
+    assert list(out["positions"]["Strategy"]) == ["S4_SEPA", "S5_POCKETPIVOT", "S1"]
+    assert core._slot_priority("NOT_A_STRATEGY") == core.STRATEGY_SLOT_PRIORITY_DEFAULT
+    assert core._slot_priority("s4_sepa") == 0, "matching must be case-insensitive"
+
+
+def test_priority_never_overrides_a_broken_stop():
+    """Priority decides ordering, not eligibility: an S4 row whose stop is not
+    below its entry is still rejected."""
+    cand = pd.DataFrame([_cand("AAA", "S4_SEPA", entry=100.0, stop=105.0),
+                         _cand("BBB", "S5_POCKETPIVOT", entry=100.0, stop=95.0)])
+    out = core.build_portfolio(cand, data=None, capital=100_000,
+                               max_positions=3, max_correlation=1.0)
+    assert list(out["positions"]["Ticker"]) == ["BBB"]
+    assert any(s["ticker"] == "AAA" for s in out["skipped"])
+
+
+# --------------------------------------------------------------------------- #
+# Market regime, index prices and sector membership
+# --------------------------------------------------------------------------- #
+def test_an_index_can_never_be_mistaken_for_a_stock():
+    assert core.index_store_symbol("NIFTY 500") == "^NIFTY 500"
+    assert core.is_index_symbol("^NIFTY 500")
+    assert not core.is_index_symbol("RELIANCE")
+
+
+def test_regime_says_where_it_read_the_market_from(frames, seeded_db):
+    """The regime used to come from `max(data.values(), key=len)` — the single
+    longest-history stock, which is not the market. The fallback still exists
+    (an index may not be synced yet) but it now has to announce itself."""
+    data = dict(frames)
+    proxy, source = core.market_regime_frame(data)
+    assert len(proxy) > 0
+    assert "FALLBACK" in source, source
+
+    # With no data at all, it refuses rather than inventing a regime.
+    empty, src = core.market_regime_frame({})
+    assert empty.empty and src == "unavailable"
+
+
+def test_the_regime_fallback_ignores_index_rows(frames):
+    """If an index is in the dataset it must not be picked as the 'longest
+    stock' — it is not tradable and would double-count as both."""
+    data = dict(frames)
+    longest = max(data.values(), key=len)
+    data["^NIFTY 500"] = pd.concat([longest, longest])   # longest frame by far
+    proxy, source = core.market_regime_frame(data)
+    assert "FALLBACK" in source
+    assert len(proxy) == len(longest), "an index frame was used as the stock fallback"
+
+
+def test_sector_membership_is_many_to_many(seeded_db):
+    """A bank belongs to Bank and to Financial Services. Collapsing that to one
+    sector per symbol would silently pick a winner."""
+    core.ensure_sector_table()
+    con = core._db()
+    try:
+        con.executemany(
+            "INSERT OR REPLACE INTO sector_membership(symbol,sector,updated_at) VALUES(?,?,?)",
+            [("HDFCBANK", "Bank", "x"), ("HDFCBANK", "Financial Services", "x"),
+             ("INFY", "IT", "x")])
+        con.commit()
+    finally:
+        con.close()
+    m = core.sector_map()
+    assert sorted(m["HDFCBANK"]) == ["Bank", "Financial Services"]
+    assert m["INFY"] == ["IT"]
+
+
+def test_the_sector_and_index_catalogues_are_populated():
+    assert len(core.SECTOR_INDEX_URLS) >= 10
+    assert core.REGIME_INDEX in core.INDEX_PRICE_SYMBOLS

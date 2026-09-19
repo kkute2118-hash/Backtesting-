@@ -197,3 +197,125 @@ fixed level is kept because it is simpler and marginally better.
 
 It beats no filter in 11 of 16 quarters, not 16. This is an edge, not a
 certainty.
+
+
+---
+
+# Addendum — S4 priority in the 3-slot book
+
+Run 2026-09-18, 485 symbols, 2022-06 → 2026-09. S4 exits on a 50 EMA trail,
+S5 on its own state machine. ₹1,00,000, 3 slots, 25% per position.
+
+Five runs differing **only** in which same-day signal takes a free slot:
+
+| Allocation | ROI across 5 runs | Median CAGR | S4 trades taken | Median max DD |
+| --- | --- | --- | --- | --- |
+| First-come (random) | 154 / 52 / 27 / 147 / 52% | 10.3% | 12–21 | −28% |
+| **S4 priority** | 125 / 112 / 78 / 108 / 116% | **19.1%** | **38–53** | −34% |
+
+Median ROI 52% → 112%, and the spread collapses from 27–154% to 78–125%. The
+allocation stops being a lottery. Cost: drawdown worsens (worst run −58%).
+
+Why it works, and why it is not the same mistake as scoring: S4 returned
+**+5.20% per trade at a 57.1% win rate** against S5's **+0.56% at 30.1%**, but
+S5 fires constantly and S4 about 12 times a week, so first-come spent the slots
+on the weaker strategy. This ranks *strategies*, which is measured; it does not
+rank *candidates*, which repeatedly fails.
+
+Implemented as `STRATEGY_SLOT_PRIORITY` in `build_portfolio()`.
+
+## S4 rule-drop test — nothing can be removed for free
+
+Each of S4's six conditions dropped in turn, same exit, same window:
+
+| Variant | Signals | Pool | Win % | PF | vs base |
+| --- | --- | --- | --- | --- | --- |
+| ALL (current S4) | 2,763 | 1.00× | 46.0 | **2.969** | — |
+| drop `close>=20` | 2,824 | 1.02× | 46.4 | 3.104 | +0.134 |
+| drop `vol30` | 2,844 | 1.03× | 45.6 | 2.957 | −0.012 |
+| drop `mrsi>=50` | 2,812 | 1.02× | 45.6 | 2.894 | −0.075 |
+| drop `cross/reclaim` | 7,831 | **2.83×** | 46.8 | 2.913 | −0.057 |
+| drop `mEMA10>=mEMA20` | 3,622 | 1.31× | 45.3 | 2.782 | −0.187 |
+| drop `mom>=20` | 30,921 | **11.2×** | 33.6 | 2.192 | −0.778 |
+
+`mom>=20` is the strategy — dropping it gives 11× the pool but 2025 turns
+losing (PF 0.93). The monthly EMA rule buys only 1.31× for −0.19 PF.
+`cross/reclaim` is the one real candidate (2.83× the pool for −0.057 PF) but
+2022 falls 2.31 → 0.91 and 2024 falls 2.08 → 1.16, so it is not shipped.
+
+**S4's rules are left exactly as they are.**
+
+## Entry timing — waiting for a pullback is worse
+
+| Entry rule | Fill rate | Win % | Avg ret | PF |
+| --- | --- | --- | --- | --- |
+| Enter next bar (current) | 100% | 46.0 | +8.48% | **2.969** |
+| Wait for close within 2% of 10 EMA | 99.6% | 43.5 | +7.48% | 2.805 |
+| Wait for close within 2% of 50 EMA | 48.1% | 30.0 | +2.12% | 2.079 |
+| Touch 10 EMA then close up | 98.8% | 41.8 | +6.78% | 2.566 |
+
+The 10 EMA pullback fills 99.6% of the time, which tells you S4 names are
+already at their 10 EMA when they signal — there is no pullback to wait for.
+The 50 EMA fills half the time and only once the trend has broken.
+
+S4 signals do spike on the first trading day of the month (12.2% of all
+signals, against ~5% for a uniform month) as the monthly candle closes, but
+64% arrive after day 13, because `mmom >= 20` accumulates through the month.
+
+---
+
+# Addendum — market timing, and what the regime label actually was
+
+## The breadth filter does not work
+
+No index prices existed in the store, so a market proxy was built from the
+universe itself: percent of the 485 stocks above their 200/50/20 EMA, advance
+ratio, and an equal-weighted composite. Joined to 204,407 replayed trades.
+
+Pooled, it looks decisive — trades in the top breadth quintile score PF 1.971
+against 0.976 in the low quintile. Within each year it disappears:
+
+| Year | lowest | low | mid | high | highest |
+| --- | --- | --- | --- | --- | --- |
+| 2022 | **3.15** | 1.37 | 1.38 | 0.78 | 0.61 |
+| 2023 | 3.20 | 4.52 | **5.94** | 2.85 | 2.21 |
+| 2024 | 0.71 | 1.08 | 1.08 | 0.90 | 1.19 |
+| 2025 | 0.83 | 0.91 | 0.82 | **1.02** | 0.83 |
+| 2026 | **1.32** | 1.10 | 0.80 | 0.70 | 0.61 |
+
+2022 and 2026 run the *opposite* way and decline monotonically. The pooled
+result is the calendar: 2023-24 averaged 73-82% of stocks above their 200 EMA
+and were the profitable years; 2025-26 averaged 46-50% and were flat. Sorting
+by breadth mostly sorts by year. `pct_above_50` and `adv_pct` behave the same.
+
+**Not shipped.** Breadth is computed and available, but it is not a filter.
+
+## The market regime was one arbitrary stock
+
+`scanner.py` read it as `max(data.values(), key=len)` — whichever single stock
+had the longest history. Every regime label in the database, in every
+fingerprint, and in every regime table quoted during this work, was one
+company. That is why regime never separated anything.
+
+`market_regime_frame()` now prefers the stored `REGIME_INDEX` prices, falls
+back to any stored index, and only then to the longest-history stock — which it
+labels `FALLBACK` so the substitution can never be silent again. Index rows are
+excluded from that fallback.
+
+## Index and sector ingestion — written, NOT run
+
+- `sync_index_history()` stores index OHLC under a `^` prefix so an index can
+  never enter a scan or the breadth calculation as a tradable stock.
+- `dhan_history()` takes `segment`/`instrument`; indices need `IDX_I`/`INDEX`.
+- `dhan_index_map()` reads the master's index segment, which `dhan_map()`
+  filters out by design.
+- `sync_sector_membership()` builds symbol→sector from 14 NSE sector-index
+  constituent CSVs. Membership is many-to-many on purpose.
+- `sector_relative_strength()` ranks sectors against the benchmark over 21/63/
+  126 days, using index prices where available and an equal-weighted composite
+  of members where not.
+
+**None of this has run against the live feeds** — no Dhan credentials and no
+outbound access in the environment it was written in. The two things most
+likely to need adjusting on first run are the index segment spelling in the
+scrip master and the sector CSV URLs.

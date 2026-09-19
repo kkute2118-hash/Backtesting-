@@ -1,0 +1,70 @@
+# Index prices and sector membership.
+#
+# Deliberately separate from "Build candle history": that job walks thousands
+# of symbols at Dhan's ~5 requests/second and takes hours, while this is
+# fourteen index histories and fourteen constituent lists — minutes. Keeping
+# them apart means sector strength can be refreshed weekly without touching
+# the candle store, and a sector-list fetch does not need a five-hour slot.
+#
+# Sector membership needs outbound access only. Index prices need Dhan; when
+# it is not configured the job still fetches membership and says so, because a
+# sector ranking built from member composites is useful on its own.
+name: Sync index and sector data
+
+on:
+  workflow_dispatch:
+    inputs:
+      index_years:
+        description: 'Years of index history (5 matches the stock store)'
+        required: true
+        default: '5'
+        type: string
+  schedule:
+    # Sunday 02:00 UTC. Constituent lists change on index review, not daily.
+    - cron: '0 2 * * 0'
+
+concurrency:
+  # One writer at a time: this, the daily job and the history build all commit
+  # the same SQLite file to the same backup branch.
+  group: dhan-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Sync index prices and sector membership
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN: ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # github.token, not a PAT: guaranteed write by contents:write above.
+          # See the same note in build-history.yml.
+          GH_BACKUP_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+          INDEX_YEARS: ${{ inputs.index_years || '5' }}
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+        run: python daily_job.py market-data
+
+      - name: Push the database to the backup branch
+        env:
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+          GH_PUSH_TOKEN: ${{ github.token }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+        run: ./scripts/push_backup.sh

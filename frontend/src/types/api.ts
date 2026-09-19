@@ -371,3 +371,17 @@ export interface AppConfig {
   forward_gate_default: number;
   market: MarketStatus;
 }
+
+/** Which sectors are leading, and how that was measured. */
+export interface SectorStrength {
+  ready: boolean;
+  reason?: string;
+  sectors: Row[];
+  benchmark: string;
+  benchmark_priced?: boolean;
+  lookbacks?: number[];
+  symbols_mapped?: number;
+  as_of?: string | null;
+  /** Set when sector returns are composites rather than real index prices. */
+  note?: string | null;
+}
