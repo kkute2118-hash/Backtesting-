@@ -652,3 +652,32 @@ sample. Treat it as promising, not settled.
   slots.
 * If the wider universe is wanted for other reasons, gate it on turnover, not on count:
   the evidence supports roughly Rs 40 cr a day as a floor.
+
+---
+
+# Addendum 5: the setup that was kept
+
+Everything above is now wired in. The configuration and its caveats are written
+up separately in **`research/LIVE_SETUP.md`**; this records what changed in code.
+
+* `ENTRY_FILTER_BY_STRATEGY` - `{1,2,3,5: "atr", 4: "sector"}`. Per strategy, not
+  one rule for all, because S4 is the only strategy the sector rank works for and
+  the only one ATR does nothing for.
+* `ENTRY_MIN_ATR_PCT = 4.0`, `ENTRY_SECTOR_RANK_MAX = 3`,
+  `ENTRY_MIN_TURNOVER_CR = 40.0` (a floor, not a band).
+* `entry_filter_verdict()` returns `(passed, reason, metrics)` and **fails on a
+  NaN reading** - a missing measurement is not evidence that a signal is one of
+  the good ones.
+* `current_sector_ranks()` defaults to `source="index"`, so an inferred sector
+  can never satisfy S4's rule.
+* `scan_dataset` applies it after the signal and before scoring, counts
+  rejections in `stats["entry_filter_reject"]`, and puts `ATR %`,
+  `Turnover Cr`, `Sector Rank` and `Entry Filter` on every row so the app shows
+  why a name is there.
+* `persist_scanner_signals(min_score=...)` and `step_add(min_score=...)` accept
+  the argument and ignore it. Everything that passed the filter is selected.
+* `DEFAULT_STRATEGIES = (4, 5)`.
+
+End-to-end on the live database, one scan date, all five strategies selected:
+**181 signals before the filter, 25 after.** Scores as low as 39 now pass, which
+is the point - the score was never the thing that predicted anything.

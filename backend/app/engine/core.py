@@ -1684,7 +1684,8 @@ def sector_map(source=None):
     return out
 
 
-def sector_relative_strength(data=None, lookbacks=(21, 63, 126), benchmark="NIFTY 500"):
+def sector_relative_strength(data=None, lookbacks=(21, 63, 126), benchmark="NIFTY 500",
+                             source=None):
     """Which sectors are outperforming the benchmark, over several windows.
 
     Uses stored index prices where the sector has its own index, and falls back
@@ -1696,7 +1697,7 @@ def sector_relative_strength(data=None, lookbacks=(21, 63, 126), benchmark="NIFT
     bench = load_index_history(benchmark)
     rows = []
     members = {}
-    for sym, secs in sector_map().items():
+    for sym, secs in sector_map(source=source).items():
         for sec in secs:
             members.setdefault(sec, []).append(sym)
 
@@ -7067,7 +7068,13 @@ LEGACY_MIN_SCORE = 85
 # what exists; they happen to be equal now that S5 is live, and the split is
 # what let S5 sit implemented-but-off while its evidence run was pending.
 IMPLEMENTED_STRATEGIES = (1, 2, 3, 4, 5)
-DEFAULT_STRATEGIES = (1, 2, 3, 4, 5)
+# S4 + S5 is the measured best portfolio, not a shortlist of favourites: with
+# the entry evidence filter and Rs 1,00,000 over 3 slots it returned Rs 3.54
+# lakh in 4.29 years (34.2% CAGR, worst of 12 seeds still 24.8%, CAGR/maxDD
+# 1.26) against Rs 2.39 lakh / 22.5% / 0.66 for all five together
+# (research/SECTOR_TIMING_FINDINGS.md, addendum 4). S1-S3 remain implemented
+# and selectable; they are simply not what an unconfigured caller should get.
+DEFAULT_STRATEGIES = (4, 5)
 
 # The labels written into forward_tests.strategy that the forward tracker will
 # accept and then keep updating. S5_POCKETPIVOT joined this list only after its
@@ -11675,6 +11682,114 @@ def load_scan_dataset(tickers, min_bars=260, lookback_days=1000):
     return data
 
 
+# ---------------------------------------------------------------------------
+# Entry evidence filter (EVIDENCE_DERIVED)
+#
+# What replaced the score gate. The score was measured as having no
+# relationship to outcome, so gating on it was gating on nothing; these two
+# rules are the only per-stock conditions that survived a per-year control plus
+# a permutation null across 228,885 backtested signals
+# (research/SECTOR_TIMING_FINDINGS.md, addenda 1 and 4).
+#
+#   ATR(14) >= 4% of close   S5 beats the rest in 5 years of 5, p(sign)=0.031,
+#                            p(mean)<0.0001. S1/S2/S3 win 3 of 5 years with
+#                            p(mean)<0.001 - real on average, not dependable
+#                            year to year. S4 gains nothing from it (+0.19,
+#                            p=0.40), so S4 does not use it.
+#   sector rank <= 3         S4 only: the leading-sector bucket beat the rest
+#                            in 4 years of 4, p(mean)=0.0028. Requires REAL
+#                            sector-index membership - correlation-inferred
+#                            sectors were measured and do not carry the effect
+#                            (addendum 2), hence source="index" below.
+#   turnover >= Rs 40 cr     A floor, not a band. Returns fall monotonically
+#                            with liquidity (PF 1.56 -> 1.19 across quintiles)
+#                            and the ATR filter INVERTS in the least liquid
+#                            quintile (-0.49, PF 1.11 vs 1.23). The Rs 40-250
+#                            cr band scored marginally better still but its
+#                            upper edge was read off the same sample, so only
+#                            the floor is applied.
+#
+# Rejected and deliberately absent: the marking/score gate, any market or index
+# demand-zone gate (negative for all five strategies), sector-at-support (adds
+# nothing on top of ATR), and inferred sectors.
+ENTRY_MIN_ATR_PCT = 4.0
+ENTRY_MIN_TURNOVER_CR = 40.0
+ENTRY_SECTOR_RANK_MAX = 3
+ENTRY_SECTOR_LOOKBACK = 21
+
+# Which rule each strategy gets. Not one rule for all: S4 is the only strategy
+# the sector rank works for and the only one ATR does nothing for.
+ENTRY_FILTER_BY_STRATEGY = {1: "atr", 2: "atr", 3: "atr", 4: "sector", 5: "atr"}
+APPLY_ENTRY_EVIDENCE_FILTER = True
+
+
+def current_sector_ranks(data=None, lookback=ENTRY_SECTOR_LOOKBACK, source="index"):
+    """{sector: rank} by relative strength vs the benchmark, 1 = strongest.
+
+    source="index" by default: only real sector-index membership feeds the
+    composites, because inferred membership was measured not to carry the
+    effect the rank is used for.
+    """
+    rs = sector_relative_strength(data=data, lookbacks=(lookback,), source=source)
+    key = f"vs {REGIME_INDEX} {lookback}d"
+    if rs.empty or key not in rs.columns:
+        return {}
+    ok = rs[rs[key].notna()].sort_values(key, ascending=False)
+    return {str(r.Sector): i + 1 for i, r in enumerate(ok.itertuples())}
+
+
+def _entry_turnover_cr(frame, bars=20):
+    """Median daily traded value over `bars`, in Rs crore."""
+    try:
+        tail = frame.tail(bars)
+        v = pd.to_numeric(tail["close"], errors="coerce") * pd.to_numeric(tail["volume"], errors="coerce")
+        m = float(v.median())
+        return m / 1e7 if np.isfinite(m) else float("nan")
+    except Exception:
+        return float("nan")
+
+
+def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
+                         sector_lookup=None, ticker=None, apply_filter=None):
+    """Does this signal pass the evidence filter? -> (passed, reason, metrics).
+
+    A NaN reading fails rather than passes. The filter exists to remove
+    signals, and a missing measurement is not evidence that the signal is one
+    of the good ones.
+    """
+    if apply_filter is None:
+        apply_filter = APPLY_ENTRY_EVIDENCE_FILTER
+    z = features.iloc[-1]
+    close = float(z.get("close", np.nan))
+    atr = float(z.get("atr14", np.nan))
+    atr_pct = atr / close * 100 if np.isfinite(atr) and np.isfinite(close) and close else np.nan
+    turnover = _entry_turnover_cr(frame)
+    rank = np.nan
+    if sector_ranks and sector_lookup is not None and ticker is not None:
+        secs = sector_lookup.get(str(ticker).replace(".NS", "").upper(), [])
+        vals = [sector_ranks[s] for s in secs if s in sector_ranks]
+        if vals:
+            rank = float(min(vals))
+    metrics = {"atr_pct": atr_pct, "turnover_cr": turnover, "sector_rank": rank}
+    if not apply_filter:
+        return True, "filter off", metrics
+    if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
+        got = f"{turnover:.0f}" if np.isfinite(turnover) else "unknown"
+        return False, f"turnover Rs {got} cr < {ENTRY_MIN_TURNOVER_CR:.0f} cr", metrics
+    rule = ENTRY_FILTER_BY_STRATEGY.get(int(strategy), "atr")
+    if rule == "sector":
+        if not np.isfinite(rank):
+            return False, "no real sector-index membership", metrics
+        if rank > ENTRY_SECTOR_RANK_MAX:
+            return False, f"sector rank {rank:.0f} > {ENTRY_SECTOR_RANK_MAX}", metrics
+        return True, f"sector rank {rank:.0f}", metrics
+    if not np.isfinite(atr_pct):
+        return False, "ATR unavailable", metrics
+    if atr_pct < ENTRY_MIN_ATR_PCT:
+        return False, f"ATR {atr_pct:.1f}% < {ENTRY_MIN_ATR_PCT:.1f}%", metrics
+    return True, f"ATR {atr_pct:.1f}%", metrics
+
+
 def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     """The scan itself: every stock against every selected strategy.
 
@@ -11692,6 +11807,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     counts.setdefault("signals", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
     counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
     counts.setdefault("safety_reject", 0)
+    counts.setdefault("entry_filter_reject", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
 
     # Shared universe/safety/liquidity gate, applied to EVERY strategy (S1-S4)
     # before any strategy_signal() is evaluated. No strategy can surface a
@@ -11701,6 +11817,19 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     counts["safety_gate_audit"] = safety_gate_audit
     counts["safety_gate_excluded"] = max(0, len(data) - len(clean_data))
     data = clean_data
+
+    # Sector ranks are computed ONCE for the whole scan, not per stock: the
+    # rank is a property of the day, and recomputing it per ticker would be
+    # 500 identical index reads.
+    sector_ranks = {}
+    sector_lookup = {}
+    if APPLY_ENTRY_EVIDENCE_FILTER and 4 in {int(x) for x in strategies}:
+        try:
+            sector_ranks = current_sector_ranks(data=data)
+            sector_lookup = sector_map(source="index")
+        except Exception:
+            sector_ranks, sector_lookup = {}, {}
+    counts["sector_ranks"] = sector_ranks
 
     ml_model = train_win_probability_model("INDIA")
     # Exposed so a caller can report on the model without re-training it
@@ -11739,6 +11868,13 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             if signal:
                 counts["signals"][s] = counts["signals"].get(s, 0) + 1
             if not signal:
+                continue
+
+            passed, why, ev = entry_filter_verdict(
+                df, f, s, sector_ranks=sector_ranks, sector_lookup=sector_lookup,
+                ticker=ticker)
+            if not passed:
+                counts["entry_filter_reject"][s] = counts["entry_filter_reject"].get(s, 0) + 1
                 continue
 
             score, parts = final_setup_score(f, s, regime, safe)
@@ -11803,6 +11939,13 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 "Trend Score": parts["Trend"],
                 "Safety Score": safe,
                 "Safety Flags": ", ".join(flags),
+                # The readings the entry filter actually admitted this row on,
+                # so the app shows why a name is here rather than a bare score.
+                "ATR %": (round(ev["atr_pct"], 2) if np.isfinite(ev["atr_pct"]) else None),
+                "Turnover Cr": (round(ev["turnover_cr"], 1)
+                                if np.isfinite(ev["turnover_cr"]) else None),
+                "Sector Rank": (int(ev["sector_rank"]) if np.isfinite(ev["sector_rank"]) else None),
+                "Entry Filter": why,
             }
             win_prob = ml_win_probability(ml_model, row)
             if pd.isna(win_prob):
@@ -11816,10 +11959,16 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     return pd.DataFrame(rows)
 
 
-def persist_scanner_signals(result, min_score, signal_date=None):
-    """Store every qualified signal; mark only those at/above the gate as
-    selected for forward testing. Keyed on date|symbol|strategy, so re-running
-    a scan on the same day updates rows instead of duplicating them."""
+def persist_scanner_signals(result, min_score=None, signal_date=None):
+    """Store every qualified signal and select all of them for forward testing.
+
+    `min_score` is accepted and ignored. Everything in `result` has already
+    passed the entry evidence filter, which is what selection now means; the
+    score has no demonstrated relationship to outcome, so re-filtering on it
+    here would drop signals for no measured reason. The parameter stays in the
+    signature so existing callers keep working, and the stored score stays a
+    displayed number rather than a gate.
+    """
     if result is None or result.empty:
         return 0
     signal_date = str(signal_date or market_today())
@@ -11849,7 +11998,7 @@ def persist_scanner_signals(result, min_score, signal_date=None):
                 float(r.get("Footprint Score", r.get("Footprint", 0))),
                 float(r.get("Strategy Score", 0)), float(r.get("Entry Quality", 0)),
                 float(r.get("Relative Strength", 0)), str(r.get("Safety Flags", "")),
-                int(float(r.get("Score", 0)) >= min_score)
+                1
             ))
         con.commit()
     finally:

@@ -779,3 +779,103 @@ def test_passing_no_urls_means_none_rather_than_the_whole_catalogue(seeded_db, m
     monkeypatch.setattr(core.requests, "get", boom)
     report = core.sync_sector_membership(urls={}, industry_urls={})
     assert report["_total_rows"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The entry evidence filter - what replaced the score gate.
+# research/SECTOR_TIMING_FINDINGS.md addenda 1 and 4.
+# ---------------------------------------------------------------------------
+
+def _filter_frame(close=100.0, volume=10_000_000, bars=30):
+    """close x volume = Rs 100 cr of daily turnover by default, over the floor."""
+    idx = pd.bdate_range("2024-01-01", periods=bars)
+    return pd.DataFrame({"close": [close] * bars, "volume": [volume] * bars,
+                         "open": [close] * bars, "high": [close] * bars,
+                         "low": [close] * bars}, index=idx)
+
+
+def _filter_features(close=100.0, atr=5.0):
+    return pd.DataFrame({"close": [close], "atr14": [atr]})
+
+
+def test_a_quiet_stock_fails_the_atr_rule():
+    frame = _filter_frame()
+    ok, why, m = core.entry_filter_verdict(frame, _filter_features(atr=2.0), 1)
+    assert not ok and "ATR" in why
+    assert m["atr_pct"] == pytest.approx(2.0)
+
+
+def test_a_volatile_liquid_stock_passes():
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=5.0), 1)
+    assert ok and "ATR 5.0%" in why
+
+
+def test_the_turnover_floor_rejects_an_illiquid_name_however_volatile():
+    """Below the floor the ATR edge inverts (PF 1.11 against 1.23), so a high
+    ATR there is a reason to skip, not a reason to take."""
+    frame = _filter_frame(close=100.0, volume=100_000)          # Rs 1 cr/day
+    ok, why, _ = core.entry_filter_verdict(frame, _filter_features(atr=9.0), 1)
+    assert not ok and "turnover" in why
+
+
+def test_s4_is_judged_on_sector_rank_not_atr():
+    """ATR does nothing for S4 (+0.19, p=0.40); the top-3 sector rank won 4
+    years of 4. Applying the wrong rule to S4 would throw the edge away."""
+    frame, feats = _filter_frame(), _filter_features(atr=1.0)   # ATR far too low
+    ranks, lookup = {"IT": 1, "Auto": 7}, {"INFY": ["IT"], "TATAMOTORS": ["Auto"]}
+    ok, why, _ = core.entry_filter_verdict(frame, feats, 4, sector_ranks=ranks,
+                                           sector_lookup=lookup, ticker="INFY")
+    assert ok, "a low-ATR S4 signal in the leading sector must still pass"
+    assert "sector rank 1" in why
+    bad, why2, _ = core.entry_filter_verdict(frame, feats, 4, sector_ranks=ranks,
+                                             sector_lookup=lookup, ticker="TATAMOTORS")
+    assert not bad and "sector rank 7" in why2
+
+
+def test_s4_without_a_real_sector_is_rejected_not_waved_through():
+    """Correlation-inferred sectors were measured not to carry the effect, so
+    'no sector' has to fail rather than fall back to the ATR rule."""
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=9.0), 4,
+                                           sector_ranks={"IT": 1}, sector_lookup={},
+                                           ticker="UNKNOWN")
+    assert not ok and "sector" in why
+
+
+def test_a_missing_reading_fails_rather_than_passes():
+    ok, _, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=float("nan")), 1)
+    assert not ok
+
+
+def test_the_filter_can_be_turned_off_for_measurement():
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(close=100.0, volume=100),
+                                           _filter_features(atr=0.1), 1, apply_filter=False)
+    assert ok and why == "filter off"
+
+
+def test_each_strategy_has_a_rule_and_only_s4_uses_the_sector_one():
+    assert set(core.ENTRY_FILTER_BY_STRATEGY) == set(core.IMPLEMENTED_STRATEGIES)
+    sector_rules = {s for s, r in core.ENTRY_FILTER_BY_STRATEGY.items() if r == "sector"}
+    assert sector_rules == {4}
+
+
+def test_the_default_portfolio_is_the_measured_best_one():
+    assert tuple(core.DEFAULT_STRATEGIES) == (4, 5)
+    for s in core.DEFAULT_STRATEGIES:
+        assert s in core.IMPLEMENTED_STRATEGIES
+
+
+def test_persisting_signals_no_longer_gates_on_the_score(seeded_db):
+    """The score has no demonstrated relationship to outcome, so every scanned
+    row is selected for forward testing regardless of it."""
+    result = pd.DataFrame([
+        {"Ticker": "AAA", "Strategy": "S1", "Score": 12.0, "Entry": 100.0, "SL 7%": 93.0},
+        {"Ticker": "BBB", "Strategy": "S4_SEPA", "Score": 99.0, "Entry": 50.0, "SL 7%": 46.5},
+    ])
+    core.persist_scanner_signals(result, min_score=95, signal_date="2024-05-01")
+    con = core._db()
+    try:
+        rows = dict(con.execute("SELECT symbol, selected_for_forward FROM scanner_signals "
+                                "WHERE signal_date='2024-05-01'").fetchall())
+    finally:
+        con.close()
+    assert rows == {"AAA": 1, "BBB": 1}, rows
