@@ -748,18 +748,51 @@ def test_real_index_membership_is_not_displaced_by_the_industry_column(seeded_db
     assert core.sector_map(source="industry") == {}
 
 
-def test_an_industry_with_no_sector_index_is_left_unclassified(seeded_db, monkeypatch):
-    """Capital Goods has no index to rank it against. Forcing it into the
-    nearest-looking bucket would put the stock under a rank that does not
-    describe it."""
+def test_an_industry_with_no_nse_index_gets_its_own_sector(seeded_db, monkeypatch):
+    """Capital Goods has no NSE sector index, but its members define a
+    perfectly good composite of their own. What must not happen is filing them
+    under somebody else's index - ACC under Metal would carry a rank
+    describing something it does not move with. Tiny buckets are handled by
+    SECTOR_MIN_MEMBERS_TO_RANK at ranking time, not by dropping them here."""
     _clear_sectors()
     broad_url = "http://broad/500.csv"
     _stub_csv(monkeypatch, {broad_url: "Industry,Symbol\nCapital Goods,ABB\nRealty,DLF\n"})
     report = core.sync_sector_membership(urls={}, industry_urls={"NIFTY 500": broad_url})
-    assert report["NIFTY 500"]["backfilled"] == 1
+    assert report["NIFTY 500"]["backfilled"] == 2
     m = core.sector_map()
-    assert "ABB" not in m
+    assert m["ABB"] == ["Capital Goods"]
     assert m["DLF"] == ["Realty"]
+
+
+def test_every_nse_industry_maps_somewhere(seeded_db):
+    """A None here means those stocks silently have no sector. The rule is now
+    that every industry gets one; the member floor decides what is rankable."""
+    assert all(v for v in core.INDUSTRY_TO_SECTOR.values()), \
+        [k for k, v in core.INDUSTRY_TO_SECTOR.items() if not v]
+    assert core.SECTOR_MIN_MEMBERS_TO_RANK >= 5
+
+
+def test_a_sector_with_too_few_members_is_not_ranked(seeded_db):
+    """Two stocks wearing an industry label are not a sector, and ranking them
+    would put a stock's own noise into the filter S4 trades on."""
+    _clear_sectors()
+    con = core._db()
+    try:
+        con.executemany("INSERT OR REPLACE INTO sector_membership"
+                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)",
+                        [(f"BIG{i}", "Chemicals", "x", "industry") for i in range(6)]
+                        + [("TINY1", "Forest Materials", "x", "industry"),
+                           ("TINY2", "Forest Materials", "x", "industry")])
+        con.commit()
+    finally:
+        con.close()
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    rng = np.random.default_rng(0)
+    data = {s: pd.DataFrame({"close": 100 * np.cumprod(1 + rng.normal(0, .01, 300))}, index=idx)
+            for s in [f"BIG{i}" for i in range(6)] + ["TINY1", "TINY2"]}
+    out = core.sector_relative_strength(data=data)
+    sectors = set(out["Sector"]) if not out.empty else set()
+    assert "Forest Materials" not in sectors, "a 2-member bucket must not be ranked"
 
 
 def test_an_unrecognised_industry_string_is_reported_not_swallowed(seeded_db, monkeypatch):

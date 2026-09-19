@@ -107,22 +107,34 @@ BROAD_INDEX_INDUSTRY_URLS = {
     "NIFTY SMALLCAP 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
 }
 
-# NSE's Industry strings mapped onto the 14 sectors we can price. Anything not
-# listed here (Services, Diversified, Construction and so on) has no sector
-# index to rank it against, so it stays unclassified rather than being forced
-# into the nearest-looking bucket.
+# NSE's Industry strings mapped onto a sector.
+#
+# Originally only the 14 industries with their own NSE sector index were
+# mapped and the rest were left unclassified, on the reasoning that a sector
+# with no index cannot be ranked. That was wrong: a sector with no index is
+# already priced by an equal-weighted composite of its members (see
+# sector_relative_strength), and cement or telecom names define a perfectly
+# good composite of their own. What they must NOT do is get filed under
+# somebody else's index - putting ACC under Metal gives it a rank describing
+# something it does not move with.
+#
+# So every industry now maps to a sector, and the ones with no NSE index get
+# their own, priced from their own members. A sector needs
+# SECTOR_MIN_MEMBERS_TO_RANK members before it is ranked at all, which is what
+# drops the genuinely unusable buckets (Diversified, Forest Materials) rather
+# than a hand-picked list.
 INDUSTRY_TO_SECTOR = {
     "AUTOMOBILE AND AUTO COMPONENTS": "Auto",
-    "CAPITAL GOODS": None,
-    "CHEMICALS": None,
-    "CONSTRUCTION": None,
-    "CONSTRUCTION MATERIALS": None,
+    "CAPITAL GOODS": "Capital Goods",
+    "CHEMICALS": "Chemicals",
+    "CONSTRUCTION": "Construction",
+    "CONSTRUCTION MATERIALS": "Construction Materials",
     "CONSUMER DURABLES": "Consumer Durables",
-    "CONSUMER SERVICES": None,
-    "DIVERSIFIED": None,
+    "CONSUMER SERVICES": "Consumer Services",
+    "DIVERSIFIED": "Diversified",
     "FAST MOVING CONSUMER GOODS": "FMCG",
     "FINANCIAL SERVICES": "Financial Services",
-    "FOREST MATERIALS": None,
+    "FOREST MATERIALS": "Forest Materials",
     "HEALTHCARE": "Healthcare",
     "INFORMATION TECHNOLOGY": "IT",
     "MEDIA ENTERTAINMENT & PUBLICATION": "Media",
@@ -130,10 +142,14 @@ INDUSTRY_TO_SECTOR = {
     "OIL GAS & CONSUMABLE FUELS": "Oil Gas",
     "POWER": "Energy",
     "REALTY": "Realty",
-    "SERVICES": None,
-    "TELECOMMUNICATION": None,
-    "TEXTILES": None,
+    "SERVICES": "Services",
+    "TELECOMMUNICATION": "Telecom",
+    "TEXTILES": "Textiles",
 }
+
+# Below this a sector's composite is one or two stocks pretending to be an
+# industry, and its "rank" is noise. Ranked sectors must clear it.
+SECTOR_MIN_MEMBERS_TO_RANK = 5
 
 # Index OHLC to store. The key is the name the engine uses; the value is the
 # symbol as Dhan's scrip master spells it in its INDEX segment. Stored under an
@@ -1709,6 +1725,10 @@ def sector_relative_strength(data=None, lookbacks=(21, 63, 126), benchmark="NIFT
 
     bench_r = {n: ret(bench.close, n) if not bench.empty else np.nan for n in lookbacks}
     for sector, syms in sorted(members.items()):
+        # Too few members and the "sector" is one or two stocks wearing an
+        # industry label; its rank would be that stock's noise.
+        if len(syms) < SECTOR_MIN_MEMBERS_TO_RANK:
+            continue
         idx_name = f"NIFTY {sector.upper()}"
         px = load_index_history(idx_name)
         source = "index"
@@ -1716,7 +1736,7 @@ def sector_relative_strength(data=None, lookbacks=(21, 63, 126), benchmark="NIFT
             if not data:
                 continue
             frames = [data[s].close.pct_change() for s in syms if s in data and data[s] is not None]
-            if not frames:
+            if len(frames) < SECTOR_MIN_MEMBERS_TO_RANK:
                 continue
             comp = (1 + pd.concat(frames, axis=1).mean(axis=1)).cumprod()
             px = pd.DataFrame({"close": comp})
