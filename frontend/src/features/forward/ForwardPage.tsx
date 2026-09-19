@@ -197,11 +197,32 @@ export function ForwardPage() {
       value: (row) => s(row, "strategy") },
     { key: "score", header: "Score", align: "right",
       render: (row) => <ScoreBar score={n(row, "score")} />, value: (row) => n(row, "score") },
-    { key: "selected_for_forward", header: "At gate",
-      render: (row) => n(row, "selected_for_forward")
-        ? <Badge tone="up">Recorded</Badge>
-        : <span className="text-2xs text-faint">Below gate</span>,
-      value: (row) => n(row, "selected_for_forward") },
+    // Three different facts, not one: the filter rejected it, or it qualified
+    // and the book already held that stock, or it became a position. Collapsing
+    // them into "recorded / not recorded" is what hid the duplicate enrolments.
+    { key: "outcome", header: "Outcome",
+      render: (row) => {
+        if (n(row, "selected_for_forward")) return <Badge tone="up">Traded</Badge>;
+        if (n(row, "passed_filter") === 0) return <Badge tone="neutral">Filtered</Badge>;
+        return <Badge tone="warn">Not taken</Badge>;
+      },
+      value: (row) => (n(row, "selected_for_forward") ? 2 : n(row, "passed_filter") === 0 ? 0 : 1) },
+    { key: "reason", header: "Why",
+      render: (row) => (
+        <span className="text-2xs text-muted">
+          {s(row, "skip_reason") || s(row, "filter_reason") || "—"}
+        </span>
+      ),
+      value: (row) => s(row, "skip_reason") || s(row, "filter_reason") },
+    { key: "atr_pct", header: "ATR %", align: "right",
+      render: (row) => n(row, "atr_pct")?.toFixed(2) ?? "—",
+      value: (row) => n(row, "atr_pct") },
+    { key: "turnover_cr", header: "Turnover Cr", align: "right",
+      render: (row) => n(row, "turnover_cr")?.toFixed(0) ?? "—",
+      value: (row) => n(row, "turnover_cr") },
+    { key: "sector_rank", header: "Sector rank", align: "right",
+      render: (row) => n(row, "sector_rank")?.toFixed(0) ?? "—",
+      value: (row) => n(row, "sector_rank") },
     { key: "entry", header: "Entry", align: "right", render: (row) => inr(n(row, "entry")),
       value: (row) => n(row, "entry") },
     { key: "regime", header: "Regime",
@@ -339,8 +360,9 @@ export function ForwardPage() {
             getRowId={(row) => s(row, "signal_key") || String(row.signal_id)}
             exportName="scanner-signals"
             emptyTitle="No signals recorded"
-            emptyMessage="Every qualifying setup a scan produces is recorded here, whether or not
-              it reached the forward-test gate."
+            emptyMessage="Every signal every strategy produces is recorded here - traded or
+              not, filtered or not. One stock is traded at most once, but each signal it
+              gave is kept."
           />
         )}
       </Card>
