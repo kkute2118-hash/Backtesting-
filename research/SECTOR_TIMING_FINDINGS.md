@@ -402,3 +402,115 @@ is the reason to expect it might not.
   universe unfiltered.
 * Run the sector sync again to pick up the Industry backfill, then re-measure - split by
   `source`, exactly as this addendum splits known from inferred.
+
+---
+
+# Addendum 3: gating every strategy on a market/sector demand zone
+
+Proposal: drop the marking system for all five strategies and instead take a trade only
+when the sector is at support and NIFTY / NIFTY 500 is in a demand zone.
+
+**Half of it is right.** Dropping the marking system is supported - it was already measured
+as not separating winners from losers, and every table in this document ignores it.
+
+**The other half is the worst filter tested in this whole study.** It is negative for all
+five strategies, it is negative in almost every year, and it costs about half the capital.
+
+## The gates as defined
+
+* **Sector at support** - the stock's own sector index within 3% of its 50 EMA, or in the
+  bottom 40% of its 60-day range. Real index membership only (Addendum 2).
+* **Market demand zone** - NIFTY 500 above a rising 200 EMA (so: an uptrend) AND either at
+  or below its 50 EMA or in the bottom 40% of its 60-day range (so: pulled back into
+  support). True on 269 of 1,241 days, 21.7%.
+
+## Result, by strategy, on the live exit rules
+
+Each cell is the gated set against the same strategy's ungated trades.
+
+| strategy | no gate PF | market DZ | sector support | DZ + sector support | years won (DZ+sector) |
+|---|---|---|---|---|---|
+| S1 | 1.33 | 1.05 (-1.78) | 1.32 (-0.08) | 1.12 (-1.07) | 1/5 |
+| S2 | 1.44 | **0.61** (-5.12) | 1.27 (-0.94) | **0.62** (-4.45) | 0/4 |
+| S3 | 1.37 | 1.09 (-1.82) | 1.55 (+1.15) | 1.28 (-0.43) | 3/5 |
+| S4 | 1.63 | 1.19 (-2.16) | 1.75 (+0.43) | n=38, too few | - |
+| S5 | 2.06 | 1.29 (-2.63) | 1.62 (-1.90) | 1.50 (-1.86) | 1/5 |
+
+The market demand zone is negative for **every** strategy. S2 under it has a profit factor
+of 0.61 - it loses money outright. Stacking the sector condition on top does not repair it.
+
+## Why it fails - the state predicts a weaker market, not a stronger one
+
+Forward NIFTY 500 return after each state:
+
+| state | days | +20d | +60d | +120d |
+|---|---|---|---|---|
+| in the demand zone | 269 | **-0.25%** | **-0.51%** | +1.67% |
+| not in the demand zone | 972 | +1.04% | +3.20% | +6.02% |
+| 5%+ off the 1-year high | 495 | +1.52% | +3.56% | +6.57% |
+| not 5%+ off the high | 746 | +0.26% | +1.60% | +4.05% |
+
+"Uptrend that has pulled back to support" is, in this sample, a description of an index
+that has just stopped going up. All five strategies are breakout/momentum systems - they
+need the index to rise *after* entry. The gate systematically buys into the flat patch.
+
+The reverse state - the market already 5%+ off its high - is followed by the strongest
+forward returns. It also shows 4/5 years for S1, S2 and S3. But a circular-shift null
+(400 shifts, preserving how persistent the state is) puts it at p(sign) 0.28 / 0.14 / 0.27
+and p(mean) 0.050 / 0.165 / 0.028, which does not survive a best-of-5 adjustment, and it
+does nothing for S4 or S5 (1/4 and 3/5). **The direction is interesting; it is not
+established. Do not trade it.**
+
+## ROI on Rs 1,00,000 - 3 slots, 25% per position, no score gate anywhere
+
+### All five strategies pooled, as proposed
+
+| portfolio | signals | taken | win% | final Rs | CAGR% | maxDD% | CAGR/DD |
+|---|---|---|---|---|---|---|---|
+| no gate at all | 228,885 | 107 | 33.5 | 1,75,554 | 14.0 | -21.4 | 0.65 |
+| market demand zone only | 61,650 | 53 | 30.6 | **1,09,353** | **2.1** | -16.4 | 0.13 |
+| sector at support only | 63,852 | 86 | 35.6 | 1,60,062 | 11.6 | -21.2 | 0.55 |
+| **THE PROPOSAL: DZ + sector support** | 22,067 | 44 | 34.9 | **1,20,538** | **4.5** | -18.8 | 0.24 |
+| ... + top-3 sector rank | 3,402 | 44 | 26.3 | **98,703** | **-0.3** | -27.1 | -0.01 |
+
+The proposal turns Rs 1.76 lakh into Rs 1.21 lakh. Adding the sector rank on top takes it
+below the starting capital.
+
+### S4 + S5 only
+
+| portfolio | signals | taken | win% | final Rs | CAGR% | maxDD% | CAGR/DD |
+|---|---|---|---|---|---|---|---|
+| no gate | 27,241 | 226 | 37.2 | 1,79,148 | 14.6 | -24.5 | 0.59 |
+| **top-3 real sector** (best so far) | 2,514 | 140 | 44.5 | **2,11,684** | **19.1** | -16.6 | **1.15** |
+| market demand zone only | 6,805 | 111 | 36.8 | 1,30,124 | 6.3 | -20.5 | 0.31 |
+| THE PROPOSAL: DZ + sector support | 2,289 | 130 | 33.6 | **1,04,774** | **1.1** | -16.6 | 0.07 |
+| top-3 real sector + market DZ | 565 | 76 | 34.0 | 1,06,676 | 1.5 | -13.5 | 0.11 |
+
+The last row is the important one: bolting the market gate onto the **one filter that
+works** collapses it from 19.1% CAGR to 1.5%. It halves the trades taken (140 -> 76) and
+removes exactly the stretches when the market trends.
+
+## What does deliver fewer, cleaner trades
+
+| portfolio | signals | taken | win% | final Rs | CAGR% | maxDD% | CAGR/DD |
+|---|---|---|---|---|---|---|---|
+| all 5, no gate | 228,885 | 107 | 33.5 | 1,75,554 | 14.0 | -21.4 | 0.65 |
+| **all 5, ATR >= 4%** | 52,096 | 152 | 35.9 | **2,60,308** | **25.0** | -25.6 | 0.97 |
+| **S4+S5, top-3 real sector** | 2,514 | 140 | 44.5 | **2,11,684** | 19.1 | **-16.6** | **1.15** |
+| S4+S5, top-3 sector + ATR >= 4% | 425 | 118 | 42.9 | 1,76,066 | 14.1 | -22.2 | 0.64 |
+| S4/S5 top-3 sector + S1/S2/S3 ATR>=4% | 47,960 | 156 | 34.0 | 2,00,947 | 17.7 | -31.6 | 0.56 |
+
+Two filters have survived nulls in this study and both are **per-stock**, not market-wide:
+ATR >= 4% (highest return) and top-3 sector rank for S4/S5 (best risk-adjusted). Stacking
+them on each other is worse than either alone - 425 signals is past the point where
+filtering helps.
+
+## Conclusion
+
+* **Remove the marking system - yes.** Nothing here depends on it.
+* **Do not gate on a market or index demand zone.** It is negative for all five strategies,
+  it predicts weaker forward returns, and it destroys the one filter that works.
+* Filter per stock, not per market day. Selecting *which* stock to trade has worked;
+  selecting *when the market is allowed to trade* has not, in any form tested - 50 EMA
+  proximity, 200 EMA proximity, swing-low proximity, range position, drawdown, or the
+  uptrend-plus-pullback composite.
