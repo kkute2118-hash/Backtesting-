@@ -48,8 +48,16 @@ def main() -> None:
 
 
 def _clean(obj):
-    """Drop wall-clock fields; they change every run and mean nothing here."""
-    volatile = {"created_at", "updated_at", "observed_at", "generated_at", "as_of"}
+    """Drop wall-clock fields.
+
+    Not just timestamps: anything derived from "now" moves on its own. "Days
+    Held" is today minus the signal date, so a snapshot taken yesterday fails
+    today on every open position - a harness that cries wolf daily is one
+    people learn to ignore. What the forward endpoints are pinned for is the
+    book itself: which positions, at what entry, stop and target.
+    """
+    volatile = {"created_at", "updated_at", "observed_at", "generated_at", "as_of",
+                "Days Held", "Price As Of", "Age", "updated", "last_updated"}
     if isinstance(obj, dict):
         return {k: _clean(v) for k, v in obj.items() if k not in volatile}
     if isinstance(obj, list):
