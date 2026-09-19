@@ -20,6 +20,7 @@ framework gets found at import time instead of in production.
 
 from __future__ import annotations
 
+import collections
 import os
 import threading
 import time
@@ -28,7 +29,18 @@ from typing import Any, Callable, TypeVar
 F = TypeVar("F", bound=Callable[..., Any])
 
 _LOCK = threading.RLock()
-_CACHES: dict[int, dict[Any, tuple[float, Any]]] = {}
+_CACHES: dict[int, "collections.OrderedDict[Any, tuple[float, Any]]"] = {}
+_CACHE_NAMES: dict[int, str] = {}
+
+# Streamlit's cache_data defaults to unbounded, and on a 512 MB instance that
+# is the difference between running and being killed: features_fast memoises
+# one ~190 KB feature frame per symbol for 24 hours, so a 485-stock scan held
+# ~90 MB of frames nothing would look at again until the next scan.
+#
+# A cap changes how often a value is recomputed, never what it is - every
+# cached function here is pure - so the golden harness is what proves the
+# values are untouched.
+DEFAULT_MAX_ENTRIES = int(os.environ.get("CACHE_MAX_ENTRIES", "256"))
 
 
 # --------------------------------------------------------------------------- #
@@ -121,8 +133,14 @@ def _copy_result(value: Any) -> Any:
 def _cached(func: F, ttl: float | None, copy: bool, max_entries: int | None) -> F:
     import functools
 
-    store: dict[Any, tuple[float, Any]] = {}
+    # OrderedDict + move_to_end makes this a real LRU. The previous eviction
+    # picked the oldest ENTRY by insertion time, which throws away the symbol
+    # scanned first even when it is the one being read on every pass.
+    limit = DEFAULT_MAX_ENTRIES if max_entries is None else max_entries
+    store: "collections.OrderedDict[Any, tuple[float, Any]]" = collections.OrderedDict()
     _CACHES[id(func)] = store
+    _CACHE_NAMES[id(func)] = getattr(func, "__qualname__", repr(func))
+    stats = {"hits": 0, "misses": 0, "evictions": 0}
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -135,14 +153,18 @@ def _cached(func: F, ttl: float | None, copy: bool, max_entries: int | None) -> 
             if hit is not None:
                 stamped, value = hit
                 if ttl is None or (now - stamped) < ttl:
+                    store.move_to_end(key)
+                    stats["hits"] += 1
                     return _copy_result(value) if copy else value
                 store.pop(key, None)
+            stats["misses"] += 1
         value = func(*args, **kwargs)
         with _LOCK:
-            if max_entries is not None and len(store) >= max_entries:
-                oldest = min(store, key=lambda k: store[k][0])
-                store.pop(oldest, None)
             store[key] = (time.time(), value)
+            store.move_to_end(key)
+            while limit and len(store) > limit:
+                store.popitem(last=False)
+                stats["evictions"] += 1
         return _copy_result(value) if copy else value
 
     def clear() -> None:
@@ -150,6 +172,8 @@ def _cached(func: F, ttl: float | None, copy: bool, max_entries: int | None) -> 
             store.clear()
 
     wrapper.clear = clear  # type: ignore[attr-defined]
+    wrapper.cache_stats = lambda: {  # type: ignore[attr-defined]
+        "entries": len(store), "limit": limit, **stats}
     return wrapper  # type: ignore[return-value]
 
 
@@ -167,6 +191,19 @@ def _decorator(copy: bool):
 
 cache_data = _decorator(copy=True)
 cache_resource = _decorator(copy=False)
+
+
+def cache_report() -> list[dict[str, Any]]:
+    """Entry counts per memoised function, largest first.
+
+    Exists so "which cache is holding the memory" is answerable from a running
+    server instead of by attaching a profiler to it.
+    """
+    with _LOCK:
+        rows = [{"function": _CACHE_NAMES.get(fid, str(fid)), "entries": len(store)}
+                for fid, store in _CACHES.items()]
+    rows.sort(key=lambda r: -r["entries"])
+    return rows
 
 
 def clear_all_caches() -> None:

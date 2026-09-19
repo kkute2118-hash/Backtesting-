@@ -175,6 +175,19 @@ class JobRegistry:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def active(self, kind: str) -> Job | None:
+        """The job of this kind that is queued or running, if any.
+
+        Used to make a scan single-flight. Two concurrent 500-stock scans do
+        not take twice as long on a one-instance free plan - they take longer
+        than twice as long and double the peak memory, which is what gets the
+        instance killed. A second request joins the first instead.
+        """
+        with self._lock:
+            live = [j for j in self._jobs.values()
+                    if j.kind == kind and j.status not in TERMINAL]
+        return sorted(live, key=lambda j: j.created_at)[0] if live else None
+
     def list(self, kind: str | None = None) -> list[Job]:
         with self._lock:
             jobs = list(self._jobs.values())

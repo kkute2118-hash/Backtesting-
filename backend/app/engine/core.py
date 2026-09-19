@@ -8185,7 +8185,14 @@ def _snapshot_matches(snapshot, df):
     return a is not None and b is not None and a == b
 
 
-@st.cache_data(ttl=86400,show_spinner=False)
+# max_entries: each cached value is a ~190 KB feature frame, so unbounded this
+# held one per symbol for a day - about 90 MB after a 485-stock scan, on a
+# 512 MB instance. 64 is enough for the repeated reads within a single symbol's
+# processing while costing ~12 MB. A scan walks each symbol once and never
+# returns to it, so a bigger cache buys nothing; the durable feature_snapshots
+# table is what makes the NEXT scan fast. Capping a pure memo changes how often
+# a value is recomputed, never what it is.
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=64)
 def features_fast(symbol, df):
     """Strict as-of feature engine. Historical rows never see future days inside
     their current week/month.
@@ -11846,6 +11853,49 @@ def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
     if atr_pct < ENTRY_MIN_ATR_PCT:
         return False, f"ATR {atr_pct:.1f}% < {ENTRY_MIN_ATR_PCT:.1f}%", metrics
     return True, f"ATR {atr_pct:.1f}%", metrics
+
+
+def process_rss_mb():
+    """Resident memory of this process, in MB. None where /proc is absent.
+
+    Reported rather than inferred: on a 512 MB instance the difference between
+    "the scan is heavy" and "the scan is what gets us killed" is a number, and
+    without it every memory discussion is guesswork.
+    """
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def release_memory():
+    """Give freed memory back to the OS after a scan. Returns MB reclaimed.
+
+    gc.collect() alone is not enough here and measurement says so: after a
+    485-stock scan it reclaimed nothing, because the memory was not garbage -
+    it was thousands of small pandas allocations sitting in glibc's arenas,
+    freed by Python but never returned. malloc_trim(0) is what hands those
+    back. Called after a scan, not during: trimming mid-scan just makes the
+    allocator ask for the same pages again.
+    """
+    import ctypes
+    import gc
+
+    before = process_rss_mb()
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        # Not glibc (musl, macOS). gc.collect() above is then all there is.
+        pass
+    after = process_rss_mb()
+    if before is None or after is None:
+        return None
+    return round(before - after, 1)
 
 
 def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):

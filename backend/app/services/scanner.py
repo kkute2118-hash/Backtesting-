@@ -19,6 +19,7 @@ That split is what stops a slider drag from re-scanning 2,000 stocks.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
 import pandas as pd
@@ -31,6 +32,7 @@ from app.services.jobs import JobHandle
 from app.services.serialization import clean_mapping, clean_value, frame_to_records
 from app.services.universe import resolve
 
+log = logging.getLogger("ati.scanner")
 SCAN_KIND = "scan"
 SEPA_KIND = "sepa"
 CUSTOM_KIND = "custom"
@@ -107,6 +109,17 @@ def run_scan(*, universes: list[str], strategies: list[int], min_score: float,
     strategies = sorted({int(s) for s in strategies if int(s) in core.IMPLEMENTED_STRATEGIES})
     if not strategies:
         raise ApiError("Select at least one strategy to scan.")
+
+    # Single-flight. A scan is the heaviest thing this instance does; running
+    # two at once doubles peak memory on a 512 MB box for no gain. The caller
+    # gets the running job's envelope and polls it exactly as it would its own,
+    # so a double-click is a no-op rather than an error.
+    running = jobs.registry.active(SCAN_KIND)
+    if running is not None:
+        envelope = running.to_public()
+        envelope["already_running"] = True
+        return envelope
+
     tickers = resolve(universes)
 
     request = {
@@ -116,37 +129,52 @@ def run_scan(*, universes: list[str], strategies: list[int], min_score: float,
     }
 
     def work(handle: JobHandle) -> dict[str, Any]:
-        data, regime, regime_score = _load(handle, tickers, use_live_prices)
-        stats: dict[str, Any] = {}
-        handle.progress(0.2, f"Evaluating {len(data):,} stocks against "
-                             f"{len(strategies)} strateg{'y' if len(strategies) == 1 else 'ies'}")
-        result = core.scan_dataset(
-            data, strategies, regime,
-            progress_cb=_progress_bridge(handle, 0.2, 0.95, "Scanning"),
-            stats=stats,
-        )
-        handle.progress(0.96, "Recording signals")
-        persisted = 0
-        if result is not None and not result.empty:
-            try:
-                persisted = core.persist_scanner_signals(
-                    result, min_score, rejected=stats.get("rejected_rows"))
-            except Exception:
-                persisted = 0
+        rss_start = core.process_rss_mb()
+        log.info("scan start: %d tickers, RSS %s MB", len(tickers), rss_start)
+        data = None
+        result = None
+        try:
+            data, regime, regime_score = _load(handle, tickers, use_live_prices)
+            stats: dict[str, Any] = {}
+            handle.progress(0.2, f"Evaluating {len(data):,} stocks against "
+                                 f"{len(strategies)} strateg{'y' if len(strategies) == 1 else 'ies'}")
+            result = core.scan_dataset(
+                data, strategies, regime,
+                progress_cb=_progress_bridge(handle, 0.2, 0.95, "Scanning"),
+                stats=stats,
+            )
+            handle.progress(0.96, "Recording signals")
+            if result is not None and not result.empty:
+                try:
+                    core.persist_scanner_signals(
+                        result, min_score, rejected=stats.get("rejected_rows"))
+                except Exception:
+                    log.exception("Could not record the scan's signals")
 
-        rows = frame_to_records(result)
-        if limit:
-            rows = sorted(rows, key=lambda r: r.get("Score") or 0, reverse=True)[: int(limit)]
+            rows = frame_to_records(result)
+            columns = [str(c) for c in (result.columns if result is not None else [])]
+            if limit:
+                rows = sorted(rows, key=lambda r: r.get("Score") or 0,
+                              reverse=True)[: int(limit)]
 
-        if preset_id is not None:
-            _touch_preset(preset_id)
+            if preset_id is not None:
+                _touch_preset(preset_id)
 
-        return {
-            "rows": rows,
-            "columns": [str(c) for c in (result.columns if result is not None else [])],
-            "stats": _scan_stats(stats, regime, regime_score, len(data), len(tickers)),
-            "request": request,
-        }
+            scan_stats = _scan_stats(stats, regime, regime_score, len(data), len(tickers))
+        finally:
+            # The candle frames and the scan result are the two biggest things
+            # this process ever holds. Dropping the references before the
+            # reclaim is what lets malloc_trim actually return the pages -
+            # otherwise the job envelope keeps them alive until the next scan.
+            data = None
+            result = None
+            reclaimed = core.release_memory()
+            rss_end = core.process_rss_mb()
+            log.info("scan end: RSS %s MB (reclaimed %s MB)", rss_end, reclaimed)
+
+        scan_stats["rss_mb_start"] = rss_start
+        scan_stats["rss_mb_end"] = rss_end
+        return {"rows": rows, "columns": columns, "stats": scan_stats, "request": request}
 
     job = jobs.registry.submit(SCAN_KIND, "Stock scan", work, request=request, persist=True)
     return job.to_public()
