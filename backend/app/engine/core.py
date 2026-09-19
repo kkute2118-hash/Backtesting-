@@ -1356,8 +1356,25 @@ def _db_open():
         safety_flags TEXT,
         selected_for_forward INTEGER DEFAULT 0
     )""")
+    # scanner_signals is THE RECORD: every signal every strategy produced, on
+    # every date, whether or not it was traded. Two things make a signal
+    # untraded and they are different facts, so they are stored separately:
+    # passed_filter=0 means the entry evidence filter rejected it (reason
+    # says which reading), while passed_filter=1 with selected_for_forward=0
+    # means it qualified but the book already held that stock.
+    cols = {r[1] for r in con.execute("PRAGMA table_info(scanner_signals)")}
+    if "passed_filter" not in cols:
+        # Rows written before this existed were all post-filter survivors.
+        con.execute("ALTER TABLE scanner_signals ADD COLUMN passed_filter INTEGER DEFAULT 1")
+        con.execute("ALTER TABLE scanner_signals ADD COLUMN filter_reason TEXT")
+        con.execute("ALTER TABLE scanner_signals ADD COLUMN skip_reason TEXT")
+        con.execute("ALTER TABLE scanner_signals ADD COLUMN atr_pct REAL")
+        con.execute("ALTER TABLE scanner_signals ADD COLUMN turnover_cr REAL")
+        con.execute("ALTER TABLE scanner_signals ADD COLUMN sector_rank REAL")
     con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_date
                    ON scanner_signals(signal_date)""")
+    con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_symbol
+                   ON scanner_signals(symbol, signal_date)""")
     if False:
         con.execute("""CREATE INDEX IF NOT EXISTS idx_scanner_signals_forward
                        ON scanner_signals(selected_for_forward,status)""")
@@ -11849,6 +11866,9 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
     counts.setdefault("safety_reject", 0)
     counts.setdefault("entry_filter_reject", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
+    # The signals the filter turned away, kept rather than dropped: they are
+    # the only way to keep measuring whether the filter is still the right one.
+    rejected = counts.setdefault("rejected_rows", [])
 
     # Shared universe/safety/liquidity gate, applied to EVERY strategy (S1-S4)
     # before any strategy_signal() is evaluated. No strategy can surface a
@@ -11916,6 +11936,18 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 ticker=ticker)
             if not passed:
                 counts["entry_filter_reject"][s] = counts["entry_filter_reject"].get(s, 0) + 1
+                rejected.append({
+                    "Ticker": str(ticker).replace(".NS", ""),
+                    "Strategy": ("S4_SEPA" if s == 4 else
+                                 "S5_POCKETPIVOT" if s == 5 else f"S{s}"),
+                    "Regime": regime, "Entry": round(float(f.iloc[-1].close), 2),
+                    "ATR %": (round(ev["atr_pct"], 2) if np.isfinite(ev["atr_pct"]) else None),
+                    "Turnover Cr": (round(ev["turnover_cr"], 1)
+                                    if np.isfinite(ev["turnover_cr"]) else None),
+                    "Sector Rank": (int(ev["sector_rank"])
+                                    if np.isfinite(ev["sector_rank"]) else None),
+                    "Entry Filter": why,
+                })
                 continue
 
             score, parts = final_setup_score(f, s, regime, safe)
@@ -12000,69 +12032,165 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     return pd.DataFrame(rows)
 
 
-def persist_scanner_signals(result, min_score=None, signal_date=None):
-    """Store every qualified signal and select all of them for forward testing.
+def persist_scanner_signals(result, min_score=None, signal_date=None, rejected=None):
+    """Record every signal, traded or not. Keyed date|symbol|strategy.
 
-    `min_score` is accepted and ignored. Everything in `result` has already
-    passed the entry evidence filter, which is what selection now means; the
-    score has no demonstrated relationship to outcome, so re-filtering on it
-    here would drop signals for no measured reason. The parameter stays in the
-    signature so existing callers keep working, and the stored score stays a
-    displayed number rather than a gate.
+    This table is the RECORD, deliberately separate from what gets traded. A
+    stock that fires under S1 and S3 on the same day is two rows here and, by
+    design, at most one position (see add_forward_candidates) - the log is not
+    the book.
+
+    `rejected` is the signals the entry evidence filter turned away, from
+    scan_dataset's stats["rejected_rows"]. They are stored with
+    passed_filter=0 so the filter itself stays measurable: without them the
+    only record of a scan is the part that already agrees with the filter.
+
+    `min_score` is accepted and ignored. The score has no demonstrated
+    relationship to outcome, so it selects nothing.
     """
-    if result is None or result.empty:
+    rows = []
+    if result is not None and len(result):
+        rows += [(r, 1) for _, r in result.iterrows()]
+    for r in (rejected or []):
+        rows.append((pd.Series(r), 0))
+    if not rows:
         return 0
     signal_date = str(signal_date or market_today())
     now = datetime.now().isoformat(timespec="seconds")
     con = _db()
     try:
-        for _, r in result.iterrows():
+        for r, passed in rows:
             sym = str(r.get("Ticker", "")).upper().replace(".NS", "")
             strat = str(r.get("Strategy", "")).upper()
+            if not sym or not strat:
+                continue
             con.execute("""INSERT OR REPLACE INTO scanner_signals(
                 signal_key,created_at,signal_date,symbol,strategy,score,learned_rank,
                 historical_edge_r,learning_confidence,regime,safety_status,safety_score,
                 entry,stop,target,rr,rsi,relvol,htf_score,footprint_score,
-                strategy_score,entry_quality,relative_strength,safety_flags,selected_for_forward
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                strategy_score,entry_quality,relative_strength,safety_flags,
+                selected_for_forward,passed_filter,filter_reason,atr_pct,turnover_cr,sector_rank
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 f"{signal_date}|{sym}|{strat}", now, signal_date, sym, strat,
-                float(r.get("Score", 0)), float(r.get("Learned Rank", 0)),
-                float(r.get("Historical Edge R", 0)), str(r.get("Learning Confidence", "")),
+                float(r.get("Score", 0) or 0), float(r.get("Learned Rank", 0) or 0),
+                float(r.get("Historical Edge R", 0) or 0),
+                str(r.get("Learning Confidence", "")),
                 str(r.get("Regime", "")), str(r.get("Safety", "")),
-                float(r.get("Safety Score", 0)), float(r.get("Entry", np.nan)),
+                float(r.get("Safety Score", 0) or 0), float(r.get("Entry", np.nan)),
                 # S5 stores no target: float(None) would raise, and a
                 # fabricated number would claim a target it does not have.
                 float(r.get("SL 7%", r.get("SL", np.nan)) or np.nan),
                 float(r.get("Target 3R", r.get("Target", np.nan)) or np.nan),
-                3.0, float(r.get("RSI", np.nan)), float(r.get("RelVol", np.nan)),
-                float(r.get("HTF Score", r.get("HTF Demand", 0))),
-                float(r.get("Footprint Score", r.get("Footprint", 0))),
-                float(r.get("Strategy Score", 0)), float(r.get("Entry Quality", 0)),
-                float(r.get("Relative Strength", 0)), str(r.get("Safety Flags", "")),
-                1
+                3.0, float(r.get("RSI", np.nan) or np.nan),
+                float(r.get("RelVol", np.nan) or np.nan),
+                float(r.get("HTF Score", r.get("HTF Demand", 0)) or 0),
+                float(r.get("Footprint Score", r.get("Footprint", 0)) or 0),
+                float(r.get("Strategy Score", 0) or 0),
+                float(r.get("Entry Quality", 0) or 0),
+                float(r.get("Relative Strength", 0) or 0),
+                str(r.get("Safety Flags", "")),
+                # Set for real by add_forward_candidates, which is what decides
+                # whether a qualifying signal actually became a position.
+                0, int(passed), str(r.get("Entry Filter", "")),
+                _opt_float(r.get("ATR %")), _opt_float(r.get("Turnover Cr")),
+                _opt_float(r.get("Sector Rank")),
             ))
         con.commit()
     finally:
         con.close()
-    return len(result)
+    return len(rows)
+
+
+def _opt_float(v):
+    """float(v) or None - for columns where 'not measured' must not become 0."""
+    try:
+        f = float(v)
+        return f if np.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def signal_history(symbol=None, start=None, end=None, strategy=None,
+                   include_rejected=True, limit=5000):
+    """The signal record: every stock, every strategy, every date it fired.
+
+    Separate from the traded book on purpose. `selected_for_forward` says
+    whether that signal became a position, `passed_filter` whether the entry
+    filter admitted it, and `skip_reason` why a qualifying signal was not
+    taken (almost always: the stock was already held).
+    """
+    sql = ["SELECT signal_date, symbol, strategy, entry, score, passed_filter,",
+           "filter_reason, skip_reason, selected_for_forward, atr_pct,",
+           "turnover_cr, sector_rank, regime FROM scanner_signals WHERE 1=1"]
+    args = []
+    if symbol:
+        sql.append("AND symbol=?"); args.append(str(symbol).upper().replace(".NS", ""))
+    if strategy:
+        sql.append("AND strategy=?"); args.append(str(strategy).upper())
+    if start:
+        sql.append("AND signal_date>=?"); args.append(str(start))
+    if end:
+        sql.append("AND signal_date<=?"); args.append(str(end))
+    if not include_rejected:
+        sql.append("AND passed_filter=1")
+    sql.append("ORDER BY signal_date DESC, symbol, strategy LIMIT ?")
+    args.append(int(limit))
+    con = _db()
+    try:
+        return pd.read_sql_query(" ".join(sql), con, params=args)
+    finally:
+        con.close()
 
 
 def add_forward_candidates(candidates, signal_date=None):
-    """Persist scanner-selected candidates into SQLite so refresh/restart does not erase them.
+    """Open at most ONE forward test per stock, and record why the rest were not.
+
+    ONE POSITION PER STOCK, across every strategy and every date. Two things
+    used to break that, and both distorted the forward-test record by weighting
+    whichever stock happened to keep signalling:
+
+      * the same stock firing under two strategies on one day became two
+        positions (the dedupe keyed on symbol AND strategy AND date);
+      * a stock that kept signalling on later days was enrolled again each
+        time while the first position was still open.
+
+    Now a symbol with an ACTIVE forward test is skipped whatever the strategy
+    or date, and when several strategies fire the same stock on one day the
+    highest-priority one wins (STRATEGY_SLOT_PRIORITY - S4, then S5, then the
+    rest), the same rule build_portfolio uses to fill a slot.
+
+    Nothing is lost by this: every signal is already recorded in
+    scanner_signals, and the ones skipped here get a skip_reason there. The log
+    is the record; this table is the book.
 
     `signal_date` is the SESSION the setups were read from, which is not always
     the day the job runs: when the data provider publishes a daily candle late,
     the scan happens the following day against the previous session's close.
     Dating those signals by the run date would file them under a session whose
-    prices they were never computed from, and would defeat the dedupe below —
+    prices they were never computed from, and would defeat the dedupe -
     the same setup would be recorded again under each new run date.
     """
     if candidates is None or len(candidates)==0:
         return 0
     con=_db(); added=0
+    skipped=[]
     try:
         today=str(signal_date or market_today())
-        for _,r in candidates.iterrows():
+        # Already-open symbols, read once: a stock held under any strategy is
+        # not a candidate under another.
+        held = {str(r[0]).upper() for r in con.execute(
+            "SELECT DISTINCT symbol FROM forward_tests WHERE status='ACTIVE'")}
+        # One row per symbol from this batch, best strategy first.
+        ranked = candidates.assign(
+            _pri=[_slot_priority(x) for x in candidates.get("Strategy", "")],
+            _sym=[str(x).upper().replace(".NS", "") for x in candidates.get("Ticker", "")],
+        ).sort_values("_pri", kind="stable")
+        best = ranked.drop_duplicates("_sym", keep="first")
+        for _, d in ranked.iterrows():
+            if d.name not in best.index:
+                skipped.append((d["_sym"], str(d.get("Strategy", "")).upper(),
+                                "another strategy took the slot this day"))
+        for _,r in best.iterrows():
             symbol=str(r.get("Ticker","")).upper().replace(".NS","")
             strategy=str(r.get("Strategy","")).upper()
             score=float(r.get("Score",0))
@@ -12077,12 +12205,8 @@ def add_forward_candidates(candidates, signal_date=None):
             # other strategy still needs one.
             if not np.isfinite(target) and strategy not in TRAILING_EXIT_STRATEGIES:
                 continue
-            exists=con.execute(
-                """SELECT id FROM forward_tests
-                   WHERE symbol=? AND strategy=? AND signal_date=? LIMIT 1""",
-                (symbol,strategy,today)
-            ).fetchone()
-            if exists:
+            if symbol in held:
+                skipped.append((symbol, strategy, "already held"))
                 continue
             now=datetime.now().isoformat(timespec="seconds")
             snapshot={k:r.get(k,None) for k in r.index}
@@ -12094,12 +12218,19 @@ def add_forward_candidates(candidates, signal_date=None):
                 entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
                 today,json.dumps(snapshot,default=str,allow_nan=True)
             ))
-            fid=int(cur.lastrowid); added+=1
+            fid=int(cur.lastrowid); added+=1; held.add(symbol)
+            con.execute("""UPDATE scanner_signals SET selected_for_forward=1
+                           WHERE signal_key=?""", (f"{today}|{symbol}|{strategy}",))
             con.execute("""INSERT OR IGNORE INTO forward_observations(
                 forward_id,observed_at,dt,ltp,high,low,unrealized_return_pct,mfe_pct,mae_pct,status
             ) VALUES(?,?,?,?,?,?,?,?,?,?)""",(
                 fid,now,today,entry,entry,entry,0.0,0.0,0.0,"ACTIVE"
             ))
+        # Mark the record: why a signal that fired was not taken. Without this
+        # a skipped signal is indistinguishable from one that never happened.
+        for sym, strat, why in skipped:
+            con.execute("""UPDATE scanner_signals SET skip_reason=?
+                           WHERE signal_key=?""", (why, f"{today}|{sym}|{strat}"))
         con.commit()
     finally:
         con.close()

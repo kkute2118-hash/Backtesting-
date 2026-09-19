@@ -129,7 +129,8 @@ def run_scan(*, universes: list[str], strategies: list[int], min_score: float,
         persisted = 0
         if result is not None and not result.empty:
             try:
-                persisted = core.persist_scanner_signals(result, min_score)
+                persisted = core.persist_scanner_signals(
+                    result, min_score, rejected=stats.get("rejected_rows"))
             except Exception:
                 persisted = 0
 
