@@ -303,6 +303,16 @@ def sync_indices(years: int = 5) -> dict[str, Any]:
     return {"synced": ok, "failed": bad}
 
 
+def provider_detail() -> dict[str, Any]:
+    """Per-variable presence, for the Data Manager's diagnostics only.
+
+    Never a value - only whether each name is set. Which variable is missing
+    is the whole question when credentials are supposedly already in place,
+    but it does not belong in an open endpoint.
+    """
+    return {"dhan": {"variables": core.credential_presence(core.DHAN_CREDENTIAL_NAMES)}}
+
+
 def provider_status() -> dict[str, Any]:
     """Whether each integration is configured - never the credential itself.
 
@@ -315,9 +325,12 @@ def provider_status() -> dict[str, Any]:
         "dhan": {
             "configured": bool(core.dhan_configured()),
             "auto_renew": bool(core._dhan_pin_totp_configured()),
-            # Presence per variable, never a value: which one is missing is the
-            # whole question when the credentials are supposedly already set.
-            "variables": core.credential_presence(core.DHAN_CREDENTIAL_NAMES),
+            # Deliberately no per-variable map and no token timestamp. /config
+            # is unauthenticated, and naming the exact environment variables a
+            # server reads - and which of them are unset - tells an attacker
+            # what to look for and when the credential was last rotated. The
+            # Data Manager's diagnostics endpoint still reports the per-
+            # variable detail to an operator who asks for it.
         },
         "twelvedata": {"configured": bool(core.twelvedata_configured())},
         "anthropic": {"configured": bool(core._anthropic_configured())},

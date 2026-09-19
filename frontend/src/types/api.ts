@@ -129,6 +129,9 @@ export interface ProviderStatus {
     token_issued_at: string | null;
     /** Presence per variable, never a value. Which one is missing is the whole
      * question when the credentials are supposedly already set. */
+    // Optional and normally absent: /config is unauthenticated and no longer
+    // names the environment variables the server reads. The Data Manager's
+    // diagnostics endpoint still reports them to an operator who asks.
     variables?: Record<string, boolean>;
   };
   twelvedata: { configured: boolean };

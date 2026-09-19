@@ -55,10 +55,23 @@ const NETWORK_MESSAGE =
   "Cannot reach the analysis server. Check that the backend is running and that " +
   "NEXT_PUBLIC_API_URL points at it.";
 
+/**
+ * Where a request goes.
+ *
+ * Reads go straight to the backend. Mutations go to this app's own
+ * /api/gateway route, which runs on the Next server and attaches the API key
+ * from ITS environment - the key must never be in code the browser downloads.
+ */
+function endpoint(path: string, method: string): string {
+  if (method === "GET" || method === "HEAD") return `${BASE}${PREFIX}${path}`;
+  const [route, query = ""] = path.split("?");
+  return `/api/gateway${route}${query ? `?${query}` : ""}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${BASE}${PREFIX}${path}`, {
+    response = await fetch(endpoint(path, (init?.method ?? "GET").toUpperCase()), {
       ...init,
       headers: {
         "Content-Type": "application/json",

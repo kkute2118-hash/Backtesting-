@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import install_error_handlers
+from app.core.guard import guard_middleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,12 +73,17 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
+app.middleware("http")(guard_middleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Only the methods and headers the UI actually sends. "*" with
+    # allow_credentials also permits any header a hostile page invents.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "X-API-Key"],
+    max_age=600,
 )
 
 install_error_handlers(app)

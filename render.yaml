@@ -51,10 +51,20 @@ services:
       - key: MALLOC_ARENA_MAX
         value: "2"
 
-      # Set this to your Vercel URL once the frontend is deployed. A browser
-      # treats a different origin as a different site, so the API refuses it
-      # until it is listed here.
+      # Browser origins allowed to call this API. The default already covers
+      # the deployed frontend and localhost; set this only to add another.
+      # Never "*": with credentials that lets any site on the internet call
+      # this API as the logged-in user.
       - key: CORS_ORIGINS
+        sync: false
+
+      # Shared secret for state-changing requests (scan, sync, watchlist and
+      # settings writes). Reads stay open. Leave it unset and those endpoints
+      # are open to anyone who can reach the server; set it here AND as
+      # API_ACCESS_KEY on the frontend service, where the Next server-side
+      # gateway attaches it. It must never be a NEXT_PUBLIC_ variable - those
+      # are compiled into the browser bundle.
+      - key: API_ACCESS_KEY
         sync: false
 
       # Credentials. sync:false means Render prompts for them in the dashboard
