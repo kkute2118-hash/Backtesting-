@@ -300,3 +300,75 @@ def test_cors_is_not_a_wildcard():
     assert "*" not in default
     assert "ati-lab.onrender.com" in default
     assert "localhost:3000" in default, "dev must still work"
+
+
+# ---------------------------------------------------------------------------
+# P5: a run that never finished must say so, in both places that show it.
+# ---------------------------------------------------------------------------
+
+def _insert_run(status: str, run_id: str = "run-stuck", created_at: str | None = None):
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+    from app.db import app_store
+    app_store.ensure_app_tables()
+    created = created_at or (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    con = app_store.connect()
+    try:
+        con.execute("INSERT OR REPLACE INTO app_scan_runs(id,kind,created_at,status,request) "
+                    "VALUES(?,?,?,?,?)",
+                    (run_id, "scan", created, status,
+                     _json.dumps({"universes": ["Nifty 500"], "strategies": [4, 5]})))
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_a_run_left_queued_by_a_restart_is_marked_interrupted(client):
+    """The registry dies with the container; the row does not. Without this a
+    scan interrupted by a restart stays QUEUED for ever - which is what the
+    dashboard was showing while the Scanner page said there had been no scans."""
+    from app.services import jobs
+    _insert_run(jobs.QUEUED)
+    assert jobs.sweep_interrupted_runs() >= 1
+    run = next(r for r in jobs.list_runs(kind="scan", limit=50) if r["id"] == "run-stuck")
+    assert run["status"] == jobs.INTERRUPTED
+    assert run["finished_at"], "an interrupted run has ended, so it needs an end time"
+    assert "restart" in (run["error"] or "")
+
+
+def test_a_run_stuck_running_in_a_live_process_still_expires(client):
+    """The startup sweep only helps when the process restarts. A thread that
+    dies without unwinding leaves the row RUNNING in a process still alive."""
+    from app.services import jobs
+    _insert_run(jobs.RUNNING, run_id="run-zombie")
+    runs = jobs.list_runs(kind="scan", limit=50)
+    zombie = next(r for r in runs if r["id"] == "run-zombie")
+    assert zombie["status"] == jobs.INTERRUPTED
+
+
+def test_a_fresh_running_run_is_left_alone(client):
+    from datetime import datetime, timezone
+    from app.services import jobs
+    _insert_run(jobs.RUNNING, run_id="run-fresh",
+                created_at=datetime.now(timezone.utc).isoformat())
+    runs = jobs.list_runs(kind="scan", limit=50)
+    assert next(r for r in runs if r["id"] == "run-fresh")["status"] == jobs.RUNNING
+
+
+def test_the_dashboard_card_and_the_scanner_list_agree(client):
+    """They were disagreeing: one said QUEUED, the other said no scans yet."""
+    from app.services import jobs, market, scanner
+    _insert_run(jobs.QUEUED, run_id="run-agree")
+    jobs.sweep_interrupted_runs()
+    card = market._latest_scan()
+    listed = scanner.list_runs(limit=50)
+    assert card is not None
+    match = next((r for r in listed if r["id"] == card["id"]), None)
+    assert match is not None, "the dashboard card shows a run the Scanner list omits"
+    assert match["status"] == card["status"]
+
+
+def test_interrupted_counts_as_finished(client):
+    from app.services import jobs
+    assert jobs.INTERRUPTED in jobs.TERMINAL, \
+        "an interrupted run must not block the single-flight guard for ever"

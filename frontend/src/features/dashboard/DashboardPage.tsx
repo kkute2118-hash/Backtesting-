@@ -350,9 +350,21 @@ export function DashboardPage() {
               qualifying setups
             </span>
             <span>{relativeTime(latest_scan.created_at)}</span>
-            <Badge tone={latest_scan.status === "succeeded" ? "up" : "warn"}>
-              {latest_scan.status}
+            <Badge tone={
+              latest_scan.status === "succeeded" ? "up"
+                : latest_scan.status === "running" || latest_scan.status === "queued" ? "accent"
+                  : "down"}>
+              {latest_scan.status === "interrupted" ? "interrupted — server restarted"
+                : latest_scan.status}
             </Badge>
+            {/* An interrupted or failed run produced nothing, so the useful
+                action is starting another, not opening its empty results. */}
+            {latest_scan.status === "interrupted" || latest_scan.status === "failed" ? (
+              <Link href="/scanner"
+                className="text-2xs font-medium text-accent hover:underline">
+                Run again
+              </Link>
+            ) : null}
           </CardBody>
         </Card>
       ) : null}

@@ -52,6 +52,13 @@ async def lifespan(_: FastAPI):
 
     try:
         app_store.ensure_app_tables()
+        # The in-memory job registry died with the previous container; its
+        # database rows did not. Anything still QUEUED or RUNNING belongs to a
+        # process that no longer exists.
+        from app.services import jobs
+        closed = jobs.sweep_interrupted_runs()
+        if closed:
+            log.info("Marked %d unfinished run(s) as interrupted", closed)
     except Exception:
         # A database fault must be reported by /health, not kill the server:
         # the Data Manager endpoints are exactly what the user needs to
