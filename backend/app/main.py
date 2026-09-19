@@ -84,6 +84,18 @@ install_error_handlers(app)
 app.include_router(api_router, prefix=settings.api_prefix)
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness only: no database, no imports, no work.
+
+    Render's health check and the browser's first request both hit this, and
+    both need it to answer while a scan is saturating SQLite and the GIL. The
+    deeper check that reports the database and the cold-start restore lives at
+    /api/v1/health, where taking a moment is acceptable.
+    """
+    return {"status": "ok"}
+
+
 @app.get("/", include_in_schema=False)
 def root() -> dict[str, str]:
     return {"name": settings.app_name, "docs": "/docs", "api": settings.api_prefix}

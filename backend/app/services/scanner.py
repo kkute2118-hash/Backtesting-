@@ -24,6 +24,8 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from app.core import ttl_cache
+
 from app.core.errors import ApiError, NotFound
 from app.db import app_store
 from app.engine import core
@@ -171,6 +173,8 @@ def run_scan(*, universes: list[str], strategies: list[int], min_score: float,
             reclaimed = core.release_memory()
             rss_end = core.process_rss_mb()
             log.info("scan end: RSS %s MB (reclaimed %s MB)", rss_end, reclaimed)
+            # A finished scan is what the cached dashboard readings describe.
+            ttl_cache.invalidate("market:", "forward:", "dashboard")
 
         scan_stats["rss_mb_start"] = rss_start
         scan_stats["rss_mb_end"] = rss_end

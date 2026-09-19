@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from app.core import ttl_cache
 from app.db import app_store
 from app.engine import core
 from app.schemas.product import PreferenceUpdate
@@ -37,9 +38,23 @@ def health() -> dict[str, Any]:
     }
 
 
+CONFIG_TTL_SECONDS = 60
+DASHBOARD_TTL_SECONDS = 30
+
+
 @router.get("/config")
 def config() -> dict[str, Any]:
-    """Which integrations are configured. Never returns a credential value."""
+    """Which integrations are configured. Never returns a credential value.
+
+    Pure: environment variables and two literal lists, no database and no
+    network. It is a 1 KB response that the whole UI blocks on, and it was
+    taking tens of seconds because it read the cached Dhan token out of SQLite
+    while a scan held the file.
+    """
+    return ttl_cache.cached("config", CONFIG_TTL_SECONDS, _build_config)
+
+
+def _build_config() -> dict[str, Any]:
     return {
         "providers": market.provider_status(),
         "universes": core.UNIVERSE_CHOICES,
@@ -54,6 +69,41 @@ def config() -> dict[str, Any]:
         "forward_gate_default": 85,
         "market": market.market_status(),
     }
+
+
+@router.get("/dashboard")
+def dashboard() -> dict[str, Any]:
+    """Everything the dashboard needs, in one request.
+
+    The page was firing about seven in parallel; on a single free-plan
+    instance they queue behind each other on the same SQLite file and the same
+    GIL, so the slowest one sets the page's load time. The individual
+    endpoints all still work - this composes them rather than replacing them.
+    """
+    return ttl_cache.cached("dashboard", DASHBOARD_TTL_SECONDS, _build_dashboard)
+
+
+def _build_dashboard() -> dict[str, Any]:
+    payload: dict[str, Any] = {"config": _build_config()}
+    # One slow or broken section must not blank the whole page, so each is
+    # reported on its own terms and its failure named where the UI can show it.
+    for key, build in (("overview", market.overview),
+                       ("preferences", lambda: app_store.all_preferences())):
+        try:
+            payload[key] = build()
+        except Exception as exc:  # noqa: BLE001 - the message is the product
+            payload[key] = None
+            payload.setdefault("errors", {})[key] = str(exc)
+    return payload
+
+
+@router.get("/cache-stats", include_in_schema=False)
+def cache_stats() -> dict[str, Any]:
+    """What the caches are holding. Diagnostics for the 512 MB ceiling."""
+    from app.engine import st_compat
+    return {"response_cache": ttl_cache.stats(),
+            "memoised": st_compat.cache_report()[:12],
+            "rss_mb": core.process_rss_mb()}
 
 
 @router.get("/preferences")

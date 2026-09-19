@@ -2,10 +2,10 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Toaster } from "sonner";
 
-import { ApiError } from "@/lib/api";
+import { ApiError, pingHealth } from "@/lib/api";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [client] = useState(
@@ -28,6 +28,15 @@ export function Providers({ children }: { children: ReactNode }) {
         },
       }),
   );
+
+  // Wake the backend as early as possible. On Render's free plan a sleeping
+  // instance takes up to a minute to answer its first request, and every page
+  // would otherwise wait for a real query to trigger that. /health needs no
+  // database, so it starts the boot without competing for it. Failures are
+  // ignored on purpose - this is a nudge, not a dependency.
+  useEffect(() => {
+    void pingHealth();
+  }, []);
 
   return (
     <QueryClientProvider client={client}>

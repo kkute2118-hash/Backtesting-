@@ -177,16 +177,98 @@ def is_index_symbol(sym):
     return str(sym).startswith(INDEX_SYMBOL_PREFIX)
 
 
-@st.cache_data(ttl=86400)
-def index_universe(name):
-    r = requests.get(INDEX_URLS[name], headers={"User-Agent":"Mozilla/5.0"}, timeout=30)
+UNIVERSE_CACHE_TTL_HOURS = 24
+# niftyindices.com with a 30 s timeout used to sit on the request path of the
+# dashboard: freshness() resolves a universe, and the in-process memo is empty
+# after every cold start - which on a free plan is most loads. One slow fetch
+# blocked the whole page, and a failed one cached nothing, so the next request
+# paid for it again. The list changes on NSE's index-review schedule, so it
+# belongs in the database, where a cold start can read it in a millisecond.
+
+
+def _ensure_universe_cache_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS universe_cache(
+            name TEXT PRIMARY KEY, symbols TEXT NOT NULL, fetched_at TEXT NOT NULL)""")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _read_universe_cache(name):
+    """(symbols, age_hours) from the database, or (None, None)."""
+    _ensure_universe_cache_table()
+    con = _db()
+    try:
+        row = con.execute("SELECT symbols, fetched_at FROM universe_cache WHERE name=?",
+                          (str(name),)).fetchone()
+    except sqlite3.Error:
+        return None, None
+    finally:
+        con.close()
+    if not row:
+        return None, None
+    try:
+        age = (datetime.now() - datetime.fromisoformat(row[1])).total_seconds() / 3600.0
+        return json.loads(row[0]), age
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None, None
+
+
+def _write_universe_cache(name, symbols):
+    _ensure_universe_cache_table()
+    con = _db()
+    try:
+        con.execute("INSERT OR REPLACE INTO universe_cache(name,symbols,fetched_at) "
+                    "VALUES(?,?,?)",
+                    (str(name), json.dumps(list(symbols)),
+                     datetime.now().isoformat(timespec="seconds")))
+        con.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        con.close()
+
+
+def _fetch_index_universe(name):
+    r = requests.get(INDEX_URLS[name], headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
     r.raise_for_status()
     df = pd.read_csv(pd.io.common.BytesIO(r.content))
     col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
-    return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
+    return sorted({str(s).strip().upper() + ".NS" for s in df[col].dropna()})
 
 
-def resolve_universe(name):
+@st.cache_data(ttl=86400, max_entries=16)
+def index_universe(name, allow_network=True):
+    """Constituents of an index, from the database first.
+
+    A stored list that is merely old still beats a 30-second wait, and beats
+    an exception outright: the membership of Nifty 500 last week is a far
+    better answer for a freshness check than no answer at all. The network is
+    used when there is nothing stored, or when what is stored has aged out.
+    """
+    cached, age_hours = _read_universe_cache(name)
+    if cached and age_hours is not None and age_hours < UNIVERSE_CACHE_TTL_HOURS:
+        return cached
+    if not allow_network:
+        if cached:
+            return cached
+        raise RuntimeError(
+            f"The constituent list for '{name}' has not been downloaded yet. "
+            "Run a scan or a data sync once while the server has network access.")
+    try:
+        symbols = _fetch_index_universe(name)
+    except Exception:
+        # Stale beats nothing. Re-raise only when there is no stored copy.
+        if cached:
+            return cached
+        raise
+    _write_universe_cache(name, symbols)
+    return symbols
+
+
+def resolve_universe(name, allow_network=True):
     """Ticker list for any name in UNIVERSE_CHOICES.
 
     Use this, never index_universe(), anywhere a user picks a universe:
@@ -202,14 +284,14 @@ def resolve_universe(name):
                 "universes instead."
             )
         return nse_liquid_universe()
-    return index_universe(name)
+    return index_universe(name, allow_network=allow_network)
 
 
-def resolve_universes(names):
+def resolve_universes(names, allow_network=True):
     """Union of several universe names, de-duplicated and sorted."""
     out = set()
     for n in names or []:
-        out.update(resolve_universe(n))
+        out.update(resolve_universe(n, allow_network=allow_network))
     return sorted(out)
 
 

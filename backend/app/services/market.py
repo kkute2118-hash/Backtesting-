@@ -31,7 +31,8 @@ def market_status() -> dict[str, Any]:
     }
 
 
-def freshness(universes: list[str] | None = None, tickers: list[str] | None = None) -> dict[str, Any]:
+def freshness(universes: list[str] | None = None, tickers: list[str] | None = None,
+              allow_network: bool = True) -> dict[str, Any]:
     """How far behind the local candle store is, and what that means for a scan.
 
     A scan against a stale store ranks yesterday's prices and produces late
@@ -41,7 +42,9 @@ def freshness(universes: list[str] | None = None, tickers: list[str] | None = No
 
     symbols = list(tickers or [])
     if universes:
-        symbols = resolve(universes)
+        # allow_network=False on the dashboard path: a freshness READING is not
+        # worth blocking the page on a 30-second index download.
+        symbols = resolve(universes, allow_network=allow_network)
     if not symbols:
         return {"universe_size": 0, "latest": None, "expected": None,
                 "published": None, "current": None, "days_behind": None,
@@ -201,7 +204,7 @@ def overview() -> dict[str, Any]:
     default_universe = app_store.get_preference("default_universes", ["Nifty 500"])
     fresh: dict[str, Any]
     try:
-        fresh = freshness(universes=default_universe)
+        fresh = freshness(universes=default_universe, allow_network=False)
     except Exception as exc:
         fresh = {"severity": "unknown", "message": str(exc), "universe_size": 0,
                  "latest": None, "expected": None, "published": None,
@@ -301,18 +304,17 @@ def sync_indices(years: int = 5) -> dict[str, Any]:
 
 
 def provider_status() -> dict[str, Any]:
-    """Whether each integration is configured — never the credential itself."""
-    token_issued = None
-    try:
-        _tok, issued = core._read_cached_dhan_token()
-        token_issued = issued
-    except Exception:
-        pass
+    """Whether each integration is configured - never the credential itself.
+
+    Reads the process environment only. It used to also read the cached Dhan
+    token out of SQLite for a `token_issued_at` field nothing needed, which
+    put a database hit on /config - the one endpoint that has to answer while
+    a scan is saturating the database and the GIL.
+    """
     return {
         "dhan": {
             "configured": bool(core.dhan_configured()),
             "auto_renew": bool(core._dhan_pin_totp_configured()),
-            "token_issued_at": token_issued,
             # Presence per variable, never a value: which one is missing is the
             # whole question when the credentials are supposedly already set.
             "variables": core.credential_presence(core.DHAN_CREDENTIAL_NAMES),

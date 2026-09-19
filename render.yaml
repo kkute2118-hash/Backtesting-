@@ -21,8 +21,14 @@ services:
     region: singapore          # closest to the NSE data you are pulling
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/v1/health
+    # One worker, explicitly. Each worker is a separate process with its own
+    # copy of pandas, the engine and every cache - about 112 MB before it does
+    # any work - and the plan allows 512 MB in total.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    # The bare /health: no database, no imports. /api/v1/health also checks the
+    # database, which is exactly what stops answering while a scan holds it -
+    # so using it as the health check got healthy instances replaced.
+    healthCheckPath: /health
 
     # Uncomment together with `plan: starter` above for a real disk.
     # disk:
@@ -36,6 +42,14 @@ services:
       #   value: /var/lib/ati-lab/market_data.sqlite3
       - key: PYTHON_VERSION
         value: "3.11.9"
+
+      # Entries per memoised function. The default suits a 512 MB instance;
+      # raise it only with more memory.
+      - key: CACHE_MAX_ENTRIES
+        value: "256"
+      # Python returns freed arenas to the OS more readily with fewer of them.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
 
       # Set this to your Vercel URL once the frontend is deployed. A browser
       # treats a different origin as a different site, so the API refuses it

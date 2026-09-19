@@ -46,7 +46,10 @@ check("the four index lists are still offered",
 
 # ------------------------------------------------------------- 2. resolution
 core.dhan_map = lambda: {f"SYM{i}": str(i) for i in range(2000)} | {"TINYSM": "9"}
-core.index_universe = lambda name: [f"IDX{i}.NS" for i in range(500)]
+# **_ so the stub keeps matching after index_universe gained allow_network:
+# resolve_universe passes it through, and a stub with a narrower signature
+# fails as a TypeError that looks like a product bug.
+core.index_universe = lambda name, **_: [f"IDX{i}.NS" for i in range(500)]
 
 full = core.resolve_universe(core.FULL_NSE_UNIVERSE)
 check("full NSE resolves to ~2000 names", len(full) >= 1900, str(len(full)))

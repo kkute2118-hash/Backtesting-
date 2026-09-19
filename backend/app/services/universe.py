@@ -27,7 +27,7 @@ def choices() -> list[dict]:
     return out
 
 
-def resolve(names: list[str]) -> list[str]:
+def resolve(names: list[str], allow_network: bool = True) -> list[str]:
     """Ticker list for the selected universes, with a usable error on failure."""
     if not names:
         raise ApiError("Select at least one universe to scan.")
@@ -35,7 +35,7 @@ def resolve(names: list[str]) -> list[str]:
     if unknown:
         raise ApiError(f"Unknown universe: {', '.join(unknown)}")
     try:
-        tickers = core.resolve_universes(names)
+        tickers = core.resolve_universes(names, allow_network=allow_network)
     except RuntimeError as exc:
         # resolve_universe() raises this when the full-NSE option is picked
         # without Dhan credentials; the message already names the fix.
