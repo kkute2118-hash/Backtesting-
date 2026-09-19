@@ -552,9 +552,21 @@ def run_market_data():
         summary["sectors_ok"] = len(ok)
         summary["sector_rows"] = rep.get("_total_rows", 0)
         summary["symbols_mapped"] = len(core.sector_map())
-        log("sectors", f"{len(ok)} list(s) fetched, {summary['symbols_mapped']:,} symbols mapped")
+        summary["from_index"] = len(core.sector_map(source="index"))
+        summary["from_industry"] = len(core.sector_map(source="industry"))
+        log("sectors", f"{len(ok)} list(s) fetched, {summary['symbols_mapped']:,} symbols mapped "
+                       f"({summary['from_index']:,} from a sector index, "
+                       f"{summary['from_industry']:,} backfilled from NSE Industry)")
         for k, why in bad.items():
             log("sectors", f"  FAILED {k}: {why}")
+        # A renamed NSE industry silently drops every stock carrying it, and
+        # only this line would show it.
+        unmapped = rep.get("_unmapped_industries") or {}
+        if unmapped:
+            summary["unmapped_industries"] = unmapped
+            log("sectors", f"  {len(unmapped)} industry string(s) not in INDUSTRY_TO_SECTOR — "
+                           f"those stocks have no sector: "
+                           + ", ".join(f"{k} ({n})" for k, n in list(unmapped.items())[:8]))
         summary["sectors_failed"] = list(bad)
     except Exception as exc:
         summary["sectors_error"] = str(exc)[:300]
