@@ -1,5 +1,5 @@
 import {
-  Activity, BarChart3, Brain, Database, Eye, LayoutDashboard, Radar,
+  Activity, BarChart3, Brain, Database, Eye, Layers, LayoutDashboard, Radar,
   Settings, Target, TestTube2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -31,9 +31,11 @@ export const NAV: NavGroup[] = [
       { href: "/", label: "Dashboard", icon: LayoutDashboard,
         description: "Market, data health and the state of the book" },
       { href: "/scanner", label: "Scanner", icon: Target,
-        description: "Run S1-S4 across a universe" },
+        description: "Run S1-S5 across a universe" },
       { href: "/radar", label: "Early Warning", icon: Radar,
         description: "Setups forming before they trigger" },
+      { href: "/sectors", label: "Sector Strength", icon: Layers,
+        description: "Which sectors are leading, to narrow a scan" },
       { href: "/watchlist", label: "Watchlist", icon: Eye,
         description: "Stocks you are tracking" },
     ],

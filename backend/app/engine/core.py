@@ -67,6 +67,59 @@ FULL_NSE_UNIVERSE = "NSE All Cash (~2000)"
 # at Nifty 500.
 UNIVERSE_CHOICES = [FULL_NSE_UNIVERSE] + list(INDEX_URLS.keys())
 
+# ---- Sector membership and index prices --------------------------------------
+# Two different things the engine has never had, and they are not the same:
+#
+#   SECTOR_INDEX_URLS gives MEMBERSHIP - which stocks belong to which sector.
+#   INDEX_PRICE_SYMBOLS gives PRICES - the index's own OHLC, so an index has a
+#   trend and a support level of its own rather than being inferred from its
+#   members.
+#
+# Until both existed, scanner.py read the "market regime" from
+# `max(data.values(), key=len)` - whichever single stock had the longest
+# history. Every regime label in the database was one arbitrary company.
+SECTOR_INDEX_URLS = {
+    "Auto": "https://www.niftyindices.com/IndexConstituent/ind_niftyautolist.csv",
+    "Bank": "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv",
+    "Energy": "https://www.niftyindices.com/IndexConstituent/ind_niftyenergylist.csv",
+    "FMCG": "https://www.niftyindices.com/IndexConstituent/ind_niftyfmcglist.csv",
+    "IT": "https://www.niftyindices.com/IndexConstituent/ind_niftyitlist.csv",
+    "Media": "https://www.niftyindices.com/IndexConstituent/ind_niftymedialist.csv",
+    "Metal": "https://www.niftyindices.com/IndexConstituent/ind_niftymetallist.csv",
+    "Pharma": "https://www.niftyindices.com/IndexConstituent/ind_niftypharmalist.csv",
+    "PSU Bank": "https://www.niftyindices.com/IndexConstituent/ind_niftypsubanklist.csv",
+    "Realty": "https://www.niftyindices.com/IndexConstituent/ind_niftyrealtylist.csv",
+    "Financial Services": "https://www.niftyindices.com/IndexConstituent/ind_niftyfinancelist.csv",
+    "Consumer Durables": "https://www.niftyindices.com/IndexConstituent/ind_niftyconsumerdurableslist.csv",
+    "Healthcare": "https://www.niftyindices.com/IndexConstituent/ind_niftyhealthcarelist.csv",
+    "Oil Gas": "https://www.niftyindices.com/IndexConstituent/ind_niftyoilgaslist.csv",
+}
+
+# Index OHLC to store. The key is the name the engine uses; the value is the
+# symbol as Dhan's scrip master spells it in its INDEX segment. Stored under an
+# INDEX_SYMBOL_PREFIX so an index can never be mistaken for a tradable stock by
+# a scan, a universe or the breadth calculation.
+INDEX_SYMBOL_PREFIX = "^"
+INDEX_PRICE_SYMBOLS = {
+    "NIFTY 50": "NIFTY", "NIFTY 500": "NIFTY 500", "NIFTY BANK": "NIFTY BANK",
+    "NIFTY MIDCAP 150": "NIFTY MIDCAP 150", "NIFTY SMLCAP 250": "NIFTY SMLCAP 250",
+    "NIFTY AUTO": "NIFTY AUTO", "NIFTY IT": "NIFTY IT", "NIFTY PHARMA": "NIFTY PHARMA",
+    "NIFTY FMCG": "NIFTY FMCG", "NIFTY METAL": "NIFTY METAL",
+    "NIFTY ENERGY": "NIFTY ENERGY", "NIFTY REALTY": "NIFTY REALTY",
+    "NIFTY PSU BANK": "NIFTY PSU BANK", "NIFTY FIN SERVICE": "NIFTY FIN SERVICE",
+}
+# The index the market regime is read from, once its prices are stored.
+REGIME_INDEX = "NIFTY 500"
+
+
+def index_store_symbol(name):
+    """The candle-store key for an index. Prefixed so it is never a stock."""
+    return f"{INDEX_SYMBOL_PREFIX}{str(name).upper().strip()}"
+
+
+def is_index_symbol(sym):
+    return str(sym).startswith(INDEX_SYMBOL_PREFIX)
+
 
 @st.cache_data(ttl=86400)
 def index_universe(name):
@@ -1382,6 +1435,204 @@ MARKET_TZ = timezone(MARKET_UTC_OFFSET, "IST")
 DHAN_MARKET_TZ = MARKET_TZ_NAME
 
 
+def dhan_index_map():
+    """Index symbol -> Dhan security id, from the INDEX segment of the master.
+
+    dhan_map() deliberately filters the scrip master down to NSE cash equity,
+    which excludes every index. This is the same lookup for the other segment.
+    """
+    m = dhan_master()
+    cols = {str(c).strip().lower(): c for c in m.columns}
+    sym = next((cols[k] for k in ["sem_trading_symbol", "trading_symbol",
+                                  "sem_custom_symbol", "custom_symbol"] if k in cols), None)
+    sid = next((cols[k] for k in ["sem_smst_security_id", "sem_security_id",
+                                  "security_id"] if k in cols), None)
+    seg = next((cols[k] for k in ["sem_segment", "segment"] if k in cols), None)
+    ins = next((cols[k] for k in ["sem_instrument_name", "instrument",
+                                  "sem_exch_instrument_type"] if k in cols), None)
+    if not sym or not sid:
+        raise RuntimeError("Dhan symbol/Security ID columns not found")
+    m = m.copy()
+    m["_sym"] = m[sym].astype(str).str.upper().str.strip()
+    keep = pd.Series(True, index=m.index)
+    if ins:
+        keep &= m[ins].astype(str).str.upper().str.strip().isin(["INDEX", "IDX", "I"])
+    elif seg:
+        keep &= m[seg].astype(str).str.upper().str.strip().isin(["I", "INDEX", "IDX_I"])
+    m = m[keep]
+    return dict(zip(m["_sym"], m[sid]))
+
+
+def sync_index_history(names=None, years=5, refresh_tail_days=5):
+    """Store daily OHLC for the indices in INDEX_PRICE_SYMBOLS.
+
+    Indices go into the same `candles` table under a '^' prefix, so nothing
+    that walks the store can mistake one for a tradable stock. Returns a report
+    per index rather than raising: one delisted or renamed index should not
+    abort the whole sync.
+
+    UNTESTED against the live Dhan feed - written without credentials to hand.
+    The segment/instrument pair (IDX_I / INDEX) and the master's index-segment
+    spelling are the two things most likely to need adjusting on first run.
+    """
+    if not dhan_configured():
+        raise RuntimeError("Dhan credentials are not configured")
+    names = list(names or INDEX_PRICE_SYMBOLS.keys())
+    end = last_expected_nse_session()
+    start = (pd.Timestamp(end) - pd.DateOffset(years=int(years))).date()
+    out = {}
+    con = _db()
+    try:
+        for name in names:
+            feed_symbol = INDEX_PRICE_SYMBOLS.get(name, name)
+            store = index_store_symbol(name)
+            try:
+                lo, hi = _bounds(con, store)
+                frm = start if not hi else max(start, (pd.Timestamp(hi) - pd.Timedelta(days=refresh_tail_days)).date())
+                d = dhan_history(feed_symbol, frm, end, segment="IDX_I", instrument="INDEX")
+                if d is None or d.empty:
+                    out[name] = {"ok": False, "reason": "no rows returned"}
+                    continue
+                # Indices carry no volume; downstream code divides by it, so a
+                # zero would produce inf rather than an honest NaN.
+                if "volume" not in d.columns or not d["volume"].astype(bool).any():
+                    d["volume"] = np.nan
+                _save(con, store, d)
+                con.commit()
+                out[name] = {"ok": True, "rows": int(len(d)),
+                             "from": str(d.index.min().date()), "to": str(d.index.max().date())}
+            except Exception as exc:
+                out[name] = {"ok": False, "reason": str(exc)[:200]}
+    finally:
+        con.close()
+    return out
+
+
+def load_index_history(name, start=None, end=None):
+    """Stored OHLC for one index, or an empty frame when it was never synced."""
+    con = _db()
+    try:
+        d = _read_cache(con, index_store_symbol(name),
+                        start or "2000-01-01", end or last_expected_nse_session())
+    finally:
+        con.close()
+    return d if d is not None else pd.DataFrame()
+
+
+def ensure_sector_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS sector_membership(
+            symbol TEXT NOT NULL, sector TEXT NOT NULL, updated_at TEXT,
+            PRIMARY KEY(symbol, sector))""")
+        con.commit()
+    finally:
+        con.close()
+
+
+def sync_sector_membership(urls=None):
+    """Build symbol -> sector from the NSE sector-index constituent lists.
+
+    A stock can legitimately sit in more than one sector index (a bank is in
+    Bank and in Financial Services), so membership is many-to-many and the
+    caller decides how to collapse it. Storing one sector per symbol here would
+    silently pick a winner.
+
+    UNTESTED: needs outbound access to niftyindices.com.
+    """
+    urls = dict(urls or SECTOR_INDEX_URLS)
+    ensure_sector_table()
+    now = datetime.now().isoformat(timespec="seconds")
+    report, rows = {}, []
+    for sector, url in urls.items():
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.BytesIO(r.content))
+            col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
+            members = sorted({str(x).strip().upper() for x in df[col].dropna()})
+            rows += [(m, sector, now) for m in members]
+            report[sector] = {"ok": True, "members": len(members)}
+        except Exception as exc:
+            report[sector] = {"ok": False, "reason": str(exc)[:200]}
+    if rows:
+        con = _db()
+        try:
+            con.executemany("""INSERT INTO sector_membership(symbol,sector,updated_at)
+                VALUES(?,?,?) ON CONFLICT(symbol,sector) DO UPDATE SET
+                updated_at=excluded.updated_at""", rows)
+            con.commit()
+        finally:
+            con.close()
+    report["_total_rows"] = len(rows)
+    return report
+
+
+def sector_map():
+    """{symbol: [sectors]} from the stored membership, empty until synced."""
+    ensure_sector_table()
+    con = _db()
+    try:
+        rows = con.execute("SELECT symbol, sector FROM sector_membership").fetchall()
+    finally:
+        con.close()
+    out = {}
+    for sym, sec in rows:
+        out.setdefault(str(sym).upper(), []).append(str(sec))
+    return out
+
+
+def sector_relative_strength(data=None, lookbacks=(21, 63, 126), benchmark="NIFTY 500"):
+    """Which sectors are outperforming the benchmark, over several windows.
+
+    Uses stored index prices where the sector has its own index, and falls back
+    to an equal-weighted composite of its members when it does not. Reports
+    every lookback rather than one: a sector leading over a month and lagging
+    over six is a different proposition from one leading over both, and
+    collapsing that to a single number hides it.
+    """
+    bench = load_index_history(benchmark)
+    rows = []
+    members = {}
+    for sym, secs in sector_map().items():
+        for sec in secs:
+            members.setdefault(sec, []).append(sym)
+
+    def ret(series, n):
+        s = series.dropna()
+        if len(s) <= n:
+            return np.nan
+        return float(s.iloc[-1] / s.iloc[-1 - n] * 100 - 100)
+
+    bench_r = {n: ret(bench.close, n) if not bench.empty else np.nan for n in lookbacks}
+    for sector, syms in sorted(members.items()):
+        idx_name = f"NIFTY {sector.upper()}"
+        px = load_index_history(idx_name)
+        source = "index"
+        if px.empty:
+            if not data:
+                continue
+            frames = [data[s].close.pct_change() for s in syms if s in data and data[s] is not None]
+            if not frames:
+                continue
+            comp = (1 + pd.concat(frames, axis=1).mean(axis=1)).cumprod()
+            px = pd.DataFrame({"close": comp})
+            source = "equal-weighted members"
+        row = {"Sector": sector, "Members": len(syms), "Source": source}
+        for n in lookbacks:
+            r = ret(px.close, n)
+            row[f"Return {n}d %"] = round(r, 2) if np.isfinite(r) else None
+            b = bench_r.get(n)
+            row[f"vs {benchmark} {n}d"] = (round(r - b, 2)
+                                           if np.isfinite(r) and np.isfinite(b) else None)
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    key = f"vs {benchmark} {lookbacks[0]}d"
+    if not out.empty and key in out.columns:
+        out = out.sort_values(key, ascending=False, na_position="last").reset_index(drop=True)
+    return out
+
+
 def market_now(now=None):
     """Current market wall-clock time as a NAIVE datetime in IST.
 
@@ -1825,11 +2076,17 @@ def _dhan_session_index(timestamps):
     return idx.tz_convert(DHAN_MARKET_TZ).tz_localize(None).normalize()
 
 
-def dhan_history(symbol,start_date,end_date):
+def dhan_history(symbol,start_date,end_date,segment="NSE_EQ",instrument="EQUITY"):
+    """Daily OHLC from Dhan.
+
+    `segment`/`instrument` default to cash equity. Indices live in a different
+    segment (IDX_I / INDEX) and are not in dhan_map(), which filters the scrip
+    master down to NSE equity - see dhan_index_map().
+    """
     clean=str(symbol).upper().replace(".NS","")
-    sid=dhan_map().get(clean)
+    sid=(dhan_index_map().get(clean) if segment=="IDX_I" else dhan_map().get(clean))
     if not sid:raise ValueError("Security ID not found: "+clean)
-    payload={"securityId":sid,"exchangeSegment":"NSE_EQ","instrument":"EQUITY",
+    payload={"securityId":sid,"exchangeSegment":segment,"instrument":instrument,
              "expiryCode":0,"oi":False,
              "fromDate":pd.Timestamp(start_date).strftime("%Y-%m-%d"),
              "toDate":(pd.Timestamp(end_date)+pd.Timedelta(days=1)).strftime("%Y-%m-%d")}
@@ -6335,6 +6592,34 @@ def radar_missing_rule_summary(radar_df):
 
 # ========================= MARKET REGIME =========================
 
+def market_regime_frame(data=None):
+    """The frame the market regime should actually be read from.
+
+    Order of preference: the stored REGIME_INDEX prices, then any stored index,
+    then - only as a last resort - the longest-history stock, which is what
+    this system used unknowingly for its whole life. The caller is told which
+    one it got, so "market regime" can never again silently mean "one company".
+    """
+    try:
+        d = load_index_history(REGIME_INDEX)
+        if d is not None and len(d) >= 260:
+            return d, f"index {REGIME_INDEX}"
+    except Exception:
+        pass
+    for alt in INDEX_PRICE_SYMBOLS:
+        try:
+            d = load_index_history(alt)
+            if d is not None and len(d) >= 260:
+                return d, f"index {alt}"
+        except Exception:
+            continue
+    if data:
+        stocks = {k: v for k, v in data.items() if not is_index_symbol(k) and v is not None}
+        if stocks:
+            return max(stocks.values(), key=len), "FALLBACK: longest-history stock (no index synced)"
+    return pd.DataFrame(), "unavailable"
+
+
 def regime_from_index(d):
     x=features(d).dropna()
     if len(x)<30: return "UNKNOWN",0
@@ -9986,6 +10271,33 @@ def _portfolio_returns(data, tickers, lookback=PORTFOLIO_CORRELATION_LOOKBACK):
     return pd.DataFrame(series).dropna()
 
 
+# Which strategy gets a slot when more candidates qualify than there is room
+# for. EVIDENCE_DERIVED, and it is a claim about the STRATEGY, not about any
+# individual candidate - unlike Score, which was measured and does not predict
+# outcome (see build_portfolio's docstring).
+#
+# Measured on 485 NSE symbols, 2022-06 to 2026-09, trades actually taken through
+# a 3-slot book: S4 returned +5.20% per trade against S5's +0.56%, at a 57.1%
+# win rate against 30.1%. But S5 fires constantly and S4 about 12 times a week,
+# so first-come allocation spent the slots on S5 and took only 12-21 S4 trades
+# in 4.3 years. Preferring S4 raised that to 38-53 and moved median CAGR from
+# 10.3% to 19.1%, with the spread across runs collapsing from 27-154% to
+# 78-125% - the allocation stops being a lottery.
+#
+# It costs drawdown: median peak-to-trough went from -28% to -34%, worst run
+# -58%. Concentrating into the better strategy concentrates its bad patches too.
+#
+# Strategies not listed sort after those that are, and liquidity breaks every
+# remaining tie. Re-measure before reordering: this is one book over one period.
+STRATEGY_SLOT_PRIORITY = {"S4_SEPA": 0, "S4": 0, "S5_POCKETPIVOT": 1}
+STRATEGY_SLOT_PRIORITY_DEFAULT = 2
+
+
+def _slot_priority(label):
+    return STRATEGY_SLOT_PRIORITY.get(str(label).upper().strip(),
+                                      STRATEGY_SLOT_PRIORITY_DEFAULT)
+
+
 def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
                     risk_pct=PORTFOLIO_DEFAULT_RISK_PCT,
                     max_positions=PORTFOLIO_DEFAULT_SLOTS,
@@ -9993,11 +10305,15 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
                     allow_leverage=False, stop_column="SL 7%"):
     """Select and size a SET of candidates, rather than ranking them.
 
-    Selection order is liquidity, and nothing else. Ordering by Score would
-    imply the score predicts outcome; it does not, and within a single strategy
-    it ranks slightly backwards (top quartile -0.079R against the bottom on S1).
-    Liquidity is a cost measure, so ordering by it is defensible without
-    claiming any forecasting power.
+    Selection order is strategy priority first, then liquidity. Ordering by
+    Score would imply the score predicts outcome; it does not, and within a
+    single strategy it ranks slightly backwards (top quartile -0.079R against
+    the bottom on S1). Neither key claims to forecast an individual candidate:
+    liquidity is a cost measure, and STRATEGY_SLOT_PRIORITY is a measured
+    statement about which STRATEGY is worth a scarce slot - S4 earned +5.20%
+    per trade against S5's +0.56% over the same book. The distinction matters,
+    because ranking candidates is the thing that keeps failing here and
+    ranking strategies is not the same operation.
 
     Sizing is equal risk, capped by equal notional. Both halves matter: on a 7%
     stop, risking 1% of capital implies a position worth about 14% of it, so
@@ -10031,6 +10347,7 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
     df["_stop"] = pd.to_numeric(df[stop_column], errors="coerce")
     df["_risk_unit"] = df["_entry"] - df["_stop"]
     df["_liquidity"] = [_portfolio_liquidity(data, t) for t in df["_ticker"]]
+    df["_priority"] = [_slot_priority(v) for v in df.get("Strategy", pd.Series(index=df.index, dtype=object))]
 
     skipped = []
     bad = df[~(df["_risk_unit"] > 0) | ~(df["_entry"] > 0)]
@@ -10043,7 +10360,11 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
 
     # One position per symbol: the same stock qualifying under two strategies is
     # one exposure, not two, and sizing it twice doubles the risk silently.
-    df = df.sort_values("_liquidity", ascending=False, na_position="last")
+    # Sorting by priority BEFORE the de-duplication is deliberate: when one
+    # stock qualifies under both S4 and S5, the row that survives should be the
+    # higher-priority strategy's, not whichever happened to come first.
+    df = df.sort_values(["_priority", "_liquidity"], ascending=[True, False],
+                        na_position="last")
     dup = df[df.duplicated("_ticker", keep="first")]
     for _, r in dup.iterrows():
         skipped.append({"ticker": r["_ticker"],
@@ -10056,7 +10377,9 @@ def build_portfolio(result, data=None, capital=PORTFOLIO_DEFAULT_CAPITAL,
     chosen = []
     for _, row in df.iterrows():
         if len(chosen) >= max_positions:
-            skipped.append({"ticker": row["_ticker"], "reason": "no slots left"})
+            skipped.append({"ticker": row["_ticker"],
+                            "reason": f"no slots left (strategy {row.get('Strategy', '?')} "
+                                      f"sorts after higher-priority ones)"})
             continue
         clash = None
         if not corr.empty and row["_ticker"] in corr.columns:
@@ -10722,6 +11045,12 @@ def save_learning_panel_run(result):
 
 ML_MIN_SAMPLES = 60
 ML_MIN_CLASS_SAMPLES = 15
+# Per-STRATEGY evidence before the classifier is allowed to speak about that
+# strategy. Without it, the first completed S5 forward test - one trade - put a
+# strategy_S5_POCKETPIVOT dummy into the model, and every S5 candidate then got
+# a confident-looking Win Probability fitted on a single winning sample. The
+# whole-model minimum above says nothing about the per-strategy slice.
+ML_MIN_STRATEGY_SAMPLES = 30
 ML_FEATURE_COLUMNS = [
     "score", "htf", "footprint", "strategy_score",
     "entry_quality", "relative_strength", "safety_score"
@@ -10813,6 +11142,10 @@ def train_win_probability_model(market="INDIA"):
         "gbc_model": gbc,
         "logit_model": logit,
         "feature_columns": list(X.columns),
+        # How much evidence exists per strategy, so inference can refuse to
+        # answer for one the model has barely seen.
+        "strategy_samples": {str(k).upper(): int(v) for k, v in
+                             q["strategy"].astype(str).str.upper().value_counts().items()},
         "gbc_auc": gbc_auc, "gbc_brier": gbc_brier,
         "logit_auc": logit_auc, "logit_brier": logit_brier,
     })
@@ -10833,6 +11166,27 @@ def ml_win_probability(model_info, row):
                 return v
         return default
 
+    strategy = str(g("strategy", "Strategy", default="")).upper()
+
+    # Two refusals, both of which used to be silent numbers instead.
+    #
+    # A strategy the model has barely seen. One completed S5 trade was enough to
+    # create its dummy column, after which every S5 candidate was handed a
+    # probability fitted on that single sample.
+    seen = (model_info.get("strategy_samples") or {}).get(strategy, 0)
+    if seen < ML_MIN_STRATEGY_SAMPLES:
+        return np.nan
+    #
+    # A missing strategy_score. g() would default it to 0.0, which is not
+    # "unknown" to a model trained on 15-30 - it is the worst possible setup.
+    # S5 has no quality component by design, so its score is absent rather than
+    # low, and the honest output is no estimate at all.
+    raw_strategy_score = row.get("strategy_score") if hasattr(row, "get") else None
+    if raw_strategy_score is None or pd.isna(raw_strategy_score):
+        raw_strategy_score = row.get("Strategy Score") if hasattr(row, "get") else None
+    if raw_strategy_score is None or pd.isna(raw_strategy_score):
+        return np.nan
+
     feat = {
         "score": g("score", "Score"),
         "htf": g("htf", "HTF Score", "HTF Demand", "HTF"),
@@ -10842,7 +11196,6 @@ def ml_win_probability(model_info, row):
         "relative_strength": g("relative_strength", "Relative Strength"),
         "safety_score": g("safety_score", "Safety Score"),
     }
-    strategy = str(g("strategy", "Strategy", default="")).upper()
     regime = str(g("regime", "Regime", default=""))
 
     x = pd.DataFrame([feat])
