@@ -13,6 +13,7 @@ import type {
   FilteredResults, ForwardPositions, Freshness, History, Indicators, Job,
   Overview, Preset, PresetConfig, Quote, Row, RunResult, RunSummary,
   SafetyReport, Universe, Watchlist,
+  SectorStrength,
 } from "@/types/api";
 
 /** Poll intervals, in one place so cadence is a deliberate decision.
@@ -48,6 +49,27 @@ export const useOverview = () =>
     queryKey: ["overview"],
     queryFn: () => api.get<Overview>("/market/overview"),
     refetchInterval: REFRESH.market,
+  });
+
+export const useSectorStrength = () =>
+  useQuery({
+    queryKey: ["sector-strength"],
+    queryFn: () => api.get<SectorStrength>("/market/sector-strength"),
+    staleTime: REFRESH.slow,
+  });
+
+export const useSyncSectors = () =>
+  useMutation({
+    mutationFn: () =>
+      api.post<{ synced: string[]; failed: Record<string, string>;
+                 rows: number; symbols_mapped: number }>("/market/sector-sync"),
+  });
+
+export const useSyncIndices = () =>
+  useMutation({
+    mutationFn: (years: number) =>
+      api.post<{ synced: Record<string, unknown>; failed: Record<string, string> }>(
+        "/market/index-sync", undefined, { years }),
   });
 
 export const useFreshness = (universes: string[]) =>

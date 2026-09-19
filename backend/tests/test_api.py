@@ -211,3 +211,21 @@ def test_custom_dsl_validation_is_a_plain_request(client):
     assert body["valid"] is False
     assert any("nope" in e for e in body["errors"])
     assert "rsi14" in body["columns"]
+
+
+def test_sector_strength_says_it_is_not_ready_rather_than_returning_nothing(client):
+    """Before any sync there is no membership. The endpoint has to say so — an
+    empty list would read as 'no sector is strong', which is a different claim."""
+    body = client.get("/api/v1/market/sector-strength").json()
+    assert body["ready"] is False
+    assert body["reason"]
+    assert body["sectors"] == []
+    assert body["benchmark"] == core.REGIME_INDEX
+
+
+def test_index_sync_refuses_clearly_without_dhan(client):
+    """Index prices come from Dhan. With no credentials this must be a stated
+    refusal, not a silent empty result."""
+    response = client.post("/api/v1/market/index-sync")
+    assert response.status_code == 400
+    assert "dhan" in response.json()["error"]["message"].lower()

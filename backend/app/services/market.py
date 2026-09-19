@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.core.errors import ApiError
 from app.db import app_store
 from app.engine import core
 from app.services import forward as forward_service
@@ -216,6 +217,83 @@ def overview() -> dict[str, Any]:
         "latest_scan": _latest_scan(),
         "providers": provider_status(),
     }
+
+
+def sector_strength(lookbacks: tuple[int, ...] = (21, 63, 126)) -> dict[str, Any]:
+    """Which sectors are leading, and how that was measured.
+
+    Degrades deliberately rather than failing. Sector MEMBERSHIP comes from the
+    NSE constituent lists and needs one fetch; index PRICES need Dhan. With
+    membership alone the strength of each sector is computed from an
+    equal-weighted composite of its members in the local candle store, which is
+    usable on day one. The `source` column on every row says which it was, so a
+    composite is never mistaken for the real index.
+    """
+    members = core.sector_map()
+    if not members:
+        return {"ready": False,
+                "reason": "No sector membership stored yet. Sync it first — it needs one "
+                          "fetch of the NSE constituent lists and no Dhan credentials.",
+                "sectors": [], "benchmark": core.REGIME_INDEX, "as_of": None}
+
+    tickers = sorted({sym for sym in members})
+    try:
+        data = core.load_scan_dataset(tickers)
+    except Exception:
+        data = {}
+
+    try:
+        table = core.sector_relative_strength(data=data, lookbacks=lookbacks)
+    except Exception as exc:
+        raise ApiError(f"Could not compute sector strength: {exc}") from exc
+
+    rows = frame_to_records(table) if table is not None and not table.empty else []
+    as_of = None
+    if data:
+        try:
+            as_of = str(max(df.index[-1] for df in data.values() if df is not None and len(df)).date())
+        except Exception:
+            as_of = None
+    benchmark_priced = not core.load_index_history(core.REGIME_INDEX).empty
+    return {
+        "ready": bool(rows),
+        "sectors": rows,
+        "benchmark": core.REGIME_INDEX,
+        "benchmark_priced": benchmark_priced,
+        "lookbacks": list(lookbacks),
+        "symbols_mapped": len(members),
+        "as_of": as_of,
+        "note": (None if benchmark_priced else
+                 "Index prices are not synced, so sector returns are compared against "
+                 "each other rather than against a priced benchmark. The 'vs' columns "
+                 "will be empty until an index sync runs."),
+    }
+
+
+def sync_sectors() -> dict[str, Any]:
+    """Fetch sector membership. Needs outbound access, not Dhan."""
+    try:
+        report = core.sync_sector_membership()
+    except Exception as exc:
+        raise ApiError(f"Sector sync failed: {exc}") from exc
+    ok = [k for k, v in report.items() if isinstance(v, dict) and v.get("ok")]
+    bad = {k: v.get("reason") for k, v in report.items()
+           if isinstance(v, dict) and not v.get("ok")}
+    return {"synced": ok, "failed": bad, "rows": report.get("_total_rows", 0),
+            "symbols_mapped": len(core.sector_map())}
+
+
+def sync_indices(years: int = 5) -> dict[str, Any]:
+    """Fetch index OHLC. Needs Dhan."""
+    if not core.dhan_configured():
+        raise ApiError("Index prices come from Dhan, which is not configured.")
+    try:
+        report = core.sync_index_history(years=years)
+    except Exception as exc:
+        raise ApiError(f"Index sync failed: {exc}") from exc
+    ok = {k: v for k, v in report.items() if v.get("ok")}
+    bad = {k: v.get("reason") for k, v in report.items() if not v.get("ok")}
+    return {"synced": ok, "failed": bad}
 
 
 def provider_status() -> dict[str, Any]:
