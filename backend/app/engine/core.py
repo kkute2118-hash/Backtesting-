@@ -11698,9 +11698,19 @@ def load_scan_dataset(tickers, min_bars=260, lookback_days=1000):
 #                            p=0.40), so S4 does not use it.
 #   sector rank <= 3         S4 only: the leading-sector bucket beat the rest
 #                            in 4 years of 4, p(mean)=0.0028. Requires REAL
-#                            sector-index membership - correlation-inferred
-#                            sectors were measured and do not carry the effect
-#                            (addendum 2), hence source="index" below.
+#                            sector-index membership. Both cheaper ways of
+#                            getting a sector onto the rest of the universe
+#                            were built, run and measured, and NEITHER carries
+#                            the effect: correlation inference (addendum 2) and
+#                            NSE's own Industry column (addendum 6, S4 top-3
+#                            PF 1.11 against 1.61 for the rest, 1 year in 4).
+#                            The reason is mechanical - an industry-labelled
+#                            stock correlates with its assigned sector at a
+#                            median of 0.129 against 0.325 for a real member,
+#                            and the rank is built from that sector's price.
+#                            Hence source="index" below, and hence a stock with
+#                            only an industry label FAILS S4's rule rather than
+#                            falling back to the ATR one.
 #   turnover >= Rs 40 cr     A floor, not a band. Returns fall monotonically
 #                            with liquidity (PF 1.56 -> 1.19 across quintiles)
 #                            and the ATR filter INVERTS in the least liquid

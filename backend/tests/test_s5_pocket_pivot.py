@@ -879,3 +879,37 @@ def test_persisting_signals_no_longer_gates_on_the_score(seeded_db):
     finally:
         con.close()
     assert rows == {"AAA": 1, "BBB": 1}, rows
+
+
+def test_s4s_sector_rule_reads_index_membership_only(seeded_db):
+    """An NSE Industry label says what a company does; index membership says
+    what the stock moves with, and the rank is built from the sector's price.
+    Industry-labelled stocks track their assigned sector at a median
+    correlation of 0.129, and S4's edge does not survive on them
+    (research/SECTOR_TIMING_FINDINGS.md addendum 6), so they must not feed the
+    lookup the rule uses."""
+    _clear_sectors()
+    core.ensure_sector_table()
+    con = core._db()
+    try:
+        con.executemany("INSERT OR REPLACE INTO sector_membership"
+                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)",
+                        [("INFY", "IT", "x", "index"),
+                         ("SMALLCO", "IT", "x", "industry")])
+        con.commit()
+    finally:
+        con.close()
+    assert core.sector_map(source="index") == {"INFY": ["IT"]}
+    assert core.sector_map(source="industry") == {"SMALLCO": ["IT"]}
+    assert sorted(core.sector_map()) == ["INFY", "SMALLCO"], "display still sees both"
+
+    ranks, lookup = {"IT": 1}, core.sector_map(source="index")
+    ok, _, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=1.0), 4,
+                                         sector_ranks=ranks, sector_lookup=lookup,
+                                         ticker="INFY")
+    assert ok
+    bad, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=9.0), 4,
+                                            sector_ranks=ranks, sector_lookup=lookup,
+                                            ticker="SMALLCO")
+    assert not bad, "an industry label must not satisfy S4's sector rule"
+    assert "sector" in why, "and it must fail ON the sector rule, not fall back to ATR"

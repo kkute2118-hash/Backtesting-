@@ -681,3 +681,78 @@ up separately in **`research/LIVE_SETUP.md`**; this records what changed in code
 End-to-end on the live database, one scan date, all five strategies selected:
 **181 signals before the filter, 25 after.** Scores as low as 39 now pass, which
 is the point - the score was never the thing that predicted anything.
+
+---
+
+# Addendum 6: the Industry backfill, run for real
+
+The backfill from Addendum 2 has now executed on GitHub Actions
+(run 35435335905, green). 17 constituent lists fetched, **385 membership rows,
+346 distinct symbols: 190 from a sector index, 156 backfilled from NSE's
+Industry column.** No industry string came back unmapped, so
+`INDUSTRY_TO_SECTOR` is confirmed against the live files.
+
+Against our tradable universe of 485 stocks:
+
+| | before | after |
+|---|---|---|
+| any sector | 183 (38%) | **330 (68%)** |
+| real sector-index member | 183 (38%) | 183 (38%) |
+| no sector at all | 302 | 155 |
+
+The 155 remaining are stocks whose NSE industry has no sector index to rank it
+against (Capital Goods, Chemicals, Construction, Services, Telecom, Textiles)
+or that sit in none of the three broad lists.
+
+## Does the S4 edge hold on industry-classified stocks?
+
+No. Same split as Addendum 2, same test:
+
+| strategy | sector from | n top-3 | n rest | PF top-3 | PF rest | years won | p(sign) | p(mean) |
+|---|---|---|---|---|---|---|---|---|
+| **S4** | index | 404 | 389 | **3.07** | 1.98 | 3/4 | 0.32 | 0.0000 |
+| **S4** | industry | 128 | 661 | **1.11** | **1.61** | **1/4** | 0.91 | 0.97 |
+| S5 | index | 2,110 | 7,752 | 2.06 | 1.95 | 4/5 | 0.16 | 0.007 |
+| S5 | industry | 1,279 | 5,646 | 2.28 | 2.17 | 3/5 | 0.47 | 0.10 |
+| S1 | index | 5,576 | 23,714 | 1.53 | 1.37 | 2/5 | 0.81 | 0.28 |
+| S1 | industry | 4,112 | 21,896 | 1.51 | 1.35 | 4/5 | 0.18 | 0.001 |
+| S3 | index | 9,310 | 44,418 | 1.45 | **1.63** | **0/5** | 1.00 | 1.00 |
+| S3 | industry | 4,114 | 21,867 | 1.32 | 1.22 | 4/5 | 0.18 | 0.22 |
+
+S4 on industry sectors is **worse than no filter** - PF 1.11 against 1.61, one
+year in four. S5 weakens to non-significance. S1 and S3 again show the opposite
+sign to their own index-sourced result, the same contradiction that marked the
+inferred sectors as noise.
+
+## Why - and this one is mechanical, not statistical
+
+Correlation of each stock's excess returns with the sector it was assigned
+(index members measured leave-one-out, so nothing is correlated with itself):
+
+| sector source | n | median correlation | share below 0.3 |
+|---|---|---|---|
+| sector index membership | 222 | **0.325** | 45% |
+| NSE Industry backfill | 147 | **0.129** | **92%** |
+
+**An NSE industry label describes what a company does. Index membership
+describes what the stock moves with.** The rank is computed from the sector's
+price, so only the second one can carry it. 92% of industry-labelled stocks
+correlate with their assigned sector below 0.3 - the largest backfilled bucket
+is Financial Services with 66 names, which lumps small NBFCs in with an index
+of large banks.
+
+## What this changes
+
+Nothing in the entry rules, and that is the point: `current_sector_ranks()`
+already defaulted to `source="index"`, and a stock with only an industry label
+already failed S4's rule rather than falling back to ATR. That was caution when
+it was written; it is now measured. The code comment and a test record it.
+
+The backfill is still worth having. It is real, published classification for
+147 more stocks and it drives the Sectors page, the sector-strength view and
+"what sector is this stock in" - all of which were blank for 62% of the
+universe. It is a display and research improvement, not an entry rule.
+
+**Both cheap routes to full sector coverage have now been built, run and
+measured, and neither carries the trading edge.** A stock either moves with a
+sector index or it does not, and no label supplies that.
