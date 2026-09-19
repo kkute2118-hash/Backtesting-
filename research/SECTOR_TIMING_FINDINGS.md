@@ -756,3 +756,88 @@ universe. It is a display and research improvement, not an entry rule.
 **Both cheap routes to full sector coverage have now been built, run and
 measured, and neither carries the trading edge.** A stock either moves with a
 sector index or it does not, and no label supplies that.
+
+---
+
+# Addendum 7: 100% sector coverage, and why the entry rule keeps its own ranking
+
+Every NSE industry now maps to a sector instead of only the 14 with an index.
+A sector without an index is priced by an equal-weighted composite of its own
+members - the same fallback the engine already used for Bank, IT and Financial
+Services - so cement and telecom names get a sector that is theirs rather than
+being filed under somebody else's index. `SECTOR_MIN_MEMBERS_TO_RANK = 5` drops
+the buckets too small to price.
+
+Synced (run 35438294923, green): **546 rows, 507 symbols, 190 from a sector
+index and 317 from NSE Industry.**
+
+| | before | after |
+|---|---|---|
+| our universe with a sector | 330 of 485 (68%) | **485 of 485 (100%)** |
+| tradable (>= Rs 40 cr/day) with a sector | 263 of 378 (70%) | **378 of 378 (100%)** |
+| rankable sectors | 14 | **22** |
+
+New sectors and their member counts: Capital Goods 48, Chemicals 26, Consumer
+Services 25, Services 14, Construction 13, Construction Materials 11, Telecom
+10, Textiles 5. Diversified (3) falls under the member floor.
+
+## Two things the measurement then said
+
+**1. S4 on industry-sourced stocks is dead at every threshold.**
+
+| strategy | sector from | cut | PF top | PF rest | years won | p(sign) |
+|---|---|---|---|---|---|---|
+| S4 | industry | top-3 | 1.08 | 1.52 | **0/4** | 1.000 |
+| S4 | industry | top-4 | 1.01 | 1.61 | **0/5** | 1.000 |
+| S4 | industry | top-5 | 1.04 | 1.64 | **0/5** | 1.000 |
+| S4 | industry | top-6 | 1.07 | 1.67 | **0/5** | 1.000 |
+
+Not a threshold that was set wrong - the filter is worse than no filter at
+every cut, in every year. Giving a stock its own industry's composite instead
+of a foreign index did not rescue it. This is the third distinct way of
+assigning a sector to the uncovered stocks (correlation, foreign index label,
+own-industry composite) and the third to fail.
+
+**2. Ranking all 22 sectors weakens S4's real edge.**
+
+| ranking universe | PF top-3 | PF rest | years won | p(mean) |
+|---|---|---|---|---|
+| 14 index-priced sectors | **3.07** | 1.98 | 3/4 | **0.0000** |
+| all 22 sectors | 2.95 | 2.31 | 3/4 | 0.103 |
+
+Two causes, both real. The eight industry-defined composites are noisier and
+crowd the top of the ranking, displacing index sectors S4 would otherwise have
+picked. And "top 3" silently became a stricter cut - top-3 of 14 is the top
+21%, top-3 of 22 is the top 14%, which is why n falls from 404 to 226. Widening
+the cut to keep the share constant does not recover it either (top-4: 2/4
+years, top-5: 2/4, top-6: 2/4).
+
+## What was done about it
+
+Two rankings, for two different questions.
+
+* **`current_sector_ranks(source="index")`** - the 14 index-priced sectors over
+  their real members. This is what S4's entry rule reads, unchanged, because
+  that is the configuration the edge was measured in.
+* **`current_sector_ranks(source=None)`** - all 22. This is what the Sectors
+  page, sector strength and "what sector is this stock in" show.
+
+The eight new sectors appear on the dashboard and never in S4's ranking. That
+separation is now covered by a test, because it is easy to "improve" the
+dashboard ranking and silently degrade the entry filter with it.
+
+## What the coverage is actually good for
+
+Full coverage does what it was asked for: every stock now has a sector, the
+Sectors page ranks 22 of them, and money rotating between Capital Goods,
+Chemicals, Telecom and Construction is visible where it was invisible before.
+That is real and it is worth having for watching and for research.
+
+What it does not do is let S4 trade those stocks. Three separate routes to a
+sector for the other 62% have now been built, run and measured, and none
+carries the edge. The pattern across all three is the same: **the rank is
+computed from a sector's price, and a stock only inherits it by actually moving
+with that price.** An index member does; a stock that merely shares a label
+does not, whichever way the label is derived.
+
+S4 keeps the 183.

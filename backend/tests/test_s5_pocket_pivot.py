@@ -946,3 +946,41 @@ def test_s4s_sector_rule_reads_index_membership_only(seeded_db):
                                             ticker="SMALLCO")
     assert not bad, "an industry label must not satisfy S4's sector rule"
     assert "sector" in why, "and it must fail ON the sector rule, not fall back to ATR"
+
+
+def test_the_entry_ranking_and_the_dashboard_ranking_are_separate(seeded_db):
+    """Ranking all 22 sectors measurably weakens S4's filter - the
+    industry-defined composites are noisier and crowd the top, displacing real
+    index sectors. So the entry rule ranks the index-priced sectors only while
+    the dashboard shows everything (addendum 7)."""
+    _clear_sectors()
+    con = core._db()
+    try:
+        rows = [(f"IDX{i}", "IT", "x", "index") for i in range(6)]
+        rows += [(f"IND{i}", "Chemicals", "x", "industry") for i in range(6)]
+        con.executemany("INSERT OR REPLACE INTO sector_membership"
+                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)", rows)
+        con.commit()
+    finally:
+        con.close()
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    rng = np.random.default_rng(1)
+    data = {s: pd.DataFrame({"close": 100 * np.cumprod(1 + rng.normal(0, .01, 300))}, index=idx)
+            for s, *_ in [(r[0],) for r in rows]}
+    # A rank is relative TO the benchmark, so without it every sector scores
+    # NaN and both rankings come back empty - which would pass the first
+    # assertion for the wrong reason.
+    con = core._db()
+    try:
+        con.executemany(
+            "INSERT OR REPLACE INTO candles(symbol,dt,open,high,low,close,volume) "
+            "VALUES(?,?,?,?,?,?,?)",
+            [(core.index_store_symbol(core.REGIME_INDEX), d.strftime("%Y-%m-%d"),
+              100.0, 100.0, 100.0, 100.0, 0.0) for d in idx])
+        con.commit()
+    finally:
+        con.close()
+    entry = core.current_sector_ranks(data=data, source="index")
+    board = core.current_sector_ranks(data=data, source=None)
+    assert "Chemicals" not in entry, "an industry-defined sector must not rank S4 entries"
+    assert "Chemicals" in board, "but the dashboard must still show it"

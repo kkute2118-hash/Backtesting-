@@ -11756,9 +11756,20 @@ APPLY_ENTRY_EVIDENCE_FILTER = True
 def current_sector_ranks(data=None, lookback=ENTRY_SECTOR_LOOKBACK, source="index"):
     """{sector: rank} by relative strength vs the benchmark, 1 = strongest.
 
-    source="index" by default: only real sector-index membership feeds the
-    composites, because inferred membership was measured not to carry the
-    effect the rank is used for.
+    TWO RANKINGS, deliberately, because they answer different questions.
+
+    source="index" (the default, and what S4's rule uses) ranks only the 14
+    sectors that have a real NSE index, over their real members. source=None
+    ranks all 22 including the industry-defined ones, which is what the
+    dashboard shows.
+
+    They are kept apart because ranking all 22 MEASURABLY DEGRADES the filter:
+    S4's leading-sector edge falls from PF 3.07 against 1.98 (p(mean) 0.0000)
+    on the 14 to PF 2.95 against 2.31 (p(mean) 0.103) on the 22. The eight
+    industry-defined sectors are noisier composites and crowd the top of the
+    ranking, displacing index sectors. And S4 on industry-sourced stocks is
+    dead at every cut tried - PF ~1.05 against ~1.6, 0 years of 4
+    (research/SECTOR_TIMING_FINDINGS.md addendum 7).
     """
     rs = sector_relative_strength(data=data, lookbacks=(lookback,), source=source)
     key = f"vs {REGIME_INDEX} {lookback}d"
