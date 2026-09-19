@@ -30,7 +30,8 @@ export function DataPage() {
   const [period, setPeriod] = useState<(typeof PERIODS)[number]>("2 Years");
   const [jobId, setJobId] = useState<string | null>(null);
 
-  const { data: config } = useConfig();
+  const { data: config, isLoading: configLoading, error: configError,
+          refetch: refetchConfig } = useConfig();
   const { data: universeOptions } = useUniverses();
   const store = useDataStore();
   const backup = useBackupStatus();
@@ -48,7 +49,13 @@ export function DataPage() {
   const renewToken = useRenewToken();
   const smokeTest = useSmokeTest();
 
-  const dhanConfigured = config?.providers.dhan.configured ?? false;
+  // Three states, not two. `?? false` treated "still loading" as "not
+  // configured" and showed the warning on every page load, telling the user
+  // their credentials were missing when the server had reported them present.
+  // Derived from providers.dhan.configured alone: DHAN_ACCESS_TOKEN is
+  // auto-generated from the PIN and TOTP secret, so requiring it here would
+  // also read a correctly configured server as broken.
+  const dhanConfigured = config?.providers.dhan.configured ?? null;
   const dhanVariables = config?.providers.dhan.variables ?? null;
 
   async function launch(
@@ -73,7 +80,19 @@ export function DataPage() {
           the rate-limited Dhan budget under your control."
       />
 
-      {!dhanConfigured ? (
+      {configLoading ? (
+        <Banner tone="accent" title="Checking provider status">
+          Reading the server's configuration. On the free plan a sleeping instance can take
+          up to a minute to answer its first request.
+        </Banner>
+      ) : configError ? (
+        <Banner tone="warn" title="Could not read the provider status">
+          The server did not answer, so whether Dhan is configured is unknown - this is not a
+          statement that it is missing.{" "}
+          <button type="button" onClick={() => void refetchConfig()}
+            className="underline underline-offset-2">Retry</button>
+        </Banner>
+      ) : dhanConfigured === false ? (
         <Banner tone="warn" title="Dhan is not configured">
           Set DHAN_CLIENT_ID plus DHAN_PIN and DHAN_TOTP_SECRET (or DHAN_ACCESS_TOKEN) in the
           backend environment. Without them the app can still scan, backtest and learn from

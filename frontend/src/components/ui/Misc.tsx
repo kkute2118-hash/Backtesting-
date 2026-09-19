@@ -163,3 +163,23 @@ export function SectionTitle({
     </div>
   );
 }
+
+/**
+ * A count that tells the truth about whether it is known yet.
+ *
+ * `(data?.rows ?? []).length` renders 0 while a request is in flight, and 0 is
+ * a claim: the Forward page showed "Open (0) / Closed (0)" for thirty seconds
+ * while the dashboard showed 39 and 7. Three states, always:
+ *
+ *   loading -> an em dash, which reads as "not yet" rather than "none"
+ *   error   -> an interpunct, so a failure is never mistaken for an empty book
+ *   loaded  -> the number
+ */
+export function countLabel(
+  count: number | null | undefined,
+  state: { isLoading?: boolean; isPending?: boolean; error?: unknown } | undefined,
+): string {
+  if (state?.error) return "·";
+  if (state?.isLoading ?? state?.isPending) return "—";
+  return count == null ? "—" : String(count);
+}
