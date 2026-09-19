@@ -138,3 +138,135 @@ The 38% sector coverage is a separate, hard blocker: a "leading sector only" rul
 
 Method notes: per-year control first, then a permutation null on both the mean and the
 sign count, then a best-of-N adjustment. Pooled results are reported but never relied on.
+
+---
+
+# Addendum: strategy-by-strategy, and ROI on Rs 1,00,000
+
+The pooled test above is dominated by S1 and S3 (83,018 of 86,055 tagged trades), and S5
+was missing from it entirely - `trail_trades.csv` only looped strategies 1-4. Rebuilt the
+trade table to cover **S1-S5** (S5 joined from `s5_trades.csv` with its own state-machine
+exit) and re-ran per strategy. **The answer is not the same for every strategy, and the
+pooled "nothing works" conclusion is wrong for S4 and S5.**
+
+Sector-tagged signals per strategy: S1 29,290 | S2 2,244 | S3 53,728 | S4 793 | S5 9,862.
+
+## Setup quality by strategy (live exit rules, -7% / +21%; S5 on its own trail)
+
+| strategy | setup | n | win% | avg% | PF | years won |
+|---|---|---|---|---|---|---|
+| **S1** | all tagged | 29,290 | 33.3 | 1.90 | 1.40 | - |
+| | top-3 sector | 5,576 | 35.1 | 2.39 | 1.53 | 2/5 |
+| | leading sector | 1,594 | 31.9 | 1.63 | 1.34 | 1/5 |
+| **S2** | all tagged | 2,244 | 33.1 | 1.88 | 1.40 | - |
+| | top-3 sector | 644 | 34.0 | 2.05 | 1.44 | 2/5 |
+| | leading sector | 238 | 29.8 | 1.18 | 1.24 | 1/3 |
+| **S3** | all tagged | 53,728 | 36.1 | 2.69 | 1.60 | - |
+| | top-3 sector | 9,310 | 34.1 | 2.11 | 1.45 | **0/5** |
+| | leading sector | 2,517 | 33.4 | 1.88 | 1.40 | 2/5 |
+| **S4** | all tagged | 793 | 46.9 | 5.54 | 2.48 | - |
+| | top-3 sector | 404 | 52.5 | 6.96 | 3.07 | 3/4 |
+| | leading sector | 168 | **54.2** | **7.64** | **3.43** | **4/4** |
+| **S5** | all tagged | 9,862 | 37.2 | 2.14 | 1.98 | - |
+| | top-3 sector | 2,110 | 39.1 | 2.87 | 2.06 | 4/5 |
+| | leading sector | 701 | 40.8 | 4.19 | 2.44 | 4/5 |
+
+Monotone and per-year consistent for S4 and S5. Flat for S1/S2, and **negative for S3** -
+S3 in a top-3 sector lost to S3 elsewhere in all five years.
+
+## Within-year permutation nulls (label shuffled inside each year)
+
+| strategy | setup | n | years won | mean diff | p(sign) | p(mean) |
+|---|---|---|---|---|---|---|
+| S1 | top-3 | 5,576 | 2/5 | +0.11 | 0.80 | 0.276 |
+| S1 | rank 1 | 1,594 | 1/5 | -0.64 | 0.97 | 0.971 |
+| S2 | top-3 | 644 | 2/5 | +1.46 | 0.81 | 0.017 |
+| S2 | rank 1 | 208 | 1/3 | -0.44 | 0.88 | 0.691 |
+| S3 | top-3 | 9,310 | 0/5 | -0.58 | 1.00 | 1.000 |
+| S3 | rank 1 | 2,517 | 2/5 | +0.38 | 0.80 | 0.090 |
+| **S4** | rank 1 | 151 | **4/4** | +3.98 | 0.067 | **0.0028** |
+| **S4** | top-3 | 350 | 3/4 | +4.43 | 0.320 | **0.0000** |
+| **S5** | rank 1 | 701 | **4/5** | +2.40 | 0.154 | **0.0002** |
+| **S5** | top-3 | 2,110 | 4/5 | +0.92 | 0.168 | **0.0094** |
+
+Unlike the pooled case, the S4/S5 means are *not* carried by one year:
+
+```
+S4 rank 1:  2022 +2.71 | 2023 -3.84 (n=17, excluded) | 2024 +8.52 | 2025 +3.48 | 2026 +1.21
+S5 rank 1:  2022 +6.74 | 2023 +4.70 | 2024 +1.45 | 2025 +0.22 | 2026 -1.14
+```
+
+So the mean-statistic p-values are trustworthy here (Bonferroni over 10 tests: S4 rank 1
+p=0.028, S5 rank 1 p=0.002 - both still significant). The sign test does not reach 0.05,
+but with 4-5 years the smallest value it *can* produce is 1/16 = 0.0625, so S4's 4/4 is
+the best result the statistic allows. Low power, not absence of effect.
+
+**The S5 edge is decaying every single year** (+6.74 -> +4.70 -> +1.45 -> +0.22 -> -1.14)
+and is negative in 2026. S4's holds up better but is also shrinking.
+
+## ROI: Rs 1,00,000, 3 slots, 25% of live equity per position, compounding
+
+2022-06-02 to 2026-09-15 (4.29 years). Twelve random tie-break seeds; median reported,
+full range shown, because with 36-140 trades taken the draw matters more than the filter.
+
+Compare against **"sector-covered stocks, no filter"**, not against "no filter" - the
+latter trades all 482 stocks while every filtered row can only trade the 183 that have a
+sector.
+
+| strategy | setup | taken | win% | CAGR% | CAGR range | maxDD% |
+|---|---|---|---|---|---|---|
+| S1 | covered, no filter | 123 | 30.9 | 8.3 | 2.2 to 24.4 | -39.4 |
+| S1 | top-3 sector | 106 | 32.5 | 9.8 | 5.1 to 17.8 | -32.3 |
+| S1 | leading sector | 102 | 31.5 | 7.4 | 4.2 to 13.8 | -35.0 |
+| S2 | covered, no filter | 80 | 34.9 | 12.0 | -0.2 to 18.9 | -17.8 |
+| S2 | top-3 sector | 76 | 33.1 | 7.9 | 1.7 to 11.0 | -20.2 |
+| S2 | leading sector | 50 | 44.9 | 14.8 | 13.9 to 16.1 | -10.9 |
+| S3 | covered, no filter | 76 | 36.0 | 10.7 | 1.4 to 16.4 | -19.9 |
+| S3 | top-3 sector | 70 | 35.4 | 8.7 | 1.6 to 18.1 | -22.8 |
+| S3 | leading sector | 66 | 40.7 | 15.1 | 11.9 to 20.7 | -14.0 |
+| **S4** | covered, no filter | 84 | 40.7 | 18.8 | 8.6 to 26.0 | -22.8 |
+| **S4** | top-3 sector | 57 | 45.6 | 17.0 | 15.2 to 20.5 | **-12.8** |
+| **S4** | leading sector | 36 | **55.6** | 18.1 | **16.4 to 18.1** | **-7.0** |
+| **S5** | covered, no filter | 223 | 36.7 | 12.7 | -0.1 to 27.6 | -19.5 |
+| **S5** | top-3 sector | 146 | 42.7 | **17.4** | -1.0 to 31.9 | **-11.5** |
+| S5 | leading sector | 114 | 38.1 | 8.8 | 1.7 to 27.8 | -22.3 |
+
+The filter does **not** reliably raise CAGR - the seed ranges overlap everywhere. What it
+does for S4 and S5 is cut drawdown and collapse the spread: S4 leading-sector runs
+16.4-18.1% CAGR at a 7% maximum drawdown, against 8.6-26.0% at 22.8% unfiltered. Same
+money, a third of the pain, and far less dependent on which signal you happened to pick.
+
+S2's leading-sector row (14.8% CAGR, 13.9-16.1 range, -10.9% DD) looks similar but rests
+on 50 trades and a null that says p(sign)=0.88. Ignore it.
+
+## S4 + S5 together - the configuration actually being traded
+
+S4 keeps slot priority.
+
+| setup | signals | taken | win% | final Rs | CAGR% | CAGR range | maxDD% | CAGR/DD |
+|---|---|---|---|---|---|---|---|---|
+| no filter (whole universe) | 27,241 | 226 | 37.2 | 1,79,148 | 14.6 | 0.6 to 35.5 | -24.5 | 0.59 |
+| sector-covered, no filter | 10,655 | 216 | 38.6 | 1,81,074 | 14.9 | 4.7 to 26.2 | -21.3 | 0.70 |
+| **top-3 sector** | 2,514 | 140 | **44.5** | **2,11,684** | **19.1** | 4.1 to 28.9 | **-16.6** | **1.15** |
+| top-2 sector | 1,664 | 127 | 42.9 | 1,81,000 | 14.8 | 7.0 to 26.8 | -17.4 | 0.85 |
+| leading sector | 869 | 109 | 40.3 | 1,77,036 | 14.3 | 13.3 to 26.2 | -19.3 | 0.74 |
+| top-3 + at 10 EMA | 722 | 166 | 37.2 | 1,73,871 | 13.7 | 8.5 to 25.8 | -15.2 | 0.90 |
+
+Rs 1 lakh -> Rs 2.12 lakh over 4.29 years at top-3 sector, against Rs 1.81 lakh unfiltered.
+Return per unit of drawdown improves from 0.70 to 1.15. The CAGR ranges still overlap, so
+the headline CAGR gain is not established; the drawdown and consistency gain is the part
+that holds.
+
+Adding the 10 EMA condition on top makes every row worse. S4 names are already sitting on
+their 10 EMA, so the condition only removes trades.
+
+## Revised recommendation
+
+* **S1, S2, S3 - do not apply any sector filter.** No effect, and S3 is actively hurt.
+* **S4 and S5 - filter to the top-3 sector.** Not for more return, for a materially smaller
+  drawdown and a much tighter outcome range.
+* **Do not use rank 1 alone.** It over-filters: S4 drops to 8 trades a year, S5's CAGR
+  halves.
+* **Do not add the 10 EMA condition** to a sector filter.
+* Watch the decay. S5's sector edge shrank every year and went negative in 2026. Re-measure
+  before relying on it.
