@@ -14,6 +14,11 @@ export const metadata: Metadata = {
   description:
     "Multi-timeframe stock scanning, walk-forward backtests, forward testing and " +
     "adaptive learning for NSE cash equities.",
+  // Declared explicitly. With no icon the browser requests /favicon.ico on
+  // every page and logs a 404 - two of them, with the apple-touch variant.
+  // app/icon.svg is picked up by Next's file convention; naming it here also
+  // stops the legacy .ico probe.
+  icons: { icon: "/icon.svg", shortcut: "/icon.svg", apple: "/icon.svg" },
 };
 
 export const viewport: Viewport = {
@@ -54,9 +59,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Sidebar />
             <div className="flex min-w-0 flex-1 flex-col">
               <Header />
-              <main id="main" className="flex-1">
+              <main id="main" className="min-w-0 flex-1">
                 {children}
               </main>
+              <footer className="min-w-0 border-t border-line px-4 py-3 text-2xs
+                text-faint sm:px-6">
+                <p className="break-words">
+                  Free plan: first load can take up to a minute while the server wakes.
+                  Research output only — this places no orders.
+                </p>
+              </footer>
             </div>
           </div>
         </Providers>

@@ -12646,6 +12646,14 @@ def forward_positions_view(use_live=True):
     return out, meta
 
 
+# Closed trades a strategy needs before its Status line states a verdict
+# rather than the sample size. DISPLAY ONLY - nothing downstream reads Status,
+# and no scan, score or forward test changes with it. 30 is the conventional
+# floor for reading a mean as anything but noise, and these are R multiples
+# with a standard deviation near 1.
+MIN_CLOSED_FOR_VERDICT = 30
+
+
 def forward_summary_table():
     """Persistent strategy scorecard from forward-test records."""
     con=_db()
@@ -12674,7 +12682,12 @@ def forward_summary_table():
     for col in ["AvgR","TotalR","AvgROIProxy","AvgMFE","AvgMAE"]:
         q[col]=pd.to_numeric(q[col],errors="coerce")
     q["Win %"]=np.where((q["Wins"]+q["Losses"])>0,q["Wins"]/(q["Wins"]+q["Losses"])*100,np.nan)
-    q["Status"]=np.where(q["Closed"]<3,"BUILDING SAMPLE",
+    # DISPLAY ONLY. This renames the label; it changes no scan, no forward
+    # test and no number in the row beside it. A strategy called "POSITIVE" on
+    # six closed trades reads as a verdict, and six trades cannot carry one -
+    # the label was the most confident thing on the page and the least earned.
+    q["Status"]=np.where(q["Closed"]<MIN_CLOSED_FOR_VERDICT,
+                         "Insufficient sample (n=" + q["Closed"].astype(int).astype(str) + ")",
                          np.where(q["AvgR"]>0.75,"STRONG",
                                   np.where(q["AvgR"]>0.2,"POSITIVE",
                                            np.where(q["AvgR"]>-0.1,"NEUTRAL","WEAK"))))
