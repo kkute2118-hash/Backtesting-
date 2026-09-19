@@ -280,7 +280,11 @@ def sync_sectors() -> dict[str, Any]:
     bad = {k: v.get("reason") for k, v in report.items()
            if isinstance(v, dict) and not v.get("ok")}
     return {"synced": ok, "failed": bad, "rows": report.get("_total_rows", 0),
-            "symbols_mapped": len(core.sector_map())}
+            "symbols_mapped": len(core.sector_map()),
+            "from_index": len(core.sector_map(source="index")),
+            "from_industry": len(core.sector_map(source="industry")),
+            # A renamed NSE industry drops stocks silently; surface it.
+            "unmapped_industries": report.get("_unmapped_industries", {})}
 
 
 def sync_indices(years: int = 5) -> dict[str, Any]:
