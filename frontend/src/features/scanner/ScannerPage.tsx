@@ -10,7 +10,7 @@ import { Page, PageHeader } from "@/components/layout/PageShell";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
-import { CheckboxGroup, Field, RangeField, Select, Toggle } from "@/components/ui/Inputs";
+import { CheckboxGroup, Field, Select, Toggle } from "@/components/ui/Inputs";
 import { Note } from "@/components/ui/Misc";
 import { ErrorState, Skeleton } from "@/components/ui/States";
 import { FreshnessBanner } from "@/features/dashboard/FreshnessCard";
@@ -160,15 +160,16 @@ export function ScannerPage() {
             </Field>
 
             <div className="grid gap-5 sm:grid-cols-2">
-              <RangeField
-                label="Forward-test gate"
-                value={form.min_score}
-                onChange={(next) => set("min_score", next)}
-                min={0}
-                max={100}
-                hint="Signals at or above this score are marked for forward testing when the run
-                  is recorded. Everything qualifying is still returned and rankable."
-              />
+              <Field label="Selection"
+                hint="Signals are selected by the entry evidence filter, not by score.">
+                <p className="text-xs leading-relaxed text-muted">
+                  Every returned signal already passed it: ATR of at least 4% of price
+                  (sector rank in the top 3 for S4 instead), over a turnover floor of
+                  &#8377;40 crore a day. These are the only per-stock conditions that
+                  survived a per-year control and a permutation null. The score is shown
+                  for reference and no longer gates anything.
+                </p>
+              </Field>
               <Field label="Result cap" htmlFor="scan-limit"
                 hint="Cap what the run returns. Leave at all for a full research sweep.">
                 <Select

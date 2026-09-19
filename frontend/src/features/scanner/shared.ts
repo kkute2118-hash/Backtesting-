@@ -29,8 +29,13 @@ export interface ScanFormState {
 
 export const DEFAULT_SCAN: ScanFormState = {
   universes: ["Nifty 500"],
-  strategies: [1, 2, 3, 4, 5],
-  min_score: 85,
+  // S4 + S5 is the measured best portfolio - see the engine's
+  // DEFAULT_STRATEGIES and research/SECTOR_TIMING_FINDINGS.md addendum 4.
+  // The other three stay selectable.
+  strategies: [4, 5],
+  // Kept so saved presets still load; the engine ignores it. Selection is the
+  // entry evidence filter now, not the score.
+  min_score: 0,
   use_live_prices: false,
   limit: null,
 };

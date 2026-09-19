@@ -304,23 +304,21 @@ def step_scan(tickers, strategies, min_score, session_date=None):
     return result, regime
 
 
-def step_add(result, min_score, session_date=None):
+def step_add(result, min_score=None, session_date=None):
+    """Enrol every scanned setup. `min_score` is accepted and ignored.
+
+    Selection is now the entry evidence filter inside scan_dataset - ATR >= 4%,
+    or sector rank <= 3 for S4, over a turnover floor. Those are the conditions
+    that survived a per-year control and a permutation null. The score did not,
+    so a second cut on it would drop signals for no measured reason.
+    """
     if result is None or result.empty:
         log("add", "no qualified setups today; nothing added")
         return 0
-    # S5 has no strategy-quality component by design, so its Score is not a
-    # judgement about the setup and gating on it would be gating on nothing.
-    # Its selection already happened: the evidence filter is part of its signal,
-    # so every S5 row that reaches here is one the record says is worth a slot.
-    unscored = {f"S{n}" for n in core.STRATEGIES_WITHOUT_QUALITY_COMPONENT} | {"S5_POCKETPIVOT"}
-    strategy_col = result["Strategy"].astype(str).str.upper()
-    selected = result[(result["Score"] >= min_score) | strategy_col.isin(unscored)].copy()
-    if selected.empty:
-        log("add", f"no setup reached the >={min_score} gate (S5 exempt); nothing added")
-        return 0
+    selected = result.copy()
     added = core.add_forward_candidates(selected, signal_date=session_date)
     names = ", ".join(f"{r.Ticker}/{r.Strategy}" for r in selected.itertuples())
-    log("add", f"{added} new forward-test candidate(s) from {len(selected)} at/above the gate")
+    log("add", f"{added} new forward-test candidate(s) from {len(selected)} that passed the entry filter")
     if added:
         log("add", f"  {names}")
     return added
@@ -554,9 +552,21 @@ def run_market_data():
         summary["sectors_ok"] = len(ok)
         summary["sector_rows"] = rep.get("_total_rows", 0)
         summary["symbols_mapped"] = len(core.sector_map())
-        log("sectors", f"{len(ok)} list(s) fetched, {summary['symbols_mapped']:,} symbols mapped")
+        summary["from_index"] = len(core.sector_map(source="index"))
+        summary["from_industry"] = len(core.sector_map(source="industry"))
+        log("sectors", f"{len(ok)} list(s) fetched, {summary['symbols_mapped']:,} symbols mapped "
+                       f"({summary['from_index']:,} from a sector index, "
+                       f"{summary['from_industry']:,} backfilled from NSE Industry)")
         for k, why in bad.items():
             log("sectors", f"  FAILED {k}: {why}")
+        # A renamed NSE industry silently drops every stock carrying it, and
+        # only this line would show it.
+        unmapped = rep.get("_unmapped_industries") or {}
+        if unmapped:
+            summary["unmapped_industries"] = unmapped
+            log("sectors", f"  {len(unmapped)} industry string(s) not in INDUSTRY_TO_SECTOR — "
+                           f"those stocks have no sector: "
+                           + ", ".join(f"{k} ({n})" for k, n in list(unmapped.items())[:8]))
         summary["sectors_failed"] = list(bad)
     except Exception as exc:
         summary["sectors_error"] = str(exc)[:300]

@@ -679,3 +679,308 @@ def test_sector_membership_is_many_to_many(seeded_db):
 def test_the_sector_and_index_catalogues_are_populated():
     assert len(core.SECTOR_INDEX_URLS) >= 10
     assert core.REGIME_INDEX in core.INDEX_PRICE_SYMBOLS
+
+
+# ---------------------------------------------------------------------------
+# Industry backfill: getting a sector onto the ~62% of the universe that sits
+# in no sector index. Measurement (research/SECTOR_TIMING_FINDINGS.md) showed a
+# correlation-inferred sector is not a substitute for a real one, so the
+# backfill has to come from NSE's own Industry column and must never displace
+# real index membership.
+# ---------------------------------------------------------------------------
+
+def _clear_sectors():
+    """The seeded_db fixture keeps one database for the module, so rows another
+    test inserted would otherwise be read back as this sync's output."""
+    core.ensure_sector_table()
+    con = core._db()
+    try:
+        con.execute("DELETE FROM sector_membership")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _stub_csv(monkeypatch, pages):
+    """Serve each URL a canned CSV instead of hitting niftyindices.com."""
+    class R:
+        def __init__(self, text): self.content = text.encode()
+        def raise_for_status(self): pass
+    def get(url, **kw):
+        if url not in pages:
+            raise AssertionError(f"unexpected fetch: {url}")
+        return R(pages[url])
+    monkeypatch.setattr(core.requests, "get", get)
+
+
+def test_industry_backfill_reaches_stocks_no_sector_index_contains(seeded_db, monkeypatch):
+    _clear_sectors()
+    idx_url, broad_url = "http://idx/bank.csv", "http://broad/500.csv"
+    _stub_csv(monkeypatch, {
+        idx_url: "Company Name,Industry,Symbol\nHDFC Bank,Financial Services,HDFCBANK\n",
+        broad_url: ("Company Name,Industry,Symbol\n"
+                    "HDFC Bank,Financial Services,HDFCBANK\n"
+                    "Infosys,Information Technology,INFY\n"
+                    "Tata Motors,Automobile and Auto Components,TATAMOTORS\n"),
+    })
+    report = core.sync_sector_membership(urls={"Bank": idx_url},
+                                         industry_urls={"NIFTY 500": broad_url})
+    assert report["Bank"]["members"] == 1
+    assert report["NIFTY 500"]["backfilled"] == 2, report
+    m = core.sector_map()
+    assert m["INFY"] == ["IT"]
+    assert m["TATAMOTORS"] == ["Auto"]
+
+
+def test_real_index_membership_is_not_displaced_by_the_industry_column(seeded_db, monkeypatch):
+    """HDFCBANK is in the Bank index. The NIFTY 500 file calls its industry
+    Financial Services. The index membership has to win - it is what the Bank
+    sector index price actually tracks."""
+    _clear_sectors()
+    idx_url, broad_url = "http://idx/bank.csv", "http://broad/500.csv"
+    _stub_csv(monkeypatch, {
+        idx_url: "Symbol\nHDFCBANK\n",
+        broad_url: "Industry,Symbol\nFinancial Services,HDFCBANK\n",
+    })
+    core.sync_sector_membership(urls={"Bank": idx_url},
+                                industry_urls={"NIFTY 500": broad_url})
+    assert core.sector_map()["HDFCBANK"] == ["Bank"]
+    assert core.sector_map(source="industry") == {}
+
+
+def test_an_industry_with_no_nse_index_gets_its_own_sector(seeded_db, monkeypatch):
+    """Capital Goods has no NSE sector index, but its members define a
+    perfectly good composite of their own. What must not happen is filing them
+    under somebody else's index - ACC under Metal would carry a rank
+    describing something it does not move with. Tiny buckets are handled by
+    SECTOR_MIN_MEMBERS_TO_RANK at ranking time, not by dropping them here."""
+    _clear_sectors()
+    broad_url = "http://broad/500.csv"
+    _stub_csv(monkeypatch, {broad_url: "Industry,Symbol\nCapital Goods,ABB\nRealty,DLF\n"})
+    report = core.sync_sector_membership(urls={}, industry_urls={"NIFTY 500": broad_url})
+    assert report["NIFTY 500"]["backfilled"] == 2
+    m = core.sector_map()
+    assert m["ABB"] == ["Capital Goods"]
+    assert m["DLF"] == ["Realty"]
+
+
+def test_every_nse_industry_maps_somewhere(seeded_db):
+    """A None here means those stocks silently have no sector. The rule is now
+    that every industry gets one; the member floor decides what is rankable."""
+    assert all(v for v in core.INDUSTRY_TO_SECTOR.values()), \
+        [k for k, v in core.INDUSTRY_TO_SECTOR.items() if not v]
+    assert core.SECTOR_MIN_MEMBERS_TO_RANK >= 5
+
+
+def test_a_sector_with_too_few_members_is_not_ranked(seeded_db):
+    """Two stocks wearing an industry label are not a sector, and ranking them
+    would put a stock's own noise into the filter S4 trades on."""
+    _clear_sectors()
+    con = core._db()
+    try:
+        con.executemany("INSERT OR REPLACE INTO sector_membership"
+                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)",
+                        [(f"BIG{i}", "Chemicals", "x", "industry") for i in range(6)]
+                        + [("TINY1", "Forest Materials", "x", "industry"),
+                           ("TINY2", "Forest Materials", "x", "industry")])
+        con.commit()
+    finally:
+        con.close()
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    rng = np.random.default_rng(0)
+    data = {s: pd.DataFrame({"close": 100 * np.cumprod(1 + rng.normal(0, .01, 300))}, index=idx)
+            for s in [f"BIG{i}" for i in range(6)] + ["TINY1", "TINY2"]}
+    out = core.sector_relative_strength(data=data)
+    sectors = set(out["Sector"]) if not out.empty else set()
+    assert "Forest Materials" not in sectors, "a 2-member bucket must not be ranked"
+
+
+def test_an_unrecognised_industry_string_is_reported_not_swallowed(seeded_db, monkeypatch):
+    """If NSE renames an industry, stocks silently lose their sector. Only this
+    report would show it."""
+    _clear_sectors()
+    broad_url = "http://broad/500.csv"
+    _stub_csv(monkeypatch, {broad_url: "Industry,Symbol\nQuantum Widgets,ACME\n"})
+    report = core.sync_sector_membership(urls={}, industry_urls={"NIFTY 500": broad_url})
+    assert report["_unmapped_industries"] == {"QUANTUM WIDGETS": 1}
+    assert "ACME" not in core.sector_map()
+
+
+def test_passing_no_urls_means_none_rather_than_the_whole_catalogue(seeded_db, monkeypatch):
+    def boom(url, **kw):
+        raise AssertionError(f"nothing should have been fetched, got {url}")
+    monkeypatch.setattr(core.requests, "get", boom)
+    report = core.sync_sector_membership(urls={}, industry_urls={})
+    assert report["_total_rows"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The entry evidence filter - what replaced the score gate.
+# research/SECTOR_TIMING_FINDINGS.md addenda 1 and 4.
+# ---------------------------------------------------------------------------
+
+def _filter_frame(close=100.0, volume=10_000_000, bars=30):
+    """close x volume = Rs 100 cr of daily turnover by default, over the floor."""
+    idx = pd.bdate_range("2024-01-01", periods=bars)
+    return pd.DataFrame({"close": [close] * bars, "volume": [volume] * bars,
+                         "open": [close] * bars, "high": [close] * bars,
+                         "low": [close] * bars}, index=idx)
+
+
+def _filter_features(close=100.0, atr=5.0):
+    return pd.DataFrame({"close": [close], "atr14": [atr]})
+
+
+def test_a_quiet_stock_fails_the_atr_rule():
+    frame = _filter_frame()
+    ok, why, m = core.entry_filter_verdict(frame, _filter_features(atr=2.0), 1)
+    assert not ok and "ATR" in why
+    assert m["atr_pct"] == pytest.approx(2.0)
+
+
+def test_a_volatile_liquid_stock_passes():
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=5.0), 1)
+    assert ok and "ATR 5.0%" in why
+
+
+def test_the_turnover_floor_rejects_an_illiquid_name_however_volatile():
+    """Below the floor the ATR edge inverts (PF 1.11 against 1.23), so a high
+    ATR there is a reason to skip, not a reason to take."""
+    frame = _filter_frame(close=100.0, volume=100_000)          # Rs 1 cr/day
+    ok, why, _ = core.entry_filter_verdict(frame, _filter_features(atr=9.0), 1)
+    assert not ok and "turnover" in why
+
+
+def test_s4_is_judged_on_sector_rank_not_atr():
+    """ATR does nothing for S4 (+0.19, p=0.40); the top-3 sector rank won 4
+    years of 4. Applying the wrong rule to S4 would throw the edge away."""
+    frame, feats = _filter_frame(), _filter_features(atr=1.0)   # ATR far too low
+    ranks, lookup = {"IT": 1, "Auto": 7}, {"INFY": ["IT"], "TATAMOTORS": ["Auto"]}
+    ok, why, _ = core.entry_filter_verdict(frame, feats, 4, sector_ranks=ranks,
+                                           sector_lookup=lookup, ticker="INFY")
+    assert ok, "a low-ATR S4 signal in the leading sector must still pass"
+    assert "sector rank 1" in why
+    bad, why2, _ = core.entry_filter_verdict(frame, feats, 4, sector_ranks=ranks,
+                                             sector_lookup=lookup, ticker="TATAMOTORS")
+    assert not bad and "sector rank 7" in why2
+
+
+def test_s4_without_a_real_sector_is_rejected_not_waved_through():
+    """Correlation-inferred sectors were measured not to carry the effect, so
+    'no sector' has to fail rather than fall back to the ATR rule."""
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=9.0), 4,
+                                           sector_ranks={"IT": 1}, sector_lookup={},
+                                           ticker="UNKNOWN")
+    assert not ok and "sector" in why
+
+
+def test_a_missing_reading_fails_rather_than_passes():
+    ok, _, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=float("nan")), 1)
+    assert not ok
+
+
+def test_the_filter_can_be_turned_off_for_measurement():
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(close=100.0, volume=100),
+                                           _filter_features(atr=0.1), 1, apply_filter=False)
+    assert ok and why == "filter off"
+
+
+def test_each_strategy_has_a_rule_and_only_s4_uses_the_sector_one():
+    assert set(core.ENTRY_FILTER_BY_STRATEGY) == set(core.IMPLEMENTED_STRATEGIES)
+    sector_rules = {s for s, r in core.ENTRY_FILTER_BY_STRATEGY.items() if r == "sector"}
+    assert sector_rules == {4}
+
+
+def test_the_default_portfolio_is_the_measured_best_one():
+    assert tuple(core.DEFAULT_STRATEGIES) == (4, 5)
+    for s in core.DEFAULT_STRATEGIES:
+        assert s in core.IMPLEMENTED_STRATEGIES
+
+
+def test_persisting_signals_no_longer_gates_on_the_score(seeded_db):
+    """The score has no demonstrated relationship to outcome, so every scanned
+    row is selected for forward testing regardless of it."""
+    result = pd.DataFrame([
+        {"Ticker": "AAA", "Strategy": "S1", "Score": 12.0, "Entry": 100.0, "SL 7%": 93.0},
+        {"Ticker": "BBB", "Strategy": "S4_SEPA", "Score": 99.0, "Entry": 50.0, "SL 7%": 46.5},
+    ])
+    core.persist_scanner_signals(result, min_score=95, signal_date="2024-05-01")
+    con = core._db()
+    try:
+        rows = dict(con.execute("SELECT symbol, selected_for_forward FROM scanner_signals "
+                                "WHERE signal_date='2024-05-01'").fetchall())
+    finally:
+        con.close()
+    assert rows == {"AAA": 1, "BBB": 1}, rows
+
+
+def test_s4s_sector_rule_reads_index_membership_only(seeded_db):
+    """An NSE Industry label says what a company does; index membership says
+    what the stock moves with, and the rank is built from the sector's price.
+    Industry-labelled stocks track their assigned sector at a median
+    correlation of 0.129, and S4's edge does not survive on them
+    (research/SECTOR_TIMING_FINDINGS.md addendum 6), so they must not feed the
+    lookup the rule uses."""
+    _clear_sectors()
+    core.ensure_sector_table()
+    con = core._db()
+    try:
+        con.executemany("INSERT OR REPLACE INTO sector_membership"
+                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)",
+                        [("INFY", "IT", "x", "index"),
+                         ("SMALLCO", "IT", "x", "industry")])
+        con.commit()
+    finally:
+        con.close()
+    assert core.sector_map(source="index") == {"INFY": ["IT"]}
+    assert core.sector_map(source="industry") == {"SMALLCO": ["IT"]}
+    assert sorted(core.sector_map()) == ["INFY", "SMALLCO"], "display still sees both"
+
+    ranks, lookup = {"IT": 1}, core.sector_map(source="index")
+    ok, _, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=1.0), 4,
+                                         sector_ranks=ranks, sector_lookup=lookup,
+                                         ticker="INFY")
+    assert ok
+    bad, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=9.0), 4,
+                                            sector_ranks=ranks, sector_lookup=lookup,
+                                            ticker="SMALLCO")
+    assert not bad, "an industry label must not satisfy S4's sector rule"
+    assert "sector" in why, "and it must fail ON the sector rule, not fall back to ATR"
+
+
+def test_the_entry_ranking_and_the_dashboard_ranking_are_separate(seeded_db):
+    """Ranking all 22 sectors measurably weakens S4's filter - the
+    industry-defined composites are noisier and crowd the top, displacing real
+    index sectors. So the entry rule ranks the index-priced sectors only while
+    the dashboard shows everything (addendum 7)."""
+    _clear_sectors()
+    con = core._db()
+    try:
+        rows = [(f"IDX{i}", "IT", "x", "index") for i in range(6)]
+        rows += [(f"IND{i}", "Chemicals", "x", "industry") for i in range(6)]
+        con.executemany("INSERT OR REPLACE INTO sector_membership"
+                        "(symbol,sector,updated_at,source) VALUES(?,?,?,?)", rows)
+        con.commit()
+    finally:
+        con.close()
+    idx = pd.bdate_range("2024-01-01", periods=300)
+    rng = np.random.default_rng(1)
+    data = {s: pd.DataFrame({"close": 100 * np.cumprod(1 + rng.normal(0, .01, 300))}, index=idx)
+            for s, *_ in [(r[0],) for r in rows]}
+    # A rank is relative TO the benchmark, so without it every sector scores
+    # NaN and both rankings come back empty - which would pass the first
+    # assertion for the wrong reason.
+    con = core._db()
+    try:
+        con.executemany(
+            "INSERT OR REPLACE INTO candles(symbol,dt,open,high,low,close,volume) "
+            "VALUES(?,?,?,?,?,?,?)",
+            [(core.index_store_symbol(core.REGIME_INDEX), d.strftime("%Y-%m-%d"),
+              100.0, 100.0, 100.0, 100.0, 0.0) for d in idx])
+        con.commit()
+    finally:
+        con.close()
+    entry = core.current_sector_ranks(data=data, source="index")
+    board = core.current_sector_ranks(data=data, source=None)
+    assert "Chemicals" not in entry, "an industry-defined sector must not rank S4 entries"
+    assert "Chemicals" in board, "but the dashboard must still show it"

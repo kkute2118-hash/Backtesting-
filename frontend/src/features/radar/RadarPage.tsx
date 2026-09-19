@@ -32,7 +32,7 @@ import type { Row } from "@/types/api";
  */
 export function RadarPage() {
   const [universes, setUniverses] = useState<string[]>(["Nifty 500"]);
-  const [strategies, setStrategies] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [strategies, setStrategies] = useState<number[]>([4, 5]);
   const [maxMissing, setMaxMissing] = useState(2);
   const [minReadiness, setMinReadiness] = useState(0);
   const [runId, setRunId] = useState<string | null>(null);
