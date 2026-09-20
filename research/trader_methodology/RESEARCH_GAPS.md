@@ -4,32 +4,40 @@ Everything the transcripts leave unresolved, ranked by impact on implementation.
 
 ---
 
-## RG-01 — The blue-candle overlay is undefined — **HIGH**
+## RG-01 — The blue-candle overlay — **RESOLVED**
 
-**What we know.** The author selects and rejects stocks on candle colour. He counts
-blue candles ("look at how many dark blue candles you are having. 1 2 3 4" — line
-4896). He rejects expansions containing white candles ("Are there any white candles in
-between? ... No. In fact, every single candle of the expansion is a blue shade colour
-candle" — line 9752). He uses at least three shades: blue, dark blue, navy blue.
+**Resolved by the user, 2026-09-20:** blue candles are **CB candles** — a day on
+which the stock performed *extremely well compared with its own other good days*.
 
-**Why it is an overlay.** In lecture 6 he configures his chart from scratch: up candles
-become **white**, down candles stay **red**, borders black. Blue is therefore added by
-an indicator. He says "There is a reason which I'll tell you later" and never returns
-to it in any of the 14 lectures.
+This fits everything the transcripts show and nothing contradicts it:
 
-**Competing hypotheses, neither supported over the other:**
-- Volume-based — blue intensity encodes volume above a threshold. Supported
-  circumstantially: he almost always says "look at the volumes" in the same breath.
-- Quality-based — blue encodes body size, close-near-high, or range.
+- CB is listed beside DNA and relativity, not beside volume: *"you do not have to
+  sit and see the DNA of ETF, **CB of ETF**, relativity of ETF"* (line 4437). All
+  three are per-stock, per-timeframe character judgements.
+- His sequence is literally *"we are going sequence wise for **CB**, contraction,
+  and then what happened"* (line 1045) — CB is the expansion candle.
+- *"Event, amazing **CB candle**, contraction starts within the high of expansion"*
+  (line 5076) — the full setup in one line.
+- It explains why he counts them (*"how many dark blue candles you are having, 1 2
+  3 4"*) and why white candles interleaved are a defect: a white up-candle is an up
+  day that was *not* exceptional for that stock.
+- It explains why the same percentage is a CB in one stock and unremarkable in
+  another — the benchmark is the stock's own distribution, which is exactly how he
+  treats DNA.
 
-**Impact.** This is a first-order selection criterion we cannot reproduce. Any engine
-built from these transcripts is missing a filter the author applies to every chart.
+**Implemented** as `cb_flags()` in `backend/app/engine/trader_layer.py`: a trailing
+percentile of the stock's own *positive* daily returns, two bands for blue vs
+dark/navy. Causal, adapts as a stock's character changes, and needs only the
+percentile as a fitted parameter.
 
-**Resolution paths (outside this material):** his Telegram/website PDFs, which he
-references repeatedly; a TradingView indicator on his published charts; or asking him.
-**Do not guess it in code.**
+**First measurement (fixture, 22,530 signals):** CB purity carries real signal.
+Sorting all signals into quartiles by the CB purity of their expansion gives mean
+forward returns of −1.06% / −0.74% / +1.63% / +0.40%. The bottom half is clearly
+worse than the top half. This is the strongest single soft signal found so far and
+it came directly from this definition.
 
----
+**Still open:** whether the shades (blue / dark blue / navy) are percentile bands,
+as implemented, or encode something else. Low impact — the bands are a parameter.
 
 ## RG-02 — Almost no numeric thresholds — **HIGH**
 

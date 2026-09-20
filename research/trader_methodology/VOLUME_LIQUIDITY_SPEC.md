@@ -45,7 +45,7 @@ formula.
 | 1 | 20-day average turnover (₹ crore) | Turnover | Yes | Yes | EXPLICIT |
 | 2 | Single-day turnover vs that average | Turnover | No (ratio) | By example only | EXPLICIT |
 | 3 | Volume cluster vs single tower of volume | Volume | No | No — visual | EXPLICIT concept, UNKNOWN formula |
-| 4 | The "blue / dark blue" candle overlay | Unknown | Unknown | No | UNKNOWN |
+| 4 | The "blue / dark blue" candle overlay = **CB candle** | Neither - it is a *return* measure | Relative to the stock's own up-day distribution | No, but defined | **RESOLVED** - see §5 |
 
 Presenting these as "the three average-volume tools" would be a fabrication. They
 are one average, one ratio, one visual pattern, and one undefined chart overlay.
@@ -260,7 +260,7 @@ be fitted and reported as fitted.
 
 ---
 
-## 5. Tool #4 — The "blue candle" overlay: UNKNOWN
+## 5. Tool #4 — The "blue candle" overlay = the CB candle (RESOLVED)
 
 The author repeatedly selects stocks on the basis of candles being "blue", "dark
 blue" or "navy blue". This is not standard TradingView colouring, and **the
@@ -296,7 +296,23 @@ candles**"; "the DNA of daily is pretty good, right? Navy blue candles."
 Line 957–959 (lecture 2): "every up move had these **Blue candles** and the good thing
 is this up move had a dark blue candle."
 
-### Assessment
+### Resolution
+
+**The user identified this on 2026-09-20: blue candles are CB candles** — a day the
+stock performed extremely well *compared with its own other good days*.
+
+Note what this means for this document: **a CB is not a volume measure at all.** It
+is a *return* measure, benchmarked against the stock's own distribution of positive
+days. That is why it belongs beside DNA and relativity in his own list, and why
+folding it into a volume score would be wrong. Volume stays a separate assessment
+(cluster versus tower), and the two should be scored independently or they
+double-count.
+
+It is computable as a trailing percentile of the stock's own positive returns —
+implemented as `cb_flags()` in `backend/app/engine/trader_layer.py`. Only the
+percentile is a fitted parameter.
+
+### Why this was previously unresolvable
 
 This is a **first-order selection criterion** — he counts blue candles and rejects
 stocks that show white ones in the expansion — and its definition is **missing**.
