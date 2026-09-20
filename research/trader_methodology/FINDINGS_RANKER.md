@@ -205,3 +205,52 @@ positions. With 3 concurrent slots and a median 18-bar hold, a year is roughly
 40–50 actual trades, so the per-trade net is the number that matters rather
 than the signal count. A full portfolio simulation with slot contention is
 still owed.
+
+---
+
+## Nulls (added) — the effect is real but smaller than the headline
+
+`BACKTEST_SPEC.md` §6 asks for permutation and circular-shift nulls, not just
+a random-subset control. Running them decomposes the +2.098% held-out gap, and
+the decomposition matters.
+
+| null | what it holds fixed | null mean | z |
+|---|---|---|---|
+| 1. plain label shuffle | nothing | −0.001% | **+7.1** |
+| 2. **shuffle within each day** | **the number kept per day** | **+0.882%** | **+4.3** |
+| 3. circular shift per symbol | each series' own time structure | −0.049% | **+2.8** |
+
+**Null 2 is the one that matters**, and it answers the doubt raised above about
+this being a momentum filter. It keeps the count kept per day identical and
+reshuffles *which* stocks those are, so any advantage that comes merely from
+being active on good days is present in the null too.
+
+Its null mean is **+0.882%**, not zero. That is the day-selection component
+made visible: days on which many signals pass the filter are simply better
+days. So of the +2.098% raw gap:
+
+- **~0.88 points (42%) is choosing better days**
+- **~1.22 points (58%) is choosing better stocks within a day**, at z = +4.3
+  across 175 days with within-day contrast
+
+Both are worth having — being active when the market pays is a real effect,
+not a cheat — but they are different claims and the headline conflated them.
+**The genuine stock-selection edge is roughly 1.2 points, not 2.1.**
+
+Null 3 breaks the alignment between the components and returns while keeping
+each series' own persistence intact, which is the test that matters for
+turnover (a highly persistent series). It survives at **z = +2.8** — clearly
+positive, and clearly weaker than the naive +7.1.
+
+### Revised summary of the result
+
+| claim | support |
+|---|---|
+| the kept group beats a random draw | z = +7.1 |
+| ...beats a random draw *on the same days* | z = +4.3 |
+| ...is not an artefact of persistence | z = +2.8 |
+| net of realistic costs | +1.853% vs +0.098% unfiltered |
+| holds on all five strategies | yes, held-out year |
+
+The result stands. Its size should be quoted as **~1.2 points of stock
+selection**, with the rest attributable to when it is active.
