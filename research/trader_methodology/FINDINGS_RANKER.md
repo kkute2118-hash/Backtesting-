@@ -154,3 +154,54 @@ with top-N-per-day.
 3. Permutation and circular-shift nulls, not just the random-subset control.
 4. A third year, so "holds in both directions" can be tested properly rather
    than inferred from one asymmetric pair.
+
+---
+
+## Costs (added after the fact — lecture 13's argument, tested)
+
+The author spends half of lecture 13 arguing that Indian charges can invert a
+strategy, because **STT is not deductible** against short-term capital gains.
+His worked example turns a ₹4 lakh gain into a ₹2.8 lakh loss. A backtest of
+his method that ignores costs is testing the wrong thing.
+
+Applied to the held-out 2026 result, at ₹35,000 a trade (his stated 35–40% of
+a ₹1 lakh book):
+
+| slippage | round trip | kept, net | dropped, net | all signals, net |
+|---|---|---|---|---|
+| optimistic (0.05%/side) | 0.393% | **+2.053%** | −0.045% | +0.298% |
+| realistic (0.15%/side) | 0.593% | **+1.853%** | −0.245% | +0.098% |
+| pessimistic (0.30%/side) | 0.893% | **+1.553%** | −0.545% | **−0.202%** |
+
+**Costs make the case for the filter stronger, not weaker.** At realistic
+slippage the unfiltered strategy nets +0.098% a trade — indistinguishable from
+zero — and at pessimistic slippage it is **negative**. The filtered set clears
++1.5% net in every scenario.
+
+That is precisely his argument, reproduced: the edge has to be big enough to
+pay the charges, and a strategy that trades everything the scanner finds is
+not.
+
+Cost breakdown per round trip at realistic slippage:
+
+| | ₹ | % |
+|---|---|---|
+| slippage | 105.00 | 0.300% |
+| **STT (non-deductible)** | **70.00** | **0.200%** |
+| brokerage (capped ₹20/order) | 21.00 | 0.060% |
+| stamp duty | 5.25 | 0.015% |
+| GST | 4.17 | 0.012% |
+| exchange + SEBI | 2.15 | 0.006% |
+| **total** | **207.57** | **0.593%** |
+
+Slippage dominates, and it is the one figure here that is an assumption rather
+than a published rate — which is why three scenarios are shown rather than one.
+The author says so himself: *"1% at times goes in buying and selling, combined
+slippage"* on a good position size, which is worse than even the pessimistic
+row above.
+
+**Caveat on trade count:** 1,637 filtered signals in 2026 is signals, not
+positions. With 3 concurrent slots and a median 18-bar hold, a year is roughly
+40–50 actual trades, so the per-trade net is the number that matters rather
+than the signal count. A full portfolio simulation with slot contention is
+still owed.
