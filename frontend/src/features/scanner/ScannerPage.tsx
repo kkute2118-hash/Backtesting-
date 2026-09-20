@@ -114,7 +114,14 @@ export function ScannerPage() {
 
       {job ? <JobProgress job={job} onDismiss={() => setJobId(null)} /> : null}
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      {/* grid-cols-1 explicitly, not just the lg override. Without a declared
+          column, a single-column grid puts its items in an `auto` track sized
+          to their MIN-CONTENT - so a card whose contents want 530px made the
+          track 530px inside a 488px container, and min-w-0 on the card could
+          not help because the track, not the item, was too wide. Tailwind's
+          grid-cols-1 is repeat(1, minmax(0, 1fr)), and that 0 minimum is what
+          lets it shrink. This was the +30px at 512px on /scanner. */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader
             title="Scan configuration"
@@ -159,7 +166,7 @@ export function ScannerPage() {
               />
             </Field>
 
-            <div className="grid gap-5 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <Field label="Selection"
                 hint="Signals are selected by the entry evidence filter, not by score.">
                 <p className="text-xs leading-relaxed text-muted">
