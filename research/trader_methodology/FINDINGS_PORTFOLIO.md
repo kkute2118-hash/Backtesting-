@@ -171,3 +171,63 @@ not a position.
 The full-universe rebuild is the right next step: on ~3,500 symbols instead of
 161, S4+S5 should produce enough signals to answer this properly rather than
 suggestively.
+
+---
+
+## The exit fix, tested — and it is the worst arm in the study
+
+The recommendation at the end of the previous section was to test his exit
+(pivot stop, trail the 10 EMA) as a portfolio, on the grounds that its flatter
+loss profile would need fewer trades to converge. **Tested, and it is wrong.**
+
+3 slots, ₹1 lakh, random ordering averaged over 12 seeds:
+
+| arm | final | total | trades | win |
+|---|---|---|---|---|
+| baseline exit, all signals | ₹91,193 | −8.8% | 46 | 27.5% |
+| baseline exit, filtered | ₹91,067 | −8.9% | 43 | 29.1% |
+| **author exit, all signals** | **₹47,104** | **−52.9%** | 303 | 25.4% |
+| **author exit, filtered** | **₹68,103** | **−31.9%** | 310 | 24.5% |
+
+### Why: the median hold is 2 bars
+
+His exit is a decisive close below the 10 EMA. **Our scanners fire AT the 10
+EMA** — S3 is an EMA50 pullback, S2 a tight pullback — so price is sitting on
+the average when the signal appears and a close below it is one or two candles
+away. From *his* entry, price has already left the average and the exit takes
+weeks.
+
+A 2-bar hold means 3 slots can turn over roughly 625 times in 417 days. The
+arithmetic then does the rest:
+
+```
+gross mean per trade   -0.094%
+costs                  -0.593%
+net per trade          -0.687%   x ~600 trades  ->  ruin
+```
+
+And it cannot be rescued by cheaper execution: **at zero cost the gross mean
+is still −0.094%.** There is no cost level at which this works.
+
+### The real conclusion, and it covers both halves
+
+This is the same structural mismatch found in the entry study, now confirmed
+from the other side:
+
+- **His entry** applied to our candidates costs 2.39 points, because our
+  scanners already fire at the bar he waits for.
+- **His exit** applied to our entry loses 53%, because our entry sits on the
+  10 EMA that his exit watches.
+
+**His entry and exit are a matched pair. Neither half transfers on its own.**
+Taking his exit without his entry is not a partial adoption of his method — it
+is a different and much worse strategy that happens to share a rule.
+
+That is the honest answer to "does his entry/exit help here": no, and the
+reason is not that the rules are bad. It is that they describe a position in a
+sequence that our scanners already occupy.
+
+**What still stands** is the part that never depended on timing: the
+three-condition filter on *which* candidates to take, at ~1.2 points of
+within-day stock selection, which survives costs and holds on all five
+strategies.
