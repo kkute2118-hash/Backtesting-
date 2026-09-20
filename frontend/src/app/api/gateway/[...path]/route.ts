@@ -12,8 +12,24 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 
-const BACKEND = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const ALLOWED = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Where the backend is, resolved PER REQUEST.
+ *
+ * Not a module-scope constant, and API_BACKEND_URL before the public one:
+ * NEXT_PUBLIC_* values are inlined into the bundle at BUILD time, so a
+ * server-side read of one returns whatever was set when the image was built
+ * and silently ignores the running environment. That cost a 502 on every
+ * mutation locally, and would have done the same in production had the build
+ * not happened to carry the right value.
+ */
+function backendBase(): string {
+  const raw = process.env.API_BACKEND_URL
+    || process.env.NEXT_PUBLIC_API_URL
+    || "http://localhost:8000";
+  return raw.replace(/\/$/, "");
+}
 
 async function forward(request: NextRequest, path: string[]) {
   if (!ALLOWED.has(request.method)) {
@@ -24,7 +40,8 @@ async function forward(request: NextRequest, path: string[]) {
   }
   // Join from the matched segments, never from raw user input, so a crafted
   // path cannot address something outside the backend's API.
-  const target = `${BACKEND}/api/v1/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
+  const target =
+    `${backendBase()}/api/v1/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const key = process.env.API_ACCESS_KEY;
   if (key) headers["X-API-Key"] = key;
@@ -48,8 +65,11 @@ async function forward(request: NextRequest, path: string[]) {
       status: response.status,
       headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json" },
     });
-  } catch {
-    // Never echo the upstream URL or the key in an error.
+  } catch (cause) {
+    // Never echo the upstream URL or the key to the client - but do log the
+    // reason server-side, because "cannot reach" with no detail is what made
+    // the build-time inlining above take so long to spot.
+    console.error("gateway: upstream request failed", cause);
     return NextResponse.json(
       { code: "network_error", message: "Cannot reach the analysis server." },
       { status: 502 },
