@@ -1,5 +1,40 @@
 # Render blueprint for the FastAPI backend.
 #
+# ---------------------------------------------------------------------------
+# THIS FILE DOES NOT CONFIGURE THE LIVE SERVICES.
+#
+# ati-lab-api and ati-lab were created by hand in the Render dashboard, not
+# imported as a Blueprint, so nothing here is applied to them. Editing this
+# file changes nothing in production. It is a reference for what the services
+# SHOULD look like, and the starting point if they are ever recreated from it.
+#
+# Confirmed by reading the live services back: their rootDir is empty and the
+# build commands cd into backend/ and frontend/ themselves, neither of which
+# this file describes.
+#
+# Everything below therefore has to be set by hand, per service, under
+# Settings and Environment:
+#
+#   ati-lab-api (Python)     Health Check Path  /health
+#                            Environment        API_ACCESS_KEY, the DHAN_*
+#                                               and GH_* variables,
+#                                               CORS_ORIGINS
+#   ati-lab (Next.js)        Health Check Path  /health
+#                            Environment        API_ACCESS_KEY (same value as
+#                                               the API service),
+#                                               NEXT_PUBLIC_API_URL,
+#                                               API_BACKEND_URL
+#
+# Order matters for the health check: the route has to be deployed BEFORE the
+# path is set. Setting it against a build that lacks /health makes the check
+# 404, the deploy never goes healthy, and it blocks the very commit that would
+# add the route. That happened on the web service and needed a manual cancel.
+#
+# To make this file authoritative instead, import it as a Blueprint in the
+# Render dashboard - a deliberate change to how the services are managed, not
+# a cleanup.
+# ---------------------------------------------------------------------------
+#
 # Configured for the FREE plan, which has no persistent disk: the filesystem is
 # discarded whenever the service sleeps. The database is therefore protected by
 # the GitHub backup instead — the API restores it on every cold start and pushes
