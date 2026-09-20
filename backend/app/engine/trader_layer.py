@@ -269,20 +269,36 @@ def structure_at(high: pd.Series, low: pd.Series, close: pd.Series,
     the one major structural rule that computes exactly, with no parameter
     beyond locating the expansion bar.
     """
+    p = {**PARAMS, **(params or {})}
     end = expansion_end(close, i, params)
     if end >= i:
         return {"expansion_end": end, "contained": True, "upper_half": True,
-                "contraction_bars": 0, "drawdown_from_high": 0.0}
+                "contraction_bars": 0, "drawdown_from_high": 0.0, "retrace": 0.0}
     seg_h = high.iloc[end + 1 : i + 1]
     seg_l = low.iloc[end + 1 : i + 1]
-    hi_bar, lo_bar = float(high.iloc[end]), float(low.iloc[end])
-    mid = (hi_bar + lo_bar) / 2.0
+    hi_bar = float(high.iloc[end])
+
+    # "everything was in the upper half of the contraction - that adds to the
+    # deep versus shallow [question]". The reference is the expansion LEG, not
+    # the expansion-ending candle: he is asking whether the pullback is
+    # shallow. Measuring against that one candle's own range instead makes the
+    # test scale with how big the last candle happened to be, and on a large
+    # expansion bar it demands price sit far above the contraction low - which
+    # is how an earlier version of this ended up selecting for WIDER stops
+    # than the ungated set, the exact opposite of what the method claims.
+    leg_lo = max(0, end - p["EXPANSION_LOOKBACK"])
+    leg_start = float(low.iloc[leg_lo : end + 1].min())
+    leg = hi_bar - leg_start
+    trough = float(seg_l.min())
+    retrace = float((hi_bar - trough) / leg) if leg > 0 else 0.0
+
     return {
         "expansion_end": end,
         "contained": bool(seg_h.max() <= hi_bar),
-        "upper_half": bool(seg_l.min() >= mid),
+        "upper_half": bool(retrace <= 0.5),
+        "retrace": retrace,
         "contraction_bars": int(i - end),
-        "drawdown_from_high": float((hi_bar - seg_l.min()) / hi_bar) if hi_bar else 0.0,
+        "drawdown_from_high": float((hi_bar - trough) / hi_bar) if hi_bar else 0.0,
     }
 
 
@@ -317,18 +333,23 @@ def counter_ok(open_: pd.Series, close: pd.Series, start: int, end: int) -> bool
 # --------------------------------------------------------------------------
 
 def pivot_low(low: pd.Series, close: pd.Series, open_: pd.Series,
-              i: int, params=None) -> float | None:
+              i: int, params=None, search_from: int | None = None) -> float | None:
     """The demand-candle low the stop belongs under.
 
-    Walks back from bar i for the most recent up candle with a real body and a
-    lower low than its neighbours - his DC. Returns None when there is no such
-    bar, and None is a rejection, not a missing value: "if you don't have a
-    quality demand area, demand pivot on your ILHS, it gets really difficult to
-    allocate risk to this trade, because well, where do I put my SL?"
+    Walks back from bar i for the most recent up candle with a real body that
+    turned the price - his DC. `search_from` bounds the walk to the current
+    contraction, because that is where he actually looks: the stop goes below
+    the demand area of the pullback being traded, not below whatever low
+    happens to sit sixty bars back in the expansion. Letting it reach that far
+    produces stops several times wider than any he would accept.
+
+    Returns None when no demand candle qualifies, and None is a rejection
+    rather than a missing value: "if you don't have a quality demand area,
+    demand pivot on your ILHS, it gets really difficult to allocate risk to
+    this trade, because well, where do I put my SL?"
     """
     p = {**PARAMS, **(params or {})}
-    start = max(1, i - p["EXPANSION_LOOKBACK"])
-    best = None
+    start = max(1, search_from if search_from is not None else i - p["EXPANSION_LOOKBACK"])
     for j in range(i, start, -1):
         if j <= 0 or j >= len(low) - 1:
             continue
@@ -338,9 +359,13 @@ def pivot_low(low: pd.Series, close: pd.Series, open_: pd.Series,
         body = abs(float(close.iloc[j]) - float(open_.iloc[j]))
         turned = float(low.iloc[j]) <= float(low.iloc[j - 1]) and float(low.iloc[j]) <= float(low.iloc[j + 1])
         if turned and body / rng >= 0.4:
-            best = float(low.iloc[j])
-            break
-    return best
+            return float(low.iloc[j])
+    # No qualifying demand candle. The contraction's own low is still a real
+    # structural level, so fall back to it rather than discarding the setup -
+    # but only within the contraction, never back into the expansion.
+    if search_from is not None and i > search_from:
+        return float(low.iloc[search_from + 1 : i + 1].min())
+    return None
 
 
 def high_low_range(low: pd.Series, close: pd.Series, open_: pd.Series, j: int) -> float:
@@ -428,7 +453,7 @@ def evaluate(frame: pd.DataFrame, i: int, params: dict | None = None,
     if not counter_ok(o, c, st["expansion_end"], i):
         fail.append("counter")
 
-    piv = pivot_low(l, c, o, i, p)
+    piv = pivot_low(l, c, o, i, p, search_from=st["expansion_end"])
     out["pivot"] = piv
     entry = float(c.iloc[i])
     out["entry_ref"] = entry
