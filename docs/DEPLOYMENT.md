@@ -214,3 +214,35 @@ wrong place.
 - [ ] `GH_BACKUP_TOKEN` + `GH_REPO` + `DB_BACKUP_BRANCH` set, and a backup verified
 - [ ] The same secrets added to GitHub Actions for the scheduled jobs
       (Dhan credentials included — the jobs cannot read the host's environment)
+
+## Frontend environment (Next.js service)
+
+| variable | why |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | Where the BROWSER sends reads. Inlined at **build** time, so changing it needs a rebuild. |
+| `API_BACKEND_URL` | Where the **server-side** mutation gateway forwards. Read at request time. Falls back to `NEXT_PUBLIC_API_URL` when unset. |
+| `API_ACCESS_KEY` | Same value as on the API service. Server-side only - **never** prefix it `NEXT_PUBLIC_`, which would compile the secret into the browser bundle. |
+
+`API_BACKEND_URL` exists because `NEXT_PUBLIC_*` values are baked into the
+bundle when it is built. A server-side read of one returns whatever was set at
+build time and silently ignores the running environment, which turned every
+mutation into a 502 against a stale URL. Setting `API_BACKEND_URL` makes the
+backend address changeable without a rebuild; leaving it unset keeps the old
+behaviour.
+
+### Checking the guard end to end
+
+```
+# 1. straight at the API without a key - must be 401
+curl -o /dev/null -w '%{http_code}\n' -X PUT \
+  https://ati-lab-api.onrender.com/api/v1/preferences \
+  -H 'Content-Type: application/json' -d '{"key":"probe","value":"x"}'
+
+# 2. through the frontend's gateway, no key from the caller - must be 200
+curl -w '\n%{http_code}\n' -X PUT \
+  https://ati-lab.onrender.com/api/gateway/preferences \
+  -H 'Content-Type: application/json' -d '{"key":"probe","value":"ok"}'
+```
+
+401 then 200 means the guard is on and the gateway is attaching the key. Two
+401s means the keys differ between the services.
