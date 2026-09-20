@@ -572,6 +572,91 @@ def db_row_count(path=None):
         return -1
 
 
+DB_BACKUP_RELEASE_TAG = os.environ.get("DB_BACKUP_RELEASE_TAG", "db-backup-latest")
+DB_BACKUP_ASSET = os.environ.get("DB_BACKUP_ASSET", "market_data.sqlite3.gz")
+
+
+def _github_release_backup_bytes(repo):
+    """Fetch the backup from a Release asset, or None if there isn't one.
+
+    Assets are where the database lives now. The old home was a file committed
+    to the db-backup branch, which worked until a full NSE build compressed to
+    116 MB: git hard-rejects anything over 100 MB, so the push failed and a
+    finished download saved nothing. An asset takes up to 2 GB and replacing it
+    does not append another blob to a branch's history.
+
+    Returns the decompressed bytes. None means "no asset" and the caller falls
+    through to the branch copy, which keeps an instance alive across the
+    changeover and after any future failed upload.
+    """
+    try:
+        r = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/"
+                         f"{DB_BACKUP_RELEASE_TAG}",
+                         headers=_github_headers(), timeout=30)
+        if r.status_code != 200:
+            return None
+        asset = next((a for a in (r.json().get("assets") or [])
+                      if a.get("name") == DB_BACKUP_ASSET), None)
+        if not asset:
+            return None
+
+        # The asset endpoint with octet-stream, not browser_download_url: the
+        # latter needs a separate redirect dance on a private repository, while
+        # this one authenticates with the same token as everything else.
+        a = requests.get(f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}",
+                         headers={**_github_headers(), "Accept": "application/octet-stream"},
+                         timeout=300)
+        if a.status_code != 200 or not a.content:
+            return None
+        return gzip.decompress(a.content)
+    except Exception:
+        # Any failure here is not fatal - the branch copy is still there.
+        return None
+
+
+def _github_upload_release_asset(repo, packed):
+    """Replace the backup Release asset. Returns (ok, reason).
+
+    This exists so the app and the workflows write to the SAME place. Restore
+    prefers the Release asset, so if the app kept writing only to the backup
+    branch its backups would quietly stop being the ones that get restored -
+    a worse failure than the size limit, because nothing would look broken.
+    """
+    try:
+        r = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/"
+                         f"{DB_BACKUP_RELEASE_TAG}", headers=_github_headers(), timeout=30)
+        if r.status_code == 404:
+            r = requests.post(
+                f"https://api.github.com/repos/{repo}/releases",
+                headers=_github_headers(), timeout=30,
+                json={"tag_name": DB_BACKUP_RELEASE_TAG, "name": "Database backup",
+                      "prerelease": True,
+                      "body": "Automated candle-store backup. The asset on this release is "
+                              "the live database, replaced in place by the app and by the "
+                              "sync workflows. Deleting it loses every stored candle and "
+                              "forward test."})
+        if r.status_code not in (200, 201):
+            return False, _github_error_hint(r.status_code, r.text)
+
+        release = r.json()
+        rid = release.get("id")
+        old = next((a for a in (release.get("assets") or [])
+                    if a.get("name") == DB_BACKUP_ASSET), None)
+        if old:
+            requests.delete(f"https://api.github.com/repos/{repo}/releases/assets/{old['id']}",
+                            headers=_github_headers(), timeout=60)
+
+        up = requests.post(
+            f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets",
+            headers={**_github_headers(), "Content-Type": "application/gzip"},
+            params={"name": DB_BACKUP_ASSET}, data=packed, timeout=600)
+        if up.status_code not in (200, 201):
+            return False, _github_error_hint(up.status_code, up.text)
+        return True, f"stored {len(packed)/1048576:.1f} MB as release asset {DB_BACKUP_ASSET}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def restore_db_from_github(force=False):
     """Pull the last backup from GitHub into the local database.
 
@@ -613,6 +698,17 @@ def restore_db_from_github(force=False):
         branch = _github_backup_branch()
         params = {"ref": branch} if branch else None
         last_status, last_body = None, ""
+
+        # The Release asset is the current home and is tried first. Only if
+        # there is no asset - a fresh repository, or an upload that failed -
+        # does this fall back to the copy committed on the backup branch.
+        raw = _github_release_backup_bytes(repo)
+        if raw:
+            tmp = f"{DATA_DB}.restore-tmp"
+            with open(tmp, "wb") as f:
+                f.write(raw)
+            os.replace(tmp, DATA_DB)
+            return True
 
         # Newest format first, then the uncompressed path a backup taken before
         # gzipping existed would still be sitting at.
@@ -691,6 +787,15 @@ def backup_db_to_github(return_reason=False):
         # between a backup that exists and one that does not.
         with open(DATA_DB, "rb") as f:
             packed = gzip.compress(f.read(), compresslevel=6)
+
+        # Release asset first: it is what restore reads, and it has a 2 GB
+        # ceiling rather than the contents API's. The branch write below still
+        # runs if this fails, so a repository where releases are unavailable
+        # keeps the old behaviour instead of losing its backup entirely.
+        ok, why = _github_upload_release_asset(repo, packed)
+        if ok:
+            return done(True, why)
+
         content_b64 = base64.b64encode(packed).decode()
 
         # Need the current file's SHA if it already exists, else GitHub

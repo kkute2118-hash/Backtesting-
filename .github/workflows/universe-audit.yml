@@ -1,0 +1,22 @@
+# Report what the 'NSE All Cash (~2000)' universe actually contains.
+#
+# Read-only and cheap: it fetches the public Dhan instrument master, applies
+# the engine's own filters and prints the breakdown. No credentials, no
+# database, no writes. It exists because the label says ~2000 and a real build
+# resolved it to 9,917.
+name: Universe audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet pandas requests
+      - run: python scripts/universe_audit.py
