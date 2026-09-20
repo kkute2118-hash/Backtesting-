@@ -506,3 +506,106 @@ def rank_score(v: dict, weights: dict | None = None) -> float:
     comp = v.get("ema_compression")
     s += w["compression"] * (1.0 - min(comp / 0.15, 1.0)) if comp is not None else 0.0
     return float(s)
+
+
+# --------------------------------------------------------------------------
+# Forward-test selection: the three conditions that actually survived testing
+# --------------------------------------------------------------------------
+
+# Everything else extracted from the transcripts and case studies was measured
+# and dropped: the hard-gate stack inverted the funnel, entry timing cost 2.39
+# points, his exit lost half the account, and a weighted score with
+# top-N-per-day had no edge out of sample. These three are what is left.
+#
+#   not a single tower of volume   lecture 1, and the cleanest confirmation
+#                                  in the study (-0.62% against +0.06%)
+#   CB purity 0.30-0.70            a BAND. above 0.75 turns sharply negative,
+#                                  which is his own extension warning
+#   turnover 100-400 crore         also a BAND. a plain floor flips sign
+#                                  between years; the band holds
+#
+# Held out (bands chosen on 2025, applied to 2026): kept +2.446% against
+# +0.348% dropped, z=+7.6 against a same-size random subset. Shuffling within
+# each day - which removes the benefit of merely being active on good days -
+# leaves z=+4.3, so about 1.2 points of it is genuine stock selection.
+#
+# What it does NOT do is turn into portfolio returns on a 1 lakh book with
+# three slots: ~26 trades a year against a tail-carried payoff is too few
+# draws. Applying it to the forward test is how that gets more evidence,
+# which is the point of a paper book.
+
+FORWARD_FILTER_PARAMS = {
+    "CB_MIN": 0.30,
+    "CB_MAX": 0.70,
+    "TURNOVER_MIN_CR": 100.0,
+    "TURNOVER_MAX_CR": 400.0,
+    "EXPANSION_TAIL_BARS": 10,   # the window CB purity and cluster are read over
+}
+
+# S4 is exempt from the volume-cluster condition, and only that one. Measured
+# per strategy, the not-a-tower rule is worth +0.83 on S1 and +0.61 on S3 and
+# is -3.94 on S4 - a single isolated volume tower is BETTER there. S4 is SEPA
+# and an isolated spike is plausibly the institutional-entry signature it
+# exists to catch. Applying a rule that is measurably backwards for a strategy
+# would be knowingly wrong, so it is skipped rather than averaged away.
+#
+# Caveat kept visible: that -3.94 rests on 413 S4 signals in the fixture. It
+# is strong enough not to ignore and thin enough to revisit on the full store.
+# Both spellings, as STRATEGY_SLOT_PRIORITY does: the engine labels this
+# strategy "S4_SEPA" in scan output and forward tests, and "S4" survives in
+# older records. Matching only "S4" would have silently never exempted
+# anything, which is the kind of bug that looks like a working filter.
+TOWER_RULE_EXEMPT = {"S4", "S4_SEPA"}
+
+
+def forward_selection_verdict(frame, strategy, params=None):
+    """Should this candidate be taken into the forward test?
+
+    Returns (passed, reason, metrics). `reason` is None on a pass and a short
+    phrase on a rejection, written to be readable in scanner_signals.skip_reason
+    months later.
+
+    Fails CLOSED on missing data, matching the existing entry-evidence filter:
+    a condition we could not evaluate is not a condition we verified. The
+    reason says so explicitly rather than blaming the stock.
+    """
+    p = {**FORWARD_FILTER_PARAMS, **(params or {})}
+    s = str(strategy or "").upper().strip()
+    m = {"cb_purity": None, "cluster_fraction": None, "single_tower": None,
+         "avg_turnover_20": None}
+
+    if frame is None or len(frame) < 60:
+        return False, "insufficient history to evaluate the filter", m
+
+    close, volume = frame["close"], frame["volume"]
+    i = len(frame) - 1
+    lo = max(0, i - p["EXPANSION_TAIL_BARS"])
+
+    tf = turnover_frame(close, volume)
+    at = tf["avg_turnover_20"].iloc[i]
+    m["avg_turnover_20"] = None if pd.isna(at) else round(float(at), 1)
+
+    cb = cb_flags(close)
+    q = cb_run_quality(cb, lo, i)
+    m["cb_purity"] = round(float(q["cb_purity"]), 3)
+
+    vc = volume_cluster(volume, lo, i, p)
+    m["cluster_fraction"] = round(float(vc["cluster_fraction"]), 3)
+    m["single_tower"] = bool(vc["single_tower"])
+
+    if m["avg_turnover_20"] is None:
+        return False, "20-day average turnover could not be computed", m
+    if not (p["TURNOVER_MIN_CR"] <= m["avg_turnover_20"] <= p["TURNOVER_MAX_CR"]):
+        return False, (f"turnover {m['avg_turnover_20']:.0f} cr outside the "
+                       f"{p['TURNOVER_MIN_CR']:.0f}-{p['TURNOVER_MAX_CR']:.0f} cr band"), m
+
+    if q["up_bars"] == 0:
+        return False, "no up bars in the expansion tail to read CB purity from", m
+    if not (p["CB_MIN"] <= m["cb_purity"] <= p["CB_MAX"]):
+        return False, (f"CB purity {m['cb_purity']:.2f} outside the "
+                       f"{p['CB_MIN']:.2f}-{p['CB_MAX']:.2f} band"), m
+
+    if s not in TOWER_RULE_EXEMPT and m["single_tower"]:
+        return False, "single tower of volume, no cluster", m
+
+    return True, None, m

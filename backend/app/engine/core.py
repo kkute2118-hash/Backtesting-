@@ -12379,6 +12379,57 @@ def signal_history(symbol=None, start=None, end=None, strategy=None,
         con.close()
 
 
+# Narrow the forward book to the candidates that pass the three conditions
+# that survived testing against 22,530 historical signals. Set to False to
+# record every scanner candidate again, which is what the book did before.
+#
+# Deliberately a flag rather than a hard-coded behaviour: the filter's edge is
+# ~1.2 points of within-day stock selection (z=+4.3 held out, survives costs),
+# which is real but modest, and it did NOT turn into portfolio returns on a
+# 1 lakh book with three slots. Running it on paper is how that gets settled.
+APPLY_FORWARD_TRADER_FILTER = True
+
+_TRADER_FILTER_BARS = 400          # enough for the 250-bar CB percentile window
+
+# Last wiring failure, surfaced the same way _GITHUB_LAST_ERROR is. A filter
+# that has quietly stopped filtering must not look identical to one that is
+# passing everything on merit.
+TRADER_FILTER_LAST_ERROR = ""
+
+
+def _trader_filter_frame(con, symbol):
+    """Recent history for one symbol, or None if there isn't enough."""
+    try:
+        end = market_today()
+        start = end - timedelta(days=int(_TRADER_FILTER_BARS * 1.6))
+        d = _read_cache(con, symbol, start, end)
+        return d if d is not None and len(d) >= 60 else None
+    except Exception:
+        return None
+
+
+def _trader_filter_verdict(frame, strategy):
+    """Delegate to trader_layer, and fail OPEN if the module cannot be used.
+
+    Failing open is the right default for an import or wiring error, and the
+    opposite of how the filter itself treats missing DATA. A missing candle
+    history is a fact about the stock and rejects it; a broken import is a
+    fact about us, and silently emptying the forward book over it would be a
+    far worse failure than recording a few extra candidates.
+    """
+    global TRADER_FILTER_LAST_ERROR
+    if frame is None:
+        return False, "insufficient stored history to evaluate the filter", {}
+    try:
+        from . import trader_layer
+        verdict = trader_layer.forward_selection_verdict(frame, strategy)
+        TRADER_FILTER_LAST_ERROR = ""
+        return verdict
+    except Exception as exc:
+        TRADER_FILTER_LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        return True, None, {}
+
+
 def add_forward_candidates(candidates, signal_date=None):
     """Open at most ONE forward test per stock, and record why the rest were not.
 
@@ -12422,6 +12473,38 @@ def add_forward_candidates(candidates, signal_date=None):
             _pri=[_slot_priority(x) for x in candidates.get("Strategy", "")],
             _sym=[str(x).upper().replace(".NS", "") for x in candidates.get("Ticker", "")],
         ).sort_values("_pri", kind="stable")
+
+        # Second-stage filter, applied BEFORE the per-symbol dedupe so that a
+        # strategy-specific exemption can actually take effect: the
+        # volume-cluster rule is skipped for S4, so a symbol whose S1 row is
+        # rejected on it can still enter under S4.
+        #
+        # This narrows the BOOK, not the scan. Every signal is already in
+        # scanner_signals with its own row; a rejection here writes a
+        # skip_reason there, so the filter's own record is auditable and the
+        # question "would the ones we skipped have done better?" stays
+        # answerable. That question is the whole reason to run this on paper
+        # first - see research/trader_methodology/FINDINGS_RANKER.md.
+        if APPLY_FORWARD_TRADER_FILTER:
+            keep_idx, seen = [], {}
+            for idx, row in ranked.iterrows():
+                sym = row["_sym"]
+                strat = str(row.get("Strategy", "")).upper()
+                if sym not in seen:
+                    seen[sym] = _trader_filter_frame(con, sym)
+                ok, why, _metrics = _trader_filter_verdict(seen[sym], strat)
+                if ok:
+                    keep_idx.append(idx)
+                else:
+                    skipped.append((sym, strat, why))
+            ranked = ranked.loc[keep_idx]
+            if ranked.empty:
+                for sym, strat, why in skipped:
+                    con.execute("UPDATE scanner_signals SET skip_reason=? WHERE signal_key=?",
+                                (why, f"{today}|{sym}|{strat}"))
+                con.commit()
+                return 0
+
         best = ranked.drop_duplicates("_sym", keep="first")
         for _, d in ranked.iterrows():
             if d.name not in best.index:
