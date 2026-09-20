@@ -1,0 +1,65 @@
+# One-off correction: close duplicate open forward positions.
+#
+# The old dedupe keyed on symbol AND strategy AND date, so one stock could
+# hold several open positions at once - NEULANDLAB was open four times. New
+# duplicates cannot happen any more, but the rows already recorded still
+# overweight those stocks in every statistic drawn from the book.
+#
+# Dry run by default. It reports what it would close and changes nothing
+# unless `apply` is set to true, because this edits recorded results.
+#
+# Marks, never deletes: every row keeps all its fields and only `status`
+# becomes SUPERSEDED, so the correction is auditable and reversible.
+name: Close duplicate forward positions
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Write the change (false = dry run, report only)'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+concurrency:
+  # Same writer group as every other job that commits the database, so this
+  # cannot race a sync and push a stale copy over it.
+  group: dhan-db
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  dedupe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Close duplicates
+        env:
+          GH_BACKUP_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+          DEDUPE_APPLY: ${{ inputs.apply == 'true' && '1' || '' }}
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+        run: python daily_job.py dedupe-forward
+
+      - name: Push the database to the backup branch
+        # Only when something was actually written.
+        if: ${{ inputs.apply == 'true' }}
+        env:
+          BACKUP_STAGE_PATH: ${{ runner.temp }}/market_data.sqlite3.gz
+          GH_PUSH_TOKEN: ${{ github.token }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+        run: ./scripts/push_backup.sh

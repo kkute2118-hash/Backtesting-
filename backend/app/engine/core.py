@@ -12654,6 +12654,75 @@ def forward_positions_view(use_live=True):
 MIN_CLOSED_FOR_VERDICT = 30
 
 
+# A duplicate position that was never a real position. NOT a closed trade and
+# NOT an open one: it has no outcome, so counting it either way would be a
+# claim about a trade that never existed. forward_summary_table's Open counts
+# ACTIVE and its Closed counts the four exit statuses, so SUPERSEDED rows drop
+# out of both, and refresh() only walks ACTIVE rows so nothing keeps updating
+# them.
+SUPERSEDED = "SUPERSEDED"
+
+
+def duplicate_forward_positions():
+    """ACTIVE rows for a stock that already has one. Read-only.
+
+    The keeper is the highest-priority strategy (S4, then S5, then the rest -
+    the same order build_portfolio uses to fill a slot) and, within that, the
+    earliest signal date: the position that would actually have been opened.
+    Everything else is a row the old dedupe let through.
+    """
+    con = _db()
+    try:
+        rows = con.execute(
+            """SELECT id, symbol, strategy, signal_date, entry
+                 FROM forward_tests WHERE status='ACTIVE'
+                ORDER BY symbol, signal_date, id"""
+        ).fetchall()
+    finally:
+        con.close()
+    by_symbol = {}
+    for row in rows:
+        by_symbol.setdefault(str(row[1]).upper(), []).append(row)
+    extras = []
+    for symbol, group in sorted(by_symbol.items()):
+        if len(group) < 2:
+            continue
+        ordered = sorted(group, key=lambda r: (_slot_priority(r[2]), str(r[3]), int(r[0])))
+        keeper = ordered[0]
+        for row in ordered[1:]:
+            extras.append({"id": int(row[0]), "symbol": symbol, "strategy": str(row[2]),
+                           "signal_date": str(row[3]), "entry": row[4],
+                           "kept_id": int(keeper[0]), "kept_strategy": str(keeper[2]),
+                           "kept_signal_date": str(keeper[3])})
+    return extras
+
+
+def close_duplicate_forward_positions(dry_run=True):
+    """Mark duplicate ACTIVE positions SUPERSEDED. Returns what it did.
+
+    Marks; never deletes. Forward-test records are evidence, and a row removed
+    is a row nobody can audit later - so every field stays exactly as written
+    and only `status` changes. That also makes this reversible with one UPDATE
+    back to ACTIVE.
+
+    Nothing here touches candles, scan rules, scores or any resolved trade.
+    """
+    extras = duplicate_forward_positions()
+    if dry_run or not extras:
+        return {"dry_run": bool(dry_run), "would_close" if dry_run else "closed": len(extras),
+                "rows": extras}
+    now = datetime.now().isoformat(timespec="seconds")
+    con = _db()
+    try:
+        con.executemany(
+            "UPDATE forward_tests SET status=?, updated_at=? WHERE id=? AND status='ACTIVE'",
+            [(SUPERSEDED, now, r["id"]) for r in extras])
+        con.commit()
+    finally:
+        con.close()
+    return {"dry_run": False, "closed": len(extras), "rows": extras}
+
+
 def forward_summary_table():
     """Persistent strategy scorecard from forward-test records."""
     con=_db()

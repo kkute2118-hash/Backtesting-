@@ -1038,3 +1038,113 @@ def test_a_reading_that_was_not_measured_is_null_not_zero(seeded_db):
         signal_date="2024-05-01")
     row = core.signal_history(symbol="AAA").iloc[0]
     assert pd.isna(row.atr_pct) and pd.isna(row.sector_rank)
+
+
+# ---------------------------------------------------------------------------
+# Closing duplicate positions the old dedupe let through. Marks, never deletes:
+# forward-test records are evidence, and a row removed is a row nobody can
+# audit later.
+# ---------------------------------------------------------------------------
+
+def _fwd_row(symbol, strategy, signal_date, status="ACTIVE", entry=100.0):
+    con = core._db()
+    try:
+        con.execute(
+            """INSERT INTO forward_tests(created_at,symbol,strategy,score,regime,entry,sl,
+                   target,status,ltp,mfe,mae,updated_at,signal_date)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("x", symbol, strategy, 50.0, "BULL", entry, entry * 0.93, entry * 1.21,
+             status, entry, 0.0, 0.0, "x", signal_date))
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_a_stock_open_several_times_keeps_exactly_one(seeded_db):
+    _clear_signals()
+    _fwd_row("NEULANDLAB", "S1", "2026-09-06")
+    _fwd_row("NEULANDLAB", "S1", "2026-09-07")
+    _fwd_row("NEULANDLAB", "S1", "2026-09-18")
+    _fwd_row("OTHER", "S1", "2026-09-06")
+    outcome = core.close_duplicate_forward_positions(dry_run=False)
+    assert outcome["closed"] == 2
+    con = core._db()
+    try:
+        active = con.execute("SELECT symbol, signal_date FROM forward_tests "
+                             "WHERE status='ACTIVE' ORDER BY symbol").fetchall()
+        total = con.execute("SELECT COUNT(*) FROM forward_tests").fetchone()[0]
+    finally:
+        con.close()
+    assert [r[0] for r in active] == ["NEULANDLAB", "OTHER"]
+    assert dict(active)["NEULANDLAB"] == "2026-09-06", "the earliest is the one really opened"
+    assert total == 4, "nothing may be deleted - every row stays auditable"
+
+
+def test_the_higher_priority_strategy_survives(seeded_db):
+    """Same order build_portfolio uses to fill a slot, so the book and the
+    portfolio agree about which strategy owns the stock."""
+    _clear_signals()
+    _fwd_row("X", "S5_POCKETPIVOT", "2026-09-10")
+    _fwd_row("X", "S4_SEPA", "2026-09-10")
+    core.close_duplicate_forward_positions(dry_run=False)
+    con = core._db()
+    try:
+        kept = con.execute("SELECT strategy FROM forward_tests "
+                           "WHERE status='ACTIVE'").fetchall()
+    finally:
+        con.close()
+    assert kept == [("S4_SEPA",)]
+
+
+def test_a_superseded_row_counts_as_neither_open_nor_closed(seeded_db):
+    """It has no outcome. Counting it as a closed trade would invent a result;
+    counting it as open would keep the book overstated."""
+    _clear_signals()
+    _fwd_row("Y", "S1", "2026-09-06")
+    _fwd_row("Y", "S1", "2026-09-07")
+    core.close_duplicate_forward_positions(dry_run=False)
+    row = core.forward_summary_table()
+    row = row[row.Strategy == "S1"].iloc[0]
+    assert int(row["Open"]) == 1
+    assert int(row["Closed"]) == 0
+    assert int(row["Records"]) == 2, "the record still shows both rows existed"
+
+
+def test_a_dry_run_changes_nothing(seeded_db):
+    _clear_signals()
+    _fwd_row("Z", "S1", "2026-09-06")
+    _fwd_row("Z", "S1", "2026-09-07")
+    # Two rows for one symbol is ONE duplicate: the first is the keeper.
+    outcome = core.close_duplicate_forward_positions(dry_run=True)
+    assert outcome["would_close"] == 1
+    con = core._db()
+    try:
+        assert con.execute("SELECT COUNT(*) FROM forward_tests "
+                           "WHERE status='ACTIVE'").fetchone()[0] == 2
+    finally:
+        con.close()
+
+
+def test_running_it_twice_is_a_no_op(seeded_db):
+    _clear_signals()
+    _fwd_row("W", "S1", "2026-09-06")
+    _fwd_row("W", "S1", "2026-09-07")
+    assert core.close_duplicate_forward_positions(dry_run=False)["closed"] == 1
+    assert core.close_duplicate_forward_positions(dry_run=False)["closed"] == 0
+
+
+def test_resolved_trades_are_never_touched(seeded_db):
+    """A stock can legitimately have one open position and several closed ones
+    from earlier. Only the surplus ACTIVE rows are duplicates."""
+    _clear_signals()
+    _fwd_row("V", "S1", "2026-08-01", status="TARGET")
+    _fwd_row("V", "S1", "2026-08-15", status="STOP")
+    _fwd_row("V", "S1", "2026-09-06")
+    assert core.close_duplicate_forward_positions(dry_run=False)["closed"] == 0
+    con = core._db()
+    try:
+        statuses = sorted(r[0] for r in con.execute(
+            "SELECT status FROM forward_tests").fetchall())
+    finally:
+        con.close()
+    assert statuses == ["ACTIVE", "STOP", "TARGET"]
