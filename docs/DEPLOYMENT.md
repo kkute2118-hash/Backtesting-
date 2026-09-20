@@ -246,3 +246,16 @@ curl -w '\n%{http_code}\n' -X PUT \
 
 401 then 200 means the guard is on and the gateway is attaching the key. Two
 401s means the keys differ between the services.
+
+### Health checks
+
+Both services expose `/health`, and each answers only for itself.
+
+| service | path | what it means |
+|---|---|---|
+| `ati-lab-api` | `/health` | the API process is up. No database, no imports - it answers while a scan holds SQLite and the GIL. `/api/v1/health` is the deeper check that also reports the database and the cold-start restore. |
+| `ati-lab` | `/health` | the Next server is up. Says nothing about the API. |
+
+The frontend check deliberately does **not** call the backend. On the free
+plan the API is asleep most of the time, and a web instance replaced for a
+condition it cannot fix is worse than no health check at all.
