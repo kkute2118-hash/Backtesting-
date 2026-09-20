@@ -116,6 +116,14 @@ jobs:
             exit 1
           fi
 
+      # Read-only, ~20 seconds, no credentials. It reports what the chosen
+      # universe actually contains, which is worth knowing before a run spends
+      # 40 minutes of Dhan quota on it: the label says ~2000 and a real build
+      # resolved it to 9,917 names, only 3,521 of which had any history.
+      - name: Audit the universe
+        continue-on-error: true
+        run: python scripts/universe_audit.py
+
       - name: Build history
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
