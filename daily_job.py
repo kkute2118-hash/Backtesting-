@@ -1033,22 +1033,52 @@ def run_study():
     return summary
 
 
+def run_dedupe_forward():
+    """Close duplicate ACTIVE forward positions in the stored book.
+
+    A one-off correction, kept as a job rather than run by hand so it is
+    reviewable, repeatable and leaves a log. Set DEDUPE_APPLY=1 to write;
+    without it this reports what it would do and changes nothing.
+
+    Marks, never deletes: forward-test records are evidence, and every row
+    keeps all its fields with only `status` changed to SUPERSEDED, so the
+    correction is auditable and reversible with one UPDATE.
+    """
+    step_restore()
+    apply = _env_flag("DEDUPE_APPLY")
+    outcome = core.close_duplicate_forward_positions(dry_run=not apply)
+    rows = outcome.get("rows", [])
+    count = outcome.get("closed", outcome.get("would_close", 0))
+    log("dedupe", f"{count} duplicate position(s) "
+                  + ("closed" if apply else "found (dry run - set DEDUPE_APPLY=1 to apply)"))
+    for r in rows:
+        log("dedupe", f"  {r['symbol']:<12} {r['strategy']:<16} {r['signal_date']}"
+                      f"  -> keeping {r['kept_strategy']} {r['kept_signal_date']}")
+    summary = {"applied": apply, "duplicates": count,
+               "symbols": sorted({r["symbol"] for r in rows})}
+    if apply and count:
+        summary["backup"] = step_backup()
+    return summary
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("job", choices=["token", "daily", "bootstrap", "backtest", "study",
-                                        "market-data"],
+                                        "market-data", "dedupe-forward"],
                         help="token = renew the Dhan token only; daily = the full post-close "
                              "run; bootstrap = build the candle history from scratch, once; "
                              "backtest = replay the strategies over the stored history; "
                              "study = one research study, named by BACKTEST_STUDY; "
-                             "market-data = index prices and sector membership")
+                             "market-data = index prices and sector membership; "
+                             "dedupe-forward = close duplicate open positions "
+                             "(dry run unless DEDUPE_APPLY=1)")
     args = parser.parse_args(argv)
 
     log("start", f"job={args.job}")
     jobs = {"token": run_token_only, "daily": run_daily, "bootstrap": run_bootstrap,
             "backtest": run_backtest, "study": run_study,
-            "market-data": run_market_data}
+            "market-data": run_market_data, "dedupe-forward": run_dedupe_forward}
     try:
         summary = jobs[args.job]()
     except Exception:
