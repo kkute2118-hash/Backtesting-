@@ -259,3 +259,20 @@ Both services expose `/health`, and each answers only for itself.
 The frontend check deliberately does **not** call the backend. On the free
 plan the API is asleep most of the time, and a web instance replaced for a
 condition it cannot fix is worse than no health check at all.
+
+### render.yaml is not the source of truth
+
+`ati-lab-api` and `ati-lab` were created by hand in the Render dashboard, not
+imported as a Blueprint, so `render.yaml` is **not applied to them**. Editing
+it changes nothing in production; it describes what the services should look
+like and is the starting point if they are ever recreated.
+
+Everything is therefore set per service in the dashboard, under Settings and
+Environment. `render.yaml`'s header lists exactly what.
+
+One ordering rule, learned the hard way: **deploy the `/health` route before
+setting the Health Check Path.** Setting it against a build that lacks the
+route makes the check 404, the deploy never reports healthy, and it blocks the
+commit that would add the route - a deadlock that needs a manual deploy
+cancel to break. Both services carry the route now, so this only matters when
+adding a check to a new service.
