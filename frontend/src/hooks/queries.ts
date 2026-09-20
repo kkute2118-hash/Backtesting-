@@ -162,10 +162,18 @@ export interface ScanRequest {
 export const useStartScan = () =>
   useMutation({ mutationFn: (payload: ScanRequest) => api.post<Job>("/scanner/runs", payload) });
 
+const LIVE_RUN_STATUSES = new Set(["queued", "running"]);
+
 export const useScanRuns = (limit = 25) =>
   useQuery({
     queryKey: ["scan-runs", limit],
     queryFn: () => api.get<RunSummary[]>("/scanner/runs", { limit }),
+    // Poll only while something is actually in flight. A fixed interval makes
+    // an idle browser tab a permanent load on a single free-plan instance.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((run) => LIVE_RUN_STATUSES.has(String(run.status)))
+        ? 4000
+        : false,
   });
 
 export const useRun = (runId: string | null, enabled = true) =>

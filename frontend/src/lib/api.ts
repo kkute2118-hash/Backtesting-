@@ -33,14 +33,45 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Wake a sleeping backend without asking it for anything.
+ *
+ * Render's free plan takes up to a minute to answer the first request after a
+ * sleep. Calling this on app load starts that boot while the UI renders,
+ * instead of the first real query paying for it. It bypasses the /api/v1
+ * prefix on purpose: the bare /health route touches no database, so it comes
+ * back even while a scan holds one.
+ */
+export async function pingHealth(): Promise<boolean> {
+  try {
+    const response = await fetch(`${BASE}/health`, { cache: "no-store" });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 const NETWORK_MESSAGE =
   "Cannot reach the analysis server. Check that the backend is running and that " +
   "NEXT_PUBLIC_API_URL points at it.";
 
+/**
+ * Where a request goes.
+ *
+ * Reads go straight to the backend. Mutations go to this app's own
+ * /api/gateway route, which runs on the Next server and attaches the API key
+ * from ITS environment - the key must never be in code the browser downloads.
+ */
+function endpoint(path: string, method: string): string {
+  if (method === "GET" || method === "HEAD") return `${BASE}${PREFIX}${path}`;
+  const [route, query = ""] = path.split("?");
+  return `/api/gateway${route}${query ? `?${query}` : ""}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${BASE}${PREFIX}${path}`, {
+    response = await fetch(endpoint(path, (init?.method ?? "GET").toUpperCase()), {
       ...init,
       headers: {
         "Content-Type": "application/json",

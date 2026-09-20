@@ -21,8 +21,14 @@ services:
     region: singapore          # closest to the NSE data you are pulling
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/v1/health
+    # One worker, explicitly. Each worker is a separate process with its own
+    # copy of pandas, the engine and every cache - about 112 MB before it does
+    # any work - and the plan allows 512 MB in total.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    # The bare /health: no database, no imports. /api/v1/health also checks the
+    # database, which is exactly what stops answering while a scan holds it -
+    # so using it as the health check got healthy instances replaced.
+    healthCheckPath: /health
 
     # Uncomment together with `plan: starter` above for a real disk.
     # disk:
@@ -37,10 +43,28 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.9"
 
-      # Set this to your Vercel URL once the frontend is deployed. A browser
-      # treats a different origin as a different site, so the API refuses it
-      # until it is listed here.
+      # Entries per memoised function. The default suits a 512 MB instance;
+      # raise it only with more memory.
+      - key: CACHE_MAX_ENTRIES
+        value: "256"
+      # Python returns freed arenas to the OS more readily with fewer of them.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+
+      # Browser origins allowed to call this API. The default already covers
+      # the deployed frontend and localhost; set this only to add another.
+      # Never "*": with credentials that lets any site on the internet call
+      # this API as the logged-in user.
       - key: CORS_ORIGINS
+        sync: false
+
+      # Shared secret for state-changing requests (scan, sync, watchlist and
+      # settings writes). Reads stay open. Leave it unset and those endpoints
+      # are open to anyone who can reach the server; set it here AND as
+      # API_ACCESS_KEY on the frontend service, where the Next server-side
+      # gateway attaches it. It must never be a NEXT_PUBLIC_ variable - those
+      # are compiled into the browser bundle.
+      - key: API_ACCESS_KEY
         sync: false
 
       # Credentials. sync:false means Render prompts for them in the dashboard

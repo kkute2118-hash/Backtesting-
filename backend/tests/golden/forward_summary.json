@@ -1,0 +1,64 @@
+{
+ "rows": [
+  {
+   "AvgMAE": -3.27,
+   "AvgMFE": 3.87,
+   "AvgR": 0.333,
+   "AvgROIProxy": 11.111111111111109,
+   "Closed": "6",
+   "Losses": "4",
+   "Open": "27",
+   "Records": "33",
+   "Status": "Insufficient sample (n=6)",
+   "Strategy": "S1",
+   "TotalR": 2.0,
+   "Win %": 33.3,
+   "Wins": "2"
+  },
+  {
+   "AvgMAE": -2.23,
+   "AvgMFE": 2.73,
+   "AvgR": -1.0,
+   "AvgROIProxy": -33.333333333333336,
+   "Closed": "1",
+   "Losses": "1",
+   "Open": "6",
+   "Records": "7",
+   "Status": "Insufficient sample (n=1)",
+   "Strategy": "S3",
+   "TotalR": -1.0,
+   "Win %": 0.0,
+   "Wins": "0"
+  },
+  {
+   "AvgMAE": -2.45,
+   "AvgMFE": 2.27,
+   "AvgR": null,
+   "AvgROIProxy": null,
+   "Closed": "0",
+   "Losses": "0",
+   "Open": "5",
+   "Records": "5",
+   "Status": "Insufficient sample (n=0)",
+   "Strategy": "S5_POCKETPIVOT",
+   "TotalR": null,
+   "Win %": null,
+   "Wins": "0"
+  },
+  {
+   "AvgMAE": -4.81,
+   "AvgMFE": 3.23,
+   "AvgR": null,
+   "AvgROIProxy": null,
+   "Closed": "0",
+   "Losses": "0",
+   "Open": "1",
+   "Records": "1",
+   "Status": "Insufficient sample (n=0)",
+   "Strategy": "S2",
+   "TotalR": null,
+   "Win %": null,
+   "Wins": "0"
+  }
+ ]
+}

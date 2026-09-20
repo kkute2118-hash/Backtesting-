@@ -29,6 +29,7 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -44,7 +45,13 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELLED = "cancelled"
 
-TERMINAL = {SUCCEEDED, FAILED, CANCELLED}
+INTERRUPTED = "interrupted"
+TERMINAL = {SUCCEEDED, FAILED, CANCELLED, INTERRUPTED}
+
+# A run that has been RUNNING longer than this is not running. The job lives
+# in a thread pool inside one process; if the process is alive and the row
+# still says RUNNING after this long, the thread died without unwinding.
+STALE_RUN_MINUTES = int(os.environ.get("STALE_RUN_MINUTES", "45"))
 
 
 @dataclass
@@ -175,6 +182,19 @@ class JobRegistry:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def active(self, kind: str) -> Job | None:
+        """The job of this kind that is queued or running, if any.
+
+        Used to make a scan single-flight. Two concurrent 500-stock scans do
+        not take twice as long on a one-instance free plan - they take longer
+        than twice as long and double the peak memory, which is what gets the
+        instance killed. A second request joins the first instead.
+        """
+        with self._lock:
+            live = [j for j in self._jobs.values()
+                    if j.kind == kind and j.status not in TERMINAL]
+        return sorted(live, key=lambda j: j.created_at)[0] if live else None
+
     def list(self, kind: str | None = None) -> list[Job]:
         with self._lock:
             jobs = list(self._jobs.values())
@@ -244,6 +264,65 @@ def _persist_run_finished(job: Job) -> None:
         log.warning("Could not persist run %s", job.id, exc_info=True)
 
 
+def sweep_interrupted_runs(note: str = "server restarted") -> int:
+    """Close out runs the previous process never finished.
+
+    The in-memory registry dies with the container; the database row does not.
+    A free-plan instance is replaced often, so without this a scan that was
+    running at the moment of a restart stays QUEUED for ever - which is
+    exactly what the dashboard was showing while the Scanner page, reading
+    only finished runs, said there had been no scans at all.
+
+    INTERRUPTED rather than FAILED: nothing went wrong with the scan, its
+    process went away, and the two deserve different words in front of a user
+    deciding whether to trust the result.
+    """
+    try:
+        con = app_store.connect()
+        try:
+            cur = con.execute(
+                """UPDATE app_scan_runs
+                      SET status=?, finished_at=?, error=COALESCE(error, ?)
+                    WHERE status IN (?, ?)""",
+                (INTERRUPTED, _now(), note, QUEUED, RUNNING),
+            )
+            con.commit()
+            return cur.rowcount or 0
+        finally:
+            con.close()
+    except Exception:
+        log.warning("Could not sweep interrupted runs", exc_info=True)
+        return 0
+
+
+def expire_stale_runs() -> int:
+    """Mark rows that have been RUNNING implausibly long as interrupted.
+
+    The startup sweep only helps when the process restarts. A thread that dies
+    without unwinding leaves the row RUNNING in a process that is still alive,
+    and nothing else would ever close it.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=STALE_RUN_MINUTES)).isoformat()
+    try:
+        con = app_store.connect()
+        try:
+            cur = con.execute(
+                """UPDATE app_scan_runs
+                      SET status=?, finished_at=?,
+                          error=COALESCE(error, ?)
+                    WHERE status IN (?, ?) AND created_at < ?""",
+                (INTERRUPTED, _now(),
+                 f"no progress for {STALE_RUN_MINUTES} minutes", QUEUED, RUNNING, cutoff),
+            )
+            con.commit()
+            return cur.rowcount or 0
+        finally:
+            con.close()
+    except Exception:
+        log.warning("Could not expire stale runs", exc_info=True)
+        return 0
+
+
 def load_run(run_id: str) -> dict[str, Any] | None:
     con = app_store.connect()
     try:
@@ -264,6 +343,10 @@ def load_run(run_id: str) -> dict[str, Any] | None:
 
 
 def list_runs(kind: str | None = None, limit: int = 25) -> list[dict[str, Any]]:
+    # Both the dashboard card and the Scanner list come through here, so
+    # expiring on read is what keeps them saying the same thing about the
+    # same run. It is a no-op UPDATE in the normal case.
+    expire_stale_runs()
     con = app_store.connect()
     try:
         if kind:

@@ -177,16 +177,98 @@ def is_index_symbol(sym):
     return str(sym).startswith(INDEX_SYMBOL_PREFIX)
 
 
-@st.cache_data(ttl=86400)
-def index_universe(name):
-    r = requests.get(INDEX_URLS[name], headers={"User-Agent":"Mozilla/5.0"}, timeout=30)
+UNIVERSE_CACHE_TTL_HOURS = 24
+# niftyindices.com with a 30 s timeout used to sit on the request path of the
+# dashboard: freshness() resolves a universe, and the in-process memo is empty
+# after every cold start - which on a free plan is most loads. One slow fetch
+# blocked the whole page, and a failed one cached nothing, so the next request
+# paid for it again. The list changes on NSE's index-review schedule, so it
+# belongs in the database, where a cold start can read it in a millisecond.
+
+
+def _ensure_universe_cache_table():
+    con = _db()
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS universe_cache(
+            name TEXT PRIMARY KEY, symbols TEXT NOT NULL, fetched_at TEXT NOT NULL)""")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _read_universe_cache(name):
+    """(symbols, age_hours) from the database, or (None, None)."""
+    _ensure_universe_cache_table()
+    con = _db()
+    try:
+        row = con.execute("SELECT symbols, fetched_at FROM universe_cache WHERE name=?",
+                          (str(name),)).fetchone()
+    except sqlite3.Error:
+        return None, None
+    finally:
+        con.close()
+    if not row:
+        return None, None
+    try:
+        age = (datetime.now() - datetime.fromisoformat(row[1])).total_seconds() / 3600.0
+        return json.loads(row[0]), age
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None, None
+
+
+def _write_universe_cache(name, symbols):
+    _ensure_universe_cache_table()
+    con = _db()
+    try:
+        con.execute("INSERT OR REPLACE INTO universe_cache(name,symbols,fetched_at) "
+                    "VALUES(?,?,?)",
+                    (str(name), json.dumps(list(symbols)),
+                     datetime.now().isoformat(timespec="seconds")))
+        con.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        con.close()
+
+
+def _fetch_index_universe(name):
+    r = requests.get(INDEX_URLS[name], headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
     r.raise_for_status()
     df = pd.read_csv(pd.io.common.BytesIO(r.content))
     col = next(c for c in df.columns if str(c).strip().upper() == "SYMBOL")
-    return sorted({str(s).strip().upper()+".NS" for s in df[col].dropna()})
+    return sorted({str(s).strip().upper() + ".NS" for s in df[col].dropna()})
 
 
-def resolve_universe(name):
+@st.cache_data(ttl=86400, max_entries=16)
+def index_universe(name, allow_network=True):
+    """Constituents of an index, from the database first.
+
+    A stored list that is merely old still beats a 30-second wait, and beats
+    an exception outright: the membership of Nifty 500 last week is a far
+    better answer for a freshness check than no answer at all. The network is
+    used when there is nothing stored, or when what is stored has aged out.
+    """
+    cached, age_hours = _read_universe_cache(name)
+    if cached and age_hours is not None and age_hours < UNIVERSE_CACHE_TTL_HOURS:
+        return cached
+    if not allow_network:
+        if cached:
+            return cached
+        raise RuntimeError(
+            f"The constituent list for '{name}' has not been downloaded yet. "
+            "Run a scan or a data sync once while the server has network access.")
+    try:
+        symbols = _fetch_index_universe(name)
+    except Exception:
+        # Stale beats nothing. Re-raise only when there is no stored copy.
+        if cached:
+            return cached
+        raise
+    _write_universe_cache(name, symbols)
+    return symbols
+
+
+def resolve_universe(name, allow_network=True):
     """Ticker list for any name in UNIVERSE_CHOICES.
 
     Use this, never index_universe(), anywhere a user picks a universe:
@@ -202,14 +284,14 @@ def resolve_universe(name):
                 "universes instead."
             )
         return nse_liquid_universe()
-    return index_universe(name)
+    return index_universe(name, allow_network=allow_network)
 
 
-def resolve_universes(names):
+def resolve_universes(names, allow_network=True):
     """Union of several universe names, de-duplicated and sorted."""
     out = set()
     for n in names or []:
-        out.update(resolve_universe(n))
+        out.update(resolve_universe(n, allow_network=allow_network))
     return sorted(out)
 
 
@@ -8185,7 +8267,14 @@ def _snapshot_matches(snapshot, df):
     return a is not None and b is not None and a == b
 
 
-@st.cache_data(ttl=86400,show_spinner=False)
+# max_entries: each cached value is a ~190 KB feature frame, so unbounded this
+# held one per symbol for a day - about 90 MB after a 485-stock scan, on a
+# 512 MB instance. 64 is enough for the repeated reads within a single symbol's
+# processing while costing ~12 MB. A scan walks each symbol once and never
+# returns to it, so a bigger cache buys nothing; the durable feature_snapshots
+# table is what makes the NEXT scan fast. Capping a pure memo changes how often
+# a value is recomputed, never what it is.
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=64)
 def features_fast(symbol, df):
     """Strict as-of feature engine. Historical rows never see future days inside
     their current week/month.
@@ -11848,6 +11937,49 @@ def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
     return True, f"ATR {atr_pct:.1f}%", metrics
 
 
+def process_rss_mb():
+    """Resident memory of this process, in MB. None where /proc is absent.
+
+    Reported rather than inferred: on a 512 MB instance the difference between
+    "the scan is heavy" and "the scan is what gets us killed" is a number, and
+    without it every memory discussion is guesswork.
+    """
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def release_memory():
+    """Give freed memory back to the OS after a scan. Returns MB reclaimed.
+
+    gc.collect() alone is not enough here and measurement says so: after a
+    485-stock scan it reclaimed nothing, because the memory was not garbage -
+    it was thousands of small pandas allocations sitting in glibc's arenas,
+    freed by Python but never returned. malloc_trim(0) is what hands those
+    back. Called after a scan, not during: trimming mid-scan just makes the
+    allocator ask for the same pages again.
+    """
+    import ctypes
+    import gc
+
+    before = process_rss_mb()
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        # Not glibc (musl, macOS). gc.collect() above is then all there is.
+        pass
+    after = process_rss_mb()
+    if before is None or after is None:
+        return None
+    return round(before - after, 1)
+
+
 def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     """The scan itself: every stock against every selected strategy.
 
@@ -12514,6 +12646,14 @@ def forward_positions_view(use_live=True):
     return out, meta
 
 
+# Closed trades a strategy needs before its Status line states a verdict
+# rather than the sample size. DISPLAY ONLY - nothing downstream reads Status,
+# and no scan, score or forward test changes with it. 30 is the conventional
+# floor for reading a mean as anything but noise, and these are R multiples
+# with a standard deviation near 1.
+MIN_CLOSED_FOR_VERDICT = 30
+
+
 def forward_summary_table():
     """Persistent strategy scorecard from forward-test records."""
     con=_db()
@@ -12542,7 +12682,12 @@ def forward_summary_table():
     for col in ["AvgR","TotalR","AvgROIProxy","AvgMFE","AvgMAE"]:
         q[col]=pd.to_numeric(q[col],errors="coerce")
     q["Win %"]=np.where((q["Wins"]+q["Losses"])>0,q["Wins"]/(q["Wins"]+q["Losses"])*100,np.nan)
-    q["Status"]=np.where(q["Closed"]<3,"BUILDING SAMPLE",
+    # DISPLAY ONLY. This renames the label; it changes no scan, no forward
+    # test and no number in the row beside it. A strategy called "POSITIVE" on
+    # six closed trades reads as a verdict, and six trades cannot carry one -
+    # the label was the most confident thing on the page and the least earned.
+    q["Status"]=np.where(q["Closed"]<MIN_CLOSED_FOR_VERDICT,
+                         "Insufficient sample (n=" + q["Closed"].astype(int).astype(str) + ")",
                          np.where(q["AvgR"]>0.75,"STRONG",
                                   np.where(q["AvgR"]>0.2,"POSITIVE",
                                            np.where(q["AvgR"]>-0.1,"NEUTRAL","WEAK"))))

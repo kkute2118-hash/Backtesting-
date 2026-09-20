@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { DataTable, type Column } from "@/components/ui/DataTable";
 import { Toggle } from "@/components/ui/Inputs";
-import { Change, Note, ScoreBar, Stat, SymbolLink } from "@/components/ui/Misc";
+import { Change, Note, ScoreBar, Stat, SymbolLink, countLabel } from "@/components/ui/Misc";
 import { EmptyState, ErrorState, SkeletonCards, SkeletonTable } from "@/components/ui/States";
 import {
   useConfig, useForwardPositions, useForwardResults, useForwardSummary, useLiveForward,
@@ -266,14 +266,21 @@ export function ForwardPage() {
             tone={(totals.total_r ?? 0) > 0 ? "up"
               : (totals.total_r ?? 0) < 0 ? "down" : undefined} />
         </div>
+      ) : summary.error ? (
+        // Not `: null`. Rendering nothing where five numbers belong reads as
+        // an empty book rather than a failed request.
+        <ErrorState error={summary.error} onRetry={() => void summary.refetch()} compact />
       ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-0.5 rounded-md border border-line bg-elevated p-0.5"
           role="tablist" aria-label="Forward test views">
           {([
-            ["open", `Open (${openRows.length})`],
-            ["closed", `Closed (${(results.data?.rows ?? []).length})`],
+            // countLabel, not .length: an unloaded query used to render 0
+            // here for thirty seconds while the dashboard showed the real
+            // book, so the tabs actively contradicted the rest of the app.
+            ["open", `Open (${countLabel(positions.data ? openRows.length : null, positions)})`],
+            ["closed", `Closed (${countLabel(results.data?.rows?.length ?? null, results)})`],
             ["signals", "Signal log"],
             ["live", "Live monitor"],
           ] as const).map(([key, label]) => (

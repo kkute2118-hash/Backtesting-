@@ -1,0 +1,3158 @@
+{
+ "360ONE|S1": {
+  "count": 5,
+  "digest": "243de3d888baf2e3",
+  "first": "2026-01-02",
+  "last": "2026-01-16"
+ },
+ "360ONE|S3": {
+  "count": 183,
+  "digest": "0c84771838b78670",
+  "first": "2024-10-14",
+  "last": "2026-09-07"
+ },
+ "360ONE|S5": {
+  "count": 4,
+  "digest": "cd1f29f405880f88",
+  "first": "2024-06-19",
+  "last": "2025-01-14"
+ },
+ "AARTIIND|S1": {
+  "count": 52,
+  "digest": "099ccff8ab9b62b1",
+  "first": "2026-06-01",
+  "last": "2026-09-18"
+ },
+ "AARTIIND|S3": {
+  "count": 64,
+  "digest": "c587e5392c38a9c1",
+  "first": "2025-07-04",
+  "last": "2026-09-18"
+ },
+ "AARTIIND|S5": {
+  "count": 2,
+  "digest": "a588adb2b40c703d",
+  "first": "2024-11-25",
+  "last": "2026-04-01"
+ },
+ "ABBOTINDIA|S2": {
+  "count": 10,
+  "digest": "f29fd0c8238547a9",
+  "first": "2025-02-20",
+  "last": "2025-03-20"
+ },
+ "ABBOTINDIA|S3": {
+  "count": 162,
+  "digest": "2c54fe25dda3dff8",
+  "first": "2024-10-14",
+  "last": "2026-08-13"
+ },
+ "ABFRL|S1": {
+  "count": 4,
+  "digest": "054a20e6705d2194",
+  "first": "2025-05-14",
+  "last": "2025-05-20"
+ },
+ "ABFRL|S3": {
+  "count": 21,
+  "digest": "72d4b8b9a4370f85",
+  "first": "2024-10-16",
+  "last": "2024-12-16"
+ },
+ "ABFRL|S5": {
+  "count": 5,
+  "digest": "e2f993070a4be2d6",
+  "first": "2024-04-23",
+  "last": "2026-04-01"
+ },
+ "ABSLAMC|S1": {
+  "count": 76,
+  "digest": "16247324f933120b",
+  "first": "2025-05-12",
+  "last": "2026-01-20"
+ },
+ "ABSLAMC|S2": {
+  "count": 8,
+  "digest": "82b67126378dbfbe",
+  "first": "2025-05-29",
+  "last": "2025-06-20"
+ },
+ "ABSLAMC|S3": {
+  "count": 137,
+  "digest": "33f48c8be9699a7f",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "ABSLAMC|S4": {
+  "count": 5,
+  "digest": "6c379794d96a14c7",
+  "first": "2026-02-20",
+  "last": "2026-02-26"
+ },
+ "ABSLAMC|S5": {
+  "count": 3,
+  "digest": "ac24f591f0d98444",
+  "first": "2024-10-09",
+  "last": "2025-04-29"
+ },
+ "ACMESOLAR|S1": {
+  "count": 10,
+  "digest": "e7e24bb3e3531a73",
+  "first": "2026-08-20",
+  "last": "2026-09-17"
+ },
+ "ACMESOLAR|S3": {
+  "count": 48,
+  "digest": "30851346d0dbc7e3",
+  "first": "2025-09-19",
+  "last": "2026-08-18"
+ },
+ "ACMESOLAR|S5": {
+  "count": 7,
+  "digest": "5d8d6cf9b0675908",
+  "first": "2025-01-29",
+  "last": "2026-07-29"
+ },
+ "ADANIENT|S1": {
+  "count": 57,
+  "digest": "680e963d6a339e8e",
+  "first": "2026-05-12",
+  "last": "2026-09-18"
+ },
+ "ADANIENT|S2": {
+  "count": 7,
+  "digest": "f5647331d829cfde",
+  "first": "2026-05-20",
+  "last": "2026-06-15"
+ },
+ "ADANIENT|S3": {
+  "count": 77,
+  "digest": "6102e5415d5ec7a4",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "ADANIENT|S5": {
+  "count": 2,
+  "digest": "77fd8e8e9e722992",
+  "first": "2024-06-05",
+  "last": "2025-03-03"
+ },
+ "ADANIPOWER|S1": {
+  "count": 196,
+  "digest": "f6c4b3ef2aec1581",
+  "first": "2025-05-16",
+  "last": "2026-09-18"
+ },
+ "ADANIPOWER|S2": {
+  "count": 11,
+  "digest": "988bb42520ac9104",
+  "first": "2025-07-09",
+  "last": "2026-02-24"
+ },
+ "ADANIPOWER|S3": {
+  "count": 171,
+  "digest": "1b9fa076cc1875d4",
+  "first": "2025-05-22",
+  "last": "2026-09-18"
+ },
+ "ADANIPOWER|S4": {
+  "count": 12,
+  "digest": "cf1e4bfd13cc8b38",
+  "first": "2025-09-22",
+  "last": "2026-04-30"
+ },
+ "ADANIPOWER|S5": {
+  "count": 3,
+  "digest": "4eb0c5c08d451d4e",
+  "first": "2024-05-31",
+  "last": "2026-02-04"
+ },
+ "AFCONS|S3": {
+  "count": 15,
+  "digest": "10a4a7c33c3fedbd",
+  "first": "2025-09-29",
+  "last": "2025-11-03"
+ },
+ "AFCONS|S5": {
+  "count": 2,
+  "digest": "ef056b22995c5f3a",
+  "first": "2024-11-25",
+  "last": "2025-01-14"
+ },
+ "AIIL|S1": {
+  "count": 98,
+  "digest": "d5c867ab24adf99d",
+  "first": "2025-07-01",
+  "last": "2026-09-18"
+ },
+ "AIIL|S2": {
+  "count": 10,
+  "digest": "dc3a3a76bb1a1dd2",
+  "first": "2026-01-05",
+  "last": "2026-08-03"
+ },
+ "AIIL|S3": {
+  "count": 33,
+  "digest": "e64942e42a805c98",
+  "first": "2025-09-22",
+  "last": "2026-09-17"
+ },
+ "AIIL|S5": {
+  "count": 6,
+  "digest": "6deee8633157ae0f",
+  "first": "2024-07-24",
+  "last": "2026-05-21"
+ },
+ "AMBER|S1": {
+  "count": 192,
+  "digest": "49b4d32fff514e91",
+  "first": "2025-02-01",
+  "last": "2026-09-04"
+ },
+ "AMBER|S2": {
+  "count": 5,
+  "digest": "8ae6b3269c70c59f",
+  "first": "2025-03-26",
+  "last": "2026-05-04"
+ },
+ "AMBER|S3": {
+  "count": 165,
+  "digest": "020478c16158a8e8",
+  "first": "2024-12-05",
+  "last": "2026-09-07"
+ },
+ "AMBER|S4": {
+  "count": 21,
+  "digest": "7b1f420941a60465",
+  "first": "2026-02-09",
+  "last": "2026-04-30"
+ },
+ "AMBER|S5": {
+  "count": 7,
+  "digest": "134b79ccc1f7f689",
+  "first": "2024-01-25",
+  "last": "2026-05-21"
+ },
+ "ANANTRAJ|S1": {
+  "count": 113,
+  "digest": "7f13ee2dab6ebcd9",
+  "first": "2025-06-12",
+  "last": "2026-09-18"
+ },
+ "ANANTRAJ|S2": {
+  "count": 9,
+  "digest": "e5a3a4191fa8d27c",
+  "first": "2025-10-06",
+  "last": "2026-08-14"
+ },
+ "ANANTRAJ|S3": {
+  "count": 76,
+  "digest": "288544dceb97797b",
+  "first": "2024-10-22",
+  "last": "2026-09-18"
+ },
+ "ANANTRAJ|S4": {
+  "count": 14,
+  "digest": "a20b3e8dbfa63116",
+  "first": "2025-09-19",
+  "last": "2026-04-23"
+ },
+ "ANANTRAJ|S5": {
+  "count": 7,
+  "digest": "d65c57a38c3f7c8f",
+  "first": "2024-06-05",
+  "last": "2026-03-17"
+ },
+ "APARINDS|S1": {
+  "count": 202,
+  "digest": "8a6b8339e816038e",
+  "first": "2025-06-02",
+  "last": "2026-09-17"
+ },
+ "APARINDS|S2": {
+  "count": 10,
+  "digest": "09ef52100fa8ce44",
+  "first": "2025-07-07",
+  "last": "2026-02-16"
+ },
+ "APARINDS|S3": {
+  "count": 137,
+  "digest": "e79b1e87b70ff893",
+  "first": "2024-10-21",
+  "last": "2026-09-15"
+ },
+ "APARINDS|S4": {
+  "count": 9,
+  "digest": "69508322819ae05c",
+  "first": "2026-02-03",
+  "last": "2026-02-27"
+ },
+ "APARINDS|S5": {
+  "count": 6,
+  "digest": "72f3d0fc49d81d82",
+  "first": "2024-03-26",
+  "last": "2026-04-29"
+ },
+ "APOLLOTYRE|S2": {
+  "count": 4,
+  "digest": "b100c0f3bb11151e",
+  "first": "2025-09-18",
+  "last": "2025-09-25"
+ },
+ "APOLLOTYRE|S3": {
+  "count": 129,
+  "digest": "9a46bcf83380f5a2",
+  "first": "2024-10-14",
+  "last": "2026-08-28"
+ },
+ "ASAHIINDIA|S1": {
+  "count": 142,
+  "digest": "5a0d5707bc7bb740",
+  "first": "2025-08-05",
+  "last": "2026-09-18"
+ },
+ "ASAHIINDIA|S3": {
+  "count": 76,
+  "digest": "1578772ca41872ba",
+  "first": "2024-10-14",
+  "last": "2026-09-15"
+ },
+ "ASAHIINDIA|S5": {
+  "count": 8,
+  "digest": "c5ac42f372d13c7f",
+  "first": "2024-02-02",
+  "last": "2026-03-25"
+ },
+ "ASTERDM|S2": {
+  "count": 11,
+  "digest": "dfae998ea2553e8a",
+  "first": "2025-04-04",
+  "last": "2025-05-02"
+ },
+ "ASTERDM|S3": {
+  "count": 150,
+  "digest": "0e2549ba9d179f1b",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "ASTERDM|S5": {
+  "count": 1,
+  "digest": "b830f14a9b2a6b0b",
+  "first": "2026-03-24",
+  "last": "2026-03-24"
+ },
+ "ATHERENERG|S3": {
+  "count": 15,
+  "digest": "60bbe569fbad2385",
+  "first": "2026-02-24",
+  "last": "2026-06-22"
+ },
+ "ATHERENERG|S5": {
+  "count": 5,
+  "digest": "56c02e921bdb8628",
+  "first": "2026-01-13",
+  "last": "2026-05-11"
+ },
+ "AUROPHARMA|S3": {
+  "count": 100,
+  "digest": "db346034cad3b009",
+  "first": "2024-10-14",
+  "last": "2026-09-16"
+ },
+ "AUROPHARMA|S5": {
+  "count": 1,
+  "digest": "460180d61cb3cfc0",
+  "first": "2026-02-11",
+  "last": "2026-02-11"
+ },
+ "BAJAJ-AUTO|S2": {
+  "count": 4,
+  "digest": "59ad66d86270384a",
+  "first": "2026-07-30",
+  "last": "2026-08-06"
+ },
+ "BAJAJ-AUTO|S3": {
+  "count": 160,
+  "digest": "8b4422635281e54f",
+  "first": "2024-10-15",
+  "last": "2026-09-18"
+ },
+ "BAJAJHLDNG|S3": {
+  "count": 169,
+  "digest": "961a2cec557895a3",
+  "first": "2024-10-16",
+  "last": "2026-09-18"
+ },
+ "BAJAJHLDNG|S5": {
+  "count": 1,
+  "digest": "5bf2e1bed0ff63f9",
+  "first": "2025-06-06",
+  "last": "2025-06-06"
+ },
+ "BALRAMCHIN|S1": {
+  "count": 134,
+  "digest": "ea1287c44c2224d4",
+  "first": "2025-04-01",
+  "last": "2026-09-18"
+ },
+ "BALRAMCHIN|S3": {
+  "count": 103,
+  "digest": "ff99efb8f347dd79",
+  "first": "2024-10-22",
+  "last": "2026-09-18"
+ },
+ "BALRAMCHIN|S5": {
+  "count": 1,
+  "digest": "414302dbf5eaf5ea",
+  "first": "2026-08-20",
+  "last": "2026-08-20"
+ },
+ "BANKINDIA|S1": {
+  "count": 32,
+  "digest": "7ceb9b3a3ffcb006",
+  "first": "2025-05-02",
+  "last": "2025-08-25"
+ },
+ "BANKINDIA|S3": {
+  "count": 152,
+  "digest": "23ae2feb12f74cce",
+  "first": "2025-05-09",
+  "last": "2026-09-04"
+ },
+ "BANKINDIA|S5": {
+  "count": 4,
+  "digest": "ca92341c4d566f8c",
+  "first": "2024-02-01",
+  "last": "2026-04-06"
+ },
+ "BBTC|S1": {
+  "count": 16,
+  "digest": "527e9018268f60b1",
+  "first": "2025-05-26",
+  "last": "2025-11-19"
+ },
+ "BBTC|S3": {
+  "count": 23,
+  "digest": "4cdfdbc993149f96",
+  "first": "2024-10-17",
+  "last": "2025-11-19"
+ },
+ "BBTC|S5": {
+  "count": 7,
+  "digest": "bd8d5eca39aeff17",
+  "first": "2024-03-14",
+  "last": "2025-03-03"
+ },
+ "BELRISE|S1": {
+  "count": 50,
+  "digest": "657bb1992442d381",
+  "first": "2026-07-01",
+  "last": "2026-09-18"
+ },
+ "BELRISE|S3": {
+  "count": 60,
+  "digest": "ecc463528fb2577f",
+  "first": "2026-03-13",
+  "last": "2026-09-18"
+ },
+ "BELRISE|S5": {
+  "count": 3,
+  "digest": "2d503d01f72c8680",
+  "first": "2025-06-27",
+  "last": "2026-03-17"
+ },
+ "BHARATFORG|S1": {
+  "count": 132,
+  "digest": "0e83c7a666addbb6",
+  "first": "2025-07-02",
+  "last": "2026-09-02"
+ },
+ "BHARATFORG|S2": {
+  "count": 6,
+  "digest": "0809dfec7d4470e7",
+  "first": "2025-11-14",
+  "last": "2025-11-28"
+ },
+ "BHARATFORG|S3": {
+  "count": 81,
+  "digest": "419f7f9615079019",
+  "first": "2024-11-05",
+  "last": "2026-09-18"
+ },
+ "BHARATFORG|S5": {
+  "count": 1,
+  "digest": "b830f14a9b2a6b0b",
+  "first": "2026-03-24",
+  "last": "2026-03-24"
+ },
+ "BHEL|S1": {
+  "count": 178,
+  "digest": "67789d873e7110dd",
+  "first": "2025-06-02",
+  "last": "2026-09-18"
+ },
+ "BHEL|S2": {
+  "count": 12,
+  "digest": "25d6629f7dc2babb",
+  "first": "2025-06-02",
+  "last": "2025-12-01"
+ },
+ "BHEL|S3": {
+  "count": 113,
+  "digest": "9f8aa5543d43d8b7",
+  "first": "2024-10-14",
+  "last": "2026-09-17"
+ },
+ "BHEL|S4": {
+  "count": 11,
+  "digest": "2ccf1c6cc623503b",
+  "first": "2026-04-16",
+  "last": "2026-04-30"
+ },
+ "BHEL|S5": {
+  "count": 4,
+  "digest": "a617f8daac42a902",
+  "first": "2024-03-01",
+  "last": "2026-01-28"
+ },
+ "BLS|S1": {
+  "count": 37,
+  "digest": "b1bc3de104f9a27b",
+  "first": "2025-02-01",
+  "last": "2025-08-12"
+ },
+ "BLS|S2": {
+  "count": 3,
+  "digest": "a8a4248a7474e223",
+  "first": "2025-06-03",
+  "last": "2025-06-05"
+ },
+ "BLS|S3": {
+  "count": 51,
+  "digest": "33118b70e55f30fb",
+  "first": "2024-10-14",
+  "last": "2025-08-11"
+ },
+ "BLS|S5": {
+  "count": 8,
+  "digest": "d130ff8dae021f4e",
+  "first": "2024-03-01",
+  "last": "2026-05-19"
+ },
+ "BLUESTARCO|S1": {
+  "count": 117,
+  "digest": "c79bb73b2f49211a",
+  "first": "2025-02-01",
+  "last": "2026-04-29"
+ },
+ "BLUESTARCO|S2": {
+  "count": 22,
+  "digest": "18e7f23a2aef6d66",
+  "first": "2025-03-07",
+  "last": "2026-03-12"
+ },
+ "BLUESTARCO|S3": {
+  "count": 119,
+  "digest": "5a0adde97a93ba38",
+  "first": "2024-10-22",
+  "last": "2026-04-29"
+ },
+ "BLUESTARCO|S5": {
+  "count": 2,
+  "digest": "00447e0c2f1f9875",
+  "first": "2024-01-31",
+  "last": "2024-08-07"
+ },
+ "BRIGADE|S1": {
+  "count": 13,
+  "digest": "51b7f8f0ee460ad6",
+  "first": "2025-06-27",
+  "last": "2026-09-16"
+ },
+ "BRIGADE|S2": {
+  "count": 4,
+  "digest": "b95ad32738b3b230",
+  "first": "2025-06-17",
+  "last": "2025-06-25"
+ },
+ "BRIGADE|S3": {
+  "count": 52,
+  "digest": "7a8bef853d5fb2f4",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "BRIGADE|S5": {
+  "count": 2,
+  "digest": "7e758ccb76484a64",
+  "first": "2024-10-29",
+  "last": "2026-09-03"
+ },
+ "BSOFT|S3": {
+  "count": 8,
+  "digest": "8da4f61132a8d3c9",
+  "first": "2025-12-30",
+  "last": "2026-02-12"
+ },
+ "BSOFT|S5": {
+  "count": 1,
+  "digest": "6838d1d2aa57d859",
+  "first": "2026-04-01",
+  "last": "2026-04-01"
+ },
+ "CANFINHOME|S1": {
+  "count": 82,
+  "digest": "07638d2c67f01e96",
+  "first": "2025-06-03",
+  "last": "2026-01-30"
+ },
+ "CANFINHOME|S3": {
+  "count": 125,
+  "digest": "c92c3953b6d5367f",
+  "first": "2024-10-14",
+  "last": "2026-07-20"
+ },
+ "CARTRADE|S1": {
+  "count": 181,
+  "digest": "bf28edabcde2524c",
+  "first": "2025-02-10",
+  "last": "2026-09-18"
+ },
+ "CARTRADE|S2": {
+  "count": 6,
+  "digest": "8020edabca78839e",
+  "first": "2026-07-02",
+  "last": "2026-07-16"
+ },
+ "CARTRADE|S3": {
+  "count": 97,
+  "digest": "9c1de876feabf628",
+  "first": "2025-01-13",
+  "last": "2026-09-17"
+ },
+ "CARTRADE|S4": {
+  "count": 15,
+  "digest": "07800a44def96b0b",
+  "first": "2026-06-09",
+  "last": "2026-06-30"
+ },
+ "CARTRADE|S5": {
+  "count": 8,
+  "digest": "ea05dce3c3666414",
+  "first": "2024-09-13",
+  "last": "2026-07-10"
+ },
+ "CDSL|S1": {
+  "count": 86,
+  "digest": "2b15109ee1c64811",
+  "first": "2025-05-14",
+  "last": "2025-11-28"
+ },
+ "CDSL|S2": {
+  "count": 6,
+  "digest": "8383806eac39444f",
+  "first": "2025-05-26",
+  "last": "2025-06-26"
+ },
+ "CDSL|S3": {
+  "count": 101,
+  "digest": "1e0c3bd9b351240c",
+  "first": "2024-10-22",
+  "last": "2026-09-18"
+ },
+ "CDSL|S4": {
+  "count": 4,
+  "digest": "97ab9ad59218ab54",
+  "first": "2026-04-16",
+  "last": "2026-04-21"
+ },
+ "CDSL|S5": {
+  "count": 4,
+  "digest": "587f05fea9d6e612",
+  "first": "2024-07-11",
+  "last": "2026-02-03"
+ },
+ "CENTRALBK|S3": {
+  "count": 2,
+  "digest": "ae45e6e511eda23a",
+  "first": "2024-12-10",
+  "last": "2024-12-11"
+ },
+ "CENTRALBK|S5": {
+  "count": 2,
+  "digest": "51f17d06a41da026",
+  "first": "2024-05-14",
+  "last": "2025-05-12"
+ },
+ "CGPOWER|S1": {
+  "count": 179,
+  "digest": "76131e6ce8c76651",
+  "first": "2025-04-21",
+  "last": "2026-09-18"
+ },
+ "CGPOWER|S2": {
+  "count": 7,
+  "digest": "56a95434d2c9851d",
+  "first": "2025-06-04",
+  "last": "2026-03-17"
+ },
+ "CGPOWER|S3": {
+  "count": 186,
+  "digest": "8427c355b1c62a3b",
+  "first": "2024-10-21",
+  "last": "2026-09-18"
+ },
+ "CGPOWER|S4": {
+  "count": 16,
+  "digest": "ffd916a8a8488393",
+  "first": "2026-02-18",
+  "last": "2026-04-30"
+ },
+ "CGPOWER|S5": {
+  "count": 1,
+  "digest": "6f84168d8f8fde81",
+  "first": "2024-07-24",
+  "last": "2024-07-24"
+ },
+ "CHENNPETRO|S1": {
+  "count": 152,
+  "digest": "dcbe2db34a5abffd",
+  "first": "2025-06-23",
+  "last": "2026-09-18"
+ },
+ "CHENNPETRO|S2": {
+  "count": 18,
+  "digest": "a49c0d1fa55e0570",
+  "first": "2025-07-23",
+  "last": "2026-02-23"
+ },
+ "CHENNPETRO|S3": {
+  "count": 98,
+  "digest": "fc4d7e959114f03b",
+  "first": "2024-10-14",
+  "last": "2026-07-28"
+ },
+ "CHENNPETRO|S5": {
+  "count": 9,
+  "digest": "6176dde7ba3bc87e",
+  "first": "2024-02-15",
+  "last": "2026-07-16"
+ },
+ "CHOLAHLDNG|S1": {
+  "count": 136,
+  "digest": "d411e6d844ceccdb",
+  "first": "2025-02-25",
+  "last": "2026-01-07"
+ },
+ "CHOLAHLDNG|S2": {
+  "count": 5,
+  "digest": "8ed6bd85108f5216",
+  "first": "2025-11-12",
+  "last": "2025-11-20"
+ },
+ "CHOLAHLDNG|S3": {
+  "count": 119,
+  "digest": "69661dd3805587fc",
+  "first": "2024-10-23",
+  "last": "2026-01-08"
+ },
+ "CHOLAHLDNG|S5": {
+  "count": 2,
+  "digest": "b1d604a385c0d879",
+  "first": "2024-03-21",
+  "last": "2025-01-29"
+ },
+ "CLEAN|S3": {
+  "count": 15,
+  "digest": "8778c75ddc186173",
+  "first": "2024-10-14",
+  "last": "2025-06-20"
+ },
+ "CLEAN|S5": {
+  "count": 2,
+  "digest": "15b5e86465b57910",
+  "first": "2025-01-16",
+  "last": "2026-04-01"
+ },
+ "COFORGE|S2": {
+  "count": 14,
+  "digest": "9671adc0b324f12b",
+  "first": "2025-05-21",
+  "last": "2026-08-27"
+ },
+ "COFORGE|S3": {
+  "count": 106,
+  "digest": "bb7c4a1cc392066d",
+  "first": "2024-10-21",
+  "last": "2026-09-17"
+ },
+ "CONCOR|S3": {
+  "count": 20,
+  "digest": "79ac6f3ef901fb13",
+  "first": "2025-07-15",
+  "last": "2026-09-09"
+ },
+ "CONCOR|S5": {
+  "count": 1,
+  "digest": "b1861a9c2b3dbc8a",
+  "first": "2024-06-05",
+  "last": "2024-06-05"
+ },
+ "CRAFTSMAN|S1": {
+  "count": 56,
+  "digest": "b4cebe68570dfa0a",
+  "first": "2026-02-19",
+  "last": "2026-09-18"
+ },
+ "CRAFTSMAN|S3": {
+  "count": 119,
+  "digest": "41c7d27efa184d22",
+  "first": "2024-10-15",
+  "last": "2026-07-28"
+ },
+ "CRAFTSMAN|S5": {
+  "count": 5,
+  "digest": "79c2aced2e3df2a9",
+  "first": "2024-09-05",
+  "last": "2026-03-24"
+ },
+ "CROMPTON|S3": {
+  "count": 31,
+  "digest": "977a940dc32acd61",
+  "first": "2024-10-14",
+  "last": "2026-06-18"
+ },
+ "CYIENT|S3": {
+  "count": 1,
+  "digest": "c8f59d24ab3cc60e",
+  "first": "2024-12-04",
+  "last": "2024-12-04"
+ },
+ "CYIENT|S5": {
+  "count": 3,
+  "digest": "d8f678b7c5bf0bc6",
+  "first": "2025-03-05",
+  "last": "2026-03-25"
+ },
+ "DATAPATTNS|S1": {
+  "count": 209,
+  "digest": "21df00c07c5d9128",
+  "first": "2025-05-02",
+  "last": "2026-09-18"
+ },
+ "DATAPATTNS|S2": {
+  "count": 14,
+  "digest": "41669dbf5dbdf800",
+  "first": "2025-05-30",
+  "last": "2026-03-04"
+ },
+ "DATAPATTNS|S3": {
+  "count": 106,
+  "digest": "e5690d5b49750ff7",
+  "first": "2024-12-20",
+  "last": "2026-09-18"
+ },
+ "DATAPATTNS|S4": {
+  "count": 2,
+  "digest": "e8969dcd75af8683",
+  "first": "2026-02-26",
+  "last": "2026-02-27"
+ },
+ "DATAPATTNS|S5": {
+  "count": 13,
+  "digest": "d75c5a0eefcd9277",
+  "first": "2024-04-10",
+  "last": "2026-06-09"
+ },
+ "DEEPAKNTR|S3": {
+  "count": 49,
+  "digest": "b3131396a6d41c89",
+  "first": "2024-10-14",
+  "last": "2026-09-04"
+ },
+ "DIVISLAB|S1": {
+  "count": 11,
+  "digest": "1a6bcd50d297a5dd",
+  "first": "2026-09-01",
+  "last": "2026-09-18"
+ },
+ "DIVISLAB|S2": {
+  "count": 11,
+  "digest": "223fe6719b63ed10",
+  "first": "2025-10-17",
+  "last": "2025-11-17"
+ },
+ "DIVISLAB|S3": {
+  "count": 230,
+  "digest": "2601c6d0b0cc43ce",
+  "first": "2024-11-12",
+  "last": "2026-07-10"
+ },
+ "DIVISLAB|S4": {
+  "count": 1,
+  "digest": "9315f54be7286ced",
+  "first": "2026-07-31",
+  "last": "2026-07-31"
+ },
+ "DMART|S3": {
+  "count": 81,
+  "digest": "e73ffffd222fa7dc",
+  "first": "2025-05-13",
+  "last": "2026-07-02"
+ },
+ "DMART|S5": {
+  "count": 2,
+  "digest": "10b01570eba02dec",
+  "first": "2024-10-09",
+  "last": "2024-10-22"
+ },
+ "ECLERX|S1": {
+  "count": 173,
+  "digest": "8e5d2def2a1f7470",
+  "first": "2025-02-01",
+  "last": "2026-09-18"
+ },
+ "ECLERX|S2": {
+  "count": 10,
+  "digest": "f8d4b892bfb0ba97",
+  "first": "2025-06-04",
+  "last": "2026-08-27"
+ },
+ "ECLERX|S3": {
+  "count": 67,
+  "digest": "24138bff12b2d334",
+  "first": "2024-10-21",
+  "last": "2026-09-15"
+ },
+ "ECLERX|S4": {
+  "count": 10,
+  "digest": "c30b73446cc0dd82",
+  "first": "2026-07-17",
+  "last": "2026-07-31"
+ },
+ "ECLERX|S5": {
+  "count": 5,
+  "digest": "3467fe256e6dfe8e",
+  "first": "2024-02-20",
+  "last": "2026-06-12"
+ },
+ "EIHOTEL|S1": {
+  "count": 71,
+  "digest": "bb55ad36a01a87c2",
+  "first": "2025-03-21",
+  "last": "2025-09-24"
+ },
+ "EIHOTEL|S2": {
+  "count": 5,
+  "digest": "c59b45eb9a117840",
+  "first": "2025-09-15",
+  "last": "2025-11-11"
+ },
+ "EIHOTEL|S3": {
+  "count": 62,
+  "digest": "436162da7085fefb",
+  "first": "2024-10-17",
+  "last": "2025-10-31"
+ },
+ "EIHOTEL|S5": {
+  "count": 4,
+  "digest": "a01e44c3a62abc82",
+  "first": "2024-03-26",
+  "last": "2026-04-06"
+ },
+ "EMAMILTD|S3": {
+  "count": 23,
+  "digest": "213a6ead983aa340",
+  "first": "2024-10-15",
+  "last": "2025-09-18"
+ },
+ "ENGINERSIN|S1": {
+  "count": 152,
+  "digest": "f0ac8cd009cb87d6",
+  "first": "2025-06-02",
+  "last": "2026-09-16"
+ },
+ "ENGINERSIN|S2": {
+  "count": 13,
+  "digest": "1d937de3ae12f086",
+  "first": "2025-06-09",
+  "last": "2026-09-08"
+ },
+ "ENGINERSIN|S3": {
+  "count": 90,
+  "digest": "7cfbe11c5a8bb6bc",
+  "first": "2025-07-24",
+  "last": "2026-09-16"
+ },
+ "ENGINERSIN|S4": {
+  "count": 22,
+  "digest": "c7b98e53c52e6b31",
+  "first": "2026-02-16",
+  "last": "2026-04-30"
+ },
+ "ENGINERSIN|S5": {
+  "count": 8,
+  "digest": "bc4f4387d1986164",
+  "first": "2024-02-02",
+  "last": "2026-01-28"
+ },
+ "ESCORTS|S1": {
+  "count": 67,
+  "digest": "eb5706aecbf73fe7",
+  "first": "2025-05-12",
+  "last": "2025-11-28"
+ },
+ "ESCORTS|S2": {
+  "count": 7,
+  "digest": "10163219109ab96b",
+  "first": "2025-09-02",
+  "last": "2025-09-16"
+ },
+ "ESCORTS|S3": {
+  "count": 115,
+  "digest": "38a25c345f4c3634",
+  "first": "2024-10-14",
+  "last": "2026-02-26"
+ },
+ "FACT|S1": {
+  "count": 116,
+  "digest": "fc9500204ae62a03",
+  "first": "2025-06-02",
+  "last": "2026-08-26"
+ },
+ "FACT|S2": {
+  "count": 5,
+  "digest": "f17e84415c79c631",
+  "first": "2025-06-16",
+  "last": "2025-07-01"
+ },
+ "FACT|S3": {
+  "count": 126,
+  "digest": "dd33c21adb49f28c",
+  "first": "2024-10-14",
+  "last": "2026-08-26"
+ },
+ "FACT|S5": {
+  "count": 8,
+  "digest": "af70544cbdf5947a",
+  "first": "2024-03-01",
+  "last": "2025-04-08"
+ },
+ "FIRSTCRY|S5": {
+  "count": 4,
+  "digest": "b686a2b322dbb671",
+  "first": "2025-06-25",
+  "last": "2026-09-15"
+ },
+ "FORCEMOT|S1": {
+  "count": 138,
+  "digest": "3231e61211f517e5",
+  "first": "2025-04-01",
+  "last": "2026-08-12"
+ },
+ "FORCEMOT|S2": {
+  "count": 7,
+  "digest": "83ad58e10ad4e8b7",
+  "first": "2025-04-17",
+  "last": "2026-01-20"
+ },
+ "FORCEMOT|S3": {
+  "count": 98,
+  "digest": "358942355ebb8d05",
+  "first": "2025-03-17",
+  "last": "2026-08-17"
+ },
+ "FORCEMOT|S5": {
+  "count": 14,
+  "digest": "3e7504af5a8a795b",
+  "first": "2024-05-30",
+  "last": "2026-06-12"
+ },
+ "GABRIEL|S1": {
+  "count": 133,
+  "digest": "43d9fa5ccebdce61",
+  "first": "2025-02-03",
+  "last": "2026-09-18"
+ },
+ "GABRIEL|S2": {
+  "count": 6,
+  "digest": "a613e9d0415353fc",
+  "first": "2026-05-13",
+  "last": "2026-05-27"
+ },
+ "GABRIEL|S3": {
+  "count": 101,
+  "digest": "e5525d0c6d892510",
+  "first": "2024-12-20",
+  "last": "2026-09-18"
+ },
+ "GABRIEL|S4": {
+  "count": 10,
+  "digest": "902de6a667b80e35",
+  "first": "2026-04-16",
+  "last": "2026-04-30"
+ },
+ "GABRIEL|S5": {
+  "count": 9,
+  "digest": "9cf5e9b568903132",
+  "first": "2024-06-11",
+  "last": "2026-06-15"
+ },
+ "GESHIP|S2": {
+  "count": 2,
+  "digest": "c26372f36ffffb98",
+  "first": "2025-10-29",
+  "last": "2025-11-03"
+ },
+ "GESHIP|S3": {
+  "count": 140,
+  "digest": "6203f01544767273",
+  "first": "2024-10-14",
+  "last": "2026-09-17"
+ },
+ "GESHIP|S5": {
+  "count": 4,
+  "digest": "1c3b5c795ccefcca",
+  "first": "2024-04-24",
+  "last": "2026-04-15"
+ },
+ "GLAND|S1": {
+  "count": 56,
+  "digest": "00b7e45f53e030c4",
+  "first": "2026-06-01",
+  "last": "2026-09-18"
+ },
+ "GLAND|S2": {
+  "count": 7,
+  "digest": "c33a41eaf1fac218",
+  "first": "2026-06-01",
+  "last": "2026-06-12"
+ },
+ "GLAND|S3": {
+  "count": 83,
+  "digest": "3310b7777f1b0b7b",
+  "first": "2024-12-05",
+  "last": "2026-09-16"
+ },
+ "GLAND|S4": {
+  "count": 9,
+  "digest": "7d2568350405063e",
+  "first": "2026-05-18",
+  "last": "2026-05-29"
+ },
+ "GLAND|S5": {
+  "count": 2,
+  "digest": "4f357e8e5a5ccdd3",
+  "first": "2024-06-05",
+  "last": "2024-08-19"
+ },
+ "GMDCLTD|S1": {
+  "count": 158,
+  "digest": "41c127bdd340c0c9",
+  "first": "2025-06-02",
+  "last": "2026-08-12"
+ },
+ "GMDCLTD|S2": {
+  "count": 12,
+  "digest": "e4af9f2352cf26f2",
+  "first": "2025-06-16",
+  "last": "2026-05-04"
+ },
+ "GMDCLTD|S3": {
+  "count": 109,
+  "digest": "0ccb611b881e1c72",
+  "first": "2025-07-10",
+  "last": "2026-09-11"
+ },
+ "GMDCLTD|S4": {
+  "count": 18,
+  "digest": "d799e2a46eab5c3b",
+  "first": "2025-09-05",
+  "last": "2025-09-30"
+ },
+ "GMDCLTD|S5": {
+  "count": 10,
+  "digest": "5ff1a0348ec5b0c1",
+  "first": "2024-05-03",
+  "last": "2026-06-12"
+ },
+ "GODIGIT|S1": {
+  "count": 108,
+  "digest": "692da58de3753b14",
+  "first": "2025-07-01",
+  "last": "2026-03-16"
+ },
+ "GODIGIT|S2": {
+  "count": 3,
+  "digest": "4b94ef28bcaec23e",
+  "first": "2025-07-04",
+  "last": "2025-07-08"
+ },
+ "GODIGIT|S3": {
+  "count": 84,
+  "digest": "82a32f8dcd3523d8",
+  "first": "2025-07-01",
+  "last": "2026-03-12"
+ },
+ "GODIGIT|S5": {
+  "count": 5,
+  "digest": "9c0ed42ad3e88027",
+  "first": "2024-07-01",
+  "last": "2026-07-29"
+ },
+ "GODREJPROP|S1": {
+  "count": 24,
+  "digest": "ffa0066dfd7ace38",
+  "first": "2026-08-03",
+  "last": "2026-09-04"
+ },
+ "GODREJPROP|S2": {
+  "count": 5,
+  "digest": "a947d84188839e4a",
+  "first": "2026-07-31",
+  "last": "2026-08-14"
+ },
+ "GODREJPROP|S3": {
+  "count": 59,
+  "digest": "e8eabe2e037c99c2",
+  "first": "2024-10-14",
+  "last": "2026-09-04"
+ },
+ "GODREJPROP|S5": {
+  "count": 4,
+  "digest": "60772b8f743051e4",
+  "first": "2024-06-05",
+  "last": "2026-03-24"
+ },
+ "GRAPHITE|S1": {
+  "count": 168,
+  "digest": "31e6581245b070be",
+  "first": "2025-06-03",
+  "last": "2026-09-08"
+ },
+ "GRAPHITE|S2": {
+  "count": 16,
+  "digest": "1e7f51cd2cc29ce8",
+  "first": "2026-01-14",
+  "last": "2026-09-02"
+ },
+ "GRAPHITE|S3": {
+  "count": 126,
+  "digest": "2ea79c7a67df429a",
+  "first": "2024-10-18",
+  "last": "2026-09-07"
+ },
+ "GRAPHITE|S4": {
+  "count": 2,
+  "digest": "b02b8425a352dd32",
+  "first": "2026-04-22",
+  "last": "2026-04-29"
+ },
+ "GRAPHITE|S5": {
+  "count": 6,
+  "digest": "96584a5fa15f0d56",
+  "first": "2024-05-14",
+  "last": "2026-06-12"
+ },
+ "GRSE|S1": {
+  "count": 173,
+  "digest": "fb1275882d110bbd",
+  "first": "2025-03-19",
+  "last": "2026-08-27"
+ },
+ "GRSE|S2": {
+  "count": 14,
+  "digest": "8c1978b75363bd7c",
+  "first": "2025-03-28",
+  "last": "2026-05-19"
+ },
+ "GRSE|S3": {
+  "count": 186,
+  "digest": "8ffecfd9d927f6cc",
+  "first": "2024-10-15",
+  "last": "2026-08-28"
+ },
+ "GRSE|S4": {
+  "count": 16,
+  "digest": "bcd0c004cc3f896a",
+  "first": "2026-04-08",
+  "last": "2026-04-30"
+ },
+ "GRSE|S5": {
+  "count": 9,
+  "digest": "b755cb72bfde8049",
+  "first": "2024-05-17",
+  "last": "2026-05-19"
+ },
+ "HAVELLS|S3": {
+  "count": 26,
+  "digest": "72a9cf40a1bd3acd",
+  "first": "2024-10-14",
+  "last": "2025-09-22"
+ },
+ "HDBFS|S3": {
+  "count": 3,
+  "digest": "33433b903375b348",
+  "first": "2026-07-17",
+  "last": "2026-07-21"
+ },
+ "HDFCLIFE|S3": {
+  "count": 160,
+  "digest": "e976591343b4e0a6",
+  "first": "2024-10-15",
+  "last": "2026-02-23"
+ },
+ "HEXT|S3": {
+  "count": 8,
+  "digest": "848e7eccdf213e9c",
+  "first": "2025-12-16",
+  "last": "2026-01-07"
+ },
+ "HEXT|S5": {
+  "count": 3,
+  "digest": "1350ea57496aa93f",
+  "first": "2025-08-04",
+  "last": "2026-07-01"
+ },
+ "HINDCOPPER|S1": {
+  "count": 92,
+  "digest": "903ac3183f4c97ca",
+  "first": "2025-07-01",
+  "last": "2026-09-11"
+ },
+ "HINDCOPPER|S2": {
+  "count": 17,
+  "digest": "bc7a8b6a8082f375",
+  "first": "2025-10-15",
+  "last": "2026-09-02"
+ },
+ "HINDCOPPER|S3": {
+  "count": 77,
+  "digest": "686e1073afa39d1f",
+  "first": "2024-10-14",
+  "last": "2026-09-11"
+ },
+ "HINDCOPPER|S4": {
+  "count": 5,
+  "digest": "617ee969042a4b0b",
+  "first": "2025-12-30",
+  "last": "2026-04-27"
+ },
+ "HINDCOPPER|S5": {
+  "count": 6,
+  "digest": "975e615bbac214d1",
+  "first": "2024-04-01",
+  "last": "2026-08-17"
+ },
+ "HINDZINC|S1": {
+  "count": 84,
+  "digest": "2497b6d0cac0e225",
+  "first": "2025-04-24",
+  "last": "2026-09-18"
+ },
+ "HINDZINC|S2": {
+  "count": 9,
+  "digest": "92e178f3923b022b",
+  "first": "2025-06-16",
+  "last": "2026-09-08"
+ },
+ "HINDZINC|S3": {
+  "count": 112,
+  "digest": "993eab0e093383c5",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "HINDZINC|S4": {
+  "count": 13,
+  "digest": "9b1874638d6e16c2",
+  "first": "2025-12-18",
+  "last": "2026-04-29"
+ },
+ "HINDZINC|S5": {
+  "count": 2,
+  "digest": "9ce38be2371a99b2",
+  "first": "2024-05-10",
+  "last": "2024-08-08"
+ },
+ "HONAUT|S3": {
+  "count": 35,
+  "digest": "31b13fddd0fb000b",
+  "first": "2024-10-14",
+  "last": "2026-08-25"
+ },
+ "HYUNDAI|S1": {
+  "count": 41,
+  "digest": "f7ae16da1211fcfb",
+  "first": "2025-12-01",
+  "last": "2026-09-18"
+ },
+ "HYUNDAI|S2": {
+  "count": 7,
+  "digest": "0335bb43e463e6d8",
+  "first": "2026-08-18",
+  "last": "2026-09-10"
+ },
+ "HYUNDAI|S3": {
+  "count": 86,
+  "digest": "67fedff4e5b4f215",
+  "first": "2025-08-08",
+  "last": "2026-09-18"
+ },
+ "ICICIPRULI|S3": {
+  "count": 106,
+  "digest": "ba481b142a2333dd",
+  "first": "2024-10-14",
+  "last": "2026-03-02"
+ },
+ "IDFCFIRSTB|S3": {
+  "count": 116,
+  "digest": "0c2d598f7bebed6d",
+  "first": "2025-05-26",
+  "last": "2026-09-18"
+ },
+ "IGIL|S3": {
+  "count": 29,
+  "digest": "8261472787f3cdd0",
+  "first": "2026-04-24",
+  "last": "2026-08-18"
+ },
+ "IGIL|S5": {
+  "count": 4,
+  "digest": "4df73f97334dc0b5",
+  "first": "2025-02-13",
+  "last": "2025-08-04"
+ },
+ "IKS|S3": {
+  "count": 76,
+  "digest": "bf89943646424ae5",
+  "first": "2025-11-25",
+  "last": "2026-09-18"
+ },
+ "IKS|S5": {
+  "count": 1,
+  "digest": "b830f14a9b2a6b0b",
+  "first": "2026-03-24",
+  "last": "2026-03-24"
+ },
+ "INDIACEM|S1": {
+  "count": 142,
+  "digest": "63dc33916473340d",
+  "first": "2025-05-02",
+  "last": "2026-02-23"
+ },
+ "INDIACEM|S2": {
+  "count": 12,
+  "digest": "fdb67593f1db53b0",
+  "first": "2025-05-28",
+  "last": "2026-05-26"
+ },
+ "INDIACEM|S3": {
+  "count": 140,
+  "digest": "ddb984bfadb56b27",
+  "first": "2024-10-14",
+  "last": "2026-08-10"
+ },
+ "INDIACEM|S4": {
+  "count": 7,
+  "digest": "2c2c71bd63cc8998",
+  "first": "2026-04-17",
+  "last": "2026-04-28"
+ },
+ "INDIACEM|S5": {
+  "count": 3,
+  "digest": "d14c9d27e60d87ac",
+  "first": "2024-06-20",
+  "last": "2025-03-03"
+ },
+ "INDIGO|S1": {
+  "count": 44,
+  "digest": "35a06cf7242ced4c",
+  "first": "2026-07-01",
+  "last": "2026-08-31"
+ },
+ "INDIGO|S3": {
+  "count": 181,
+  "digest": "bc6a46f1a3abda06",
+  "first": "2024-10-14",
+  "last": "2026-09-08"
+ },
+ "INDIGO|S4": {
+  "count": 3,
+  "digest": "be7c15fec0ef3723",
+  "first": "2026-06-25",
+  "last": "2026-06-30"
+ },
+ "INDIGO|S5": {
+  "count": 2,
+  "digest": "7f9e9c3bcb5d70dc",
+  "first": "2024-06-10",
+  "last": "2026-03-24"
+ },
+ "INFY|S2": {
+  "count": 1,
+  "digest": "05e9ff24ee0dbd34",
+  "first": "2026-02-01",
+  "last": "2026-02-01"
+ },
+ "INFY|S3": {
+  "count": 103,
+  "digest": "eec6391391a4b6ee",
+  "first": "2024-10-16",
+  "last": "2026-02-03"
+ },
+ "IOB|S5": {
+  "count": 2,
+  "digest": "c41a4723c6f4cf21",
+  "first": "2024-02-01",
+  "last": "2024-05-14"
+ },
+ "IRB|S3": {
+  "count": 4,
+  "digest": "c207c96a9a0506cc",
+  "first": "2025-01-07",
+  "last": "2026-06-22"
+ },
+ "IRB|S5": {
+  "count": 6,
+  "digest": "72bfb8e0ca19e8ef",
+  "first": "2024-05-13",
+  "last": "2025-04-08"
+ },
+ "IREDA|S3": {
+  "count": 23,
+  "digest": "de1aadb2b49bc780",
+  "first": "2024-10-15",
+  "last": "2025-01-31"
+ },
+ "IREDA|S5": {
+  "count": 9,
+  "digest": "1a3c774a4a4a525f",
+  "first": "2024-01-12",
+  "last": "2025-03-18"
+ },
+ "ITCHOTELS|S1": {
+  "count": 4,
+  "digest": "7d50504565022cbd",
+  "first": "2026-07-06",
+  "last": "2026-07-15"
+ },
+ "ITCHOTELS|S5": {
+  "count": 2,
+  "digest": "a2ac1f994ee56277",
+  "first": "2026-03-25",
+  "last": "2026-04-01"
+ },
+ "JBMA|S1": {
+  "count": 59,
+  "digest": "d2c8396bac597c23",
+  "first": "2026-05-08",
+  "last": "2026-08-27"
+ },
+ "JBMA|S2": {
+  "count": 4,
+  "digest": "ecee9914f1395237",
+  "first": "2026-06-30",
+  "last": "2026-07-03"
+ },
+ "JBMA|S3": {
+  "count": 35,
+  "digest": "611670b514d3c19b",
+  "first": "2026-05-18",
+  "last": "2026-08-28"
+ },
+ "JBMA|S5": {
+  "count": 5,
+  "digest": "b3d57649b349b0c8",
+  "first": "2024-02-19",
+  "last": "2026-03-17"
+ },
+ "JIOFIN|S1": {
+  "count": 71,
+  "digest": "251fc0c0f8b162b1",
+  "first": "2025-06-02",
+  "last": "2025-09-23"
+ },
+ "JIOFIN|S3": {
+  "count": 100,
+  "digest": "1d0f79ab9922f49e",
+  "first": "2024-10-14",
+  "last": "2026-01-07"
+ },
+ "JIOFIN|S5": {
+  "count": 1,
+  "digest": "e0bfcd909b1af83c",
+  "first": "2024-03-11",
+  "last": "2024-03-11"
+ },
+ "JMFINANCIL|S1": {
+  "count": 67,
+  "digest": "d71add2a33dbc4e1",
+  "first": "2025-06-03",
+  "last": "2026-09-04"
+ },
+ "JMFINANCIL|S2": {
+  "count": 7,
+  "digest": "86e314be425579b2",
+  "first": "2025-06-04",
+  "last": "2025-06-23"
+ },
+ "JMFINANCIL|S3": {
+  "count": 80,
+  "digest": "4571e07ad8f73619",
+  "first": "2024-10-24",
+  "last": "2026-09-04"
+ },
+ "JMFINANCIL|S4": {
+  "count": 7,
+  "digest": "cd081a2e31b9fa11",
+  "first": "2026-04-17",
+  "last": "2026-04-30"
+ },
+ "JMFINANCIL|S5": {
+  "count": 15,
+  "digest": "1dfffb1eea6d275a",
+  "first": "2024-01-19",
+  "last": "2026-04-01"
+ },
+ "JSWDULUX|S2": {
+  "count": 25,
+  "digest": "666b1502c40d08e4",
+  "first": "2025-02-03",
+  "last": "2025-12-16"
+ },
+ "JSWDULUX|S3": {
+  "count": 23,
+  "digest": "1e61588542b32f6a",
+  "first": "2024-11-11",
+  "last": "2025-12-10"
+ },
+ "JSWDULUX|S5": {
+  "count": 1,
+  "digest": "f622950de6b53c24",
+  "first": "2024-10-31",
+  "last": "2024-10-31"
+ },
+ "JSWSTEEL|S3": {
+  "count": 327,
+  "digest": "003892326665ec5c",
+  "first": "2024-10-15",
+  "last": "2026-09-18"
+ },
+ "JUBLPHARMA|S1": {
+  "count": 119,
+  "digest": "c4ee26e104d9609f",
+  "first": "2025-02-05",
+  "last": "2026-07-29"
+ },
+ "JUBLPHARMA|S2": {
+  "count": 14,
+  "digest": "c9dede4fa88611af",
+  "first": "2025-06-04",
+  "last": "2025-11-18"
+ },
+ "JUBLPHARMA|S3": {
+  "count": 104,
+  "digest": "8d9c66d1fad02c91",
+  "first": "2024-10-24",
+  "last": "2025-12-15"
+ },
+ "JUBLPHARMA|S4": {
+  "count": 1,
+  "digest": "cbdbacf80be93c3d",
+  "first": "2026-09-18",
+  "last": "2026-09-18"
+ },
+ "JUBLPHARMA|S5": {
+  "count": 3,
+  "digest": "89b15c81324068fa",
+  "first": "2024-02-15",
+  "last": "2025-01-08"
+ },
+ "KAJARIACER|S1": {
+  "count": 132,
+  "digest": "b44b575337e8e89d",
+  "first": "2025-07-02",
+  "last": "2026-09-18"
+ },
+ "KAJARIACER|S2": {
+  "count": 2,
+  "digest": "10b1ad03f7e95c03",
+  "first": "2025-08-13",
+  "last": "2025-08-14"
+ },
+ "KAJARIACER|S3": {
+  "count": 105,
+  "digest": "9f8a17b5d872a8c7",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "KAJARIACER|S5": {
+  "count": 1,
+  "digest": "526c77f93bd232aa",
+  "first": "2024-06-06",
+  "last": "2024-06-06"
+ },
+ "KAYNES|S1": {
+  "count": 99,
+  "digest": "25bf877c0ce07c90",
+  "first": "2025-04-11",
+  "last": "2025-11-04"
+ },
+ "KAYNES|S2": {
+  "count": 1,
+  "digest": "991201f22425a2be",
+  "first": "2025-05-02",
+  "last": "2025-05-02"
+ },
+ "KAYNES|S3": {
+  "count": 74,
+  "digest": "5c02799a6322327b",
+  "first": "2024-10-25",
+  "last": "2025-11-04"
+ },
+ "KAYNES|S5": {
+  "count": 6,
+  "digest": "760ea2337af3af44",
+  "first": "2024-03-21",
+  "last": "2026-05-21"
+ },
+ "KFINTECH|S1": {
+  "count": 61,
+  "digest": "1061cabffb211bfc",
+  "first": "2025-02-05",
+  "last": "2026-08-31"
+ },
+ "KFINTECH|S2": {
+  "count": 5,
+  "digest": "9f78f13d0a33454f",
+  "first": "2025-10-16",
+  "last": "2025-10-24"
+ },
+ "KFINTECH|S3": {
+  "count": 86,
+  "digest": "e64647863c19ef29",
+  "first": "2024-10-21",
+  "last": "2026-08-27"
+ },
+ "KFINTECH|S5": {
+  "count": 8,
+  "digest": "be55fbd6135d1593",
+  "first": "2024-02-23",
+  "last": "2025-04-08"
+ },
+ "KOTAKBANK|S3": {
+  "count": 192,
+  "digest": "21916f774b91a445",
+  "first": "2024-10-15",
+  "last": "2026-09-18"
+ },
+ "KPRMILL|S1": {
+  "count": 57,
+  "digest": "968ee4138ff90944",
+  "first": "2026-07-01",
+  "last": "2026-09-18"
+ },
+ "KPRMILL|S2": {
+  "count": 4,
+  "digest": "8db548f6ef5a3b97",
+  "first": "2026-07-02",
+  "last": "2026-07-09"
+ },
+ "KPRMILL|S3": {
+  "count": 152,
+  "digest": "622a0de4a11474f3",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "KPRMILL|S4": {
+  "count": 4,
+  "digest": "9d467c50522c1fbf",
+  "first": "2026-06-18",
+  "last": "2026-06-30"
+ },
+ "KPRMILL|S5": {
+  "count": 1,
+  "digest": "c444ed922a7b8529",
+  "first": "2025-08-18",
+  "last": "2025-08-18"
+ },
+ "LAURUSLABS|S1": {
+  "count": 123,
+  "digest": "fc6d4c3da2aaf9e3",
+  "first": "2025-08-01",
+  "last": "2026-09-16"
+ },
+ "LAURUSLABS|S3": {
+  "count": 125,
+  "digest": "e49c333f0514f3e1",
+  "first": "2024-10-14",
+  "last": "2026-04-30"
+ },
+ "LAURUSLABS|S5": {
+  "count": 2,
+  "digest": "74f5d898383d2c4b",
+  "first": "2025-04-08",
+  "last": "2026-03-20"
+ },
+ "LICI|S2": {
+  "count": 8,
+  "digest": "19497c463b946e12",
+  "first": "2025-06-20",
+  "last": "2025-07-08"
+ },
+ "LICI|S3": {
+  "count": 106,
+  "digest": "a0a7ad4bf67b5ebf",
+  "first": "2024-11-29",
+  "last": "2026-08-28"
+ },
+ "LICI|S5": {
+  "count": 2,
+  "digest": "cb3fdbf503da31ad",
+  "first": "2024-03-21",
+  "last": "2024-08-16"
+ },
+ "LODHA|S1": {
+  "count": 27,
+  "digest": "58277702b225a310",
+  "first": "2026-08-03",
+  "last": "2026-09-08"
+ },
+ "LODHA|S2": {
+  "count": 20,
+  "digest": "32fef9f4a7c48f5c",
+  "first": "2025-05-02",
+  "last": "2026-08-17"
+ },
+ "LODHA|S3": {
+  "count": 52,
+  "digest": "4f79b8d6752a3677",
+  "first": "2024-11-06",
+  "last": "2026-09-18"
+ },
+ "LODHA|S5": {
+  "count": 4,
+  "digest": "df83e477dbc4444c",
+  "first": "2024-07-15",
+  "last": "2026-01-28"
+ },
+ "LTFOODS|S1": {
+  "count": 116,
+  "digest": "55df216c4b4b4691",
+  "first": "2025-02-01",
+  "last": "2026-09-18"
+ },
+ "LTFOODS|S2": {
+  "count": 16,
+  "digest": "8b79d0fbc541ab15",
+  "first": "2025-06-04",
+  "last": "2026-09-09"
+ },
+ "LTFOODS|S3": {
+  "count": 128,
+  "digest": "77d1b4471b03d1ae",
+  "first": "2024-10-28",
+  "last": "2026-09-18"
+ },
+ "LTFOODS|S5": {
+  "count": 4,
+  "digest": "ecd2d47395a52ee2",
+  "first": "2024-03-20",
+  "last": "2026-04-01"
+ },
+ "LUPIN|S3": {
+  "count": 248,
+  "digest": "871568fbd6aca687",
+  "first": "2024-10-16",
+  "last": "2026-08-10"
+ },
+ "LUPIN|S5": {
+  "count": 1,
+  "digest": "fdf12903566e9665",
+  "first": "2025-04-08",
+  "last": "2025-04-08"
+ },
+ "MAHABANK|S1": {
+  "count": 117,
+  "digest": "a235b436a08de065",
+  "first": "2025-06-12",
+  "last": "2026-09-18"
+ },
+ "MAHABANK|S2": {
+  "count": 13,
+  "digest": "44e64d568b5579ac",
+  "first": "2025-07-03",
+  "last": "2026-05-08"
+ },
+ "MAHABANK|S3": {
+  "count": 158,
+  "digest": "19b013e35bf65302",
+  "first": "2025-06-19",
+  "last": "2026-09-18"
+ },
+ "MAHABANK|S4": {
+  "count": 9,
+  "digest": "155c0478729b6e22",
+  "first": "2026-04-20",
+  "last": "2026-04-30"
+ },
+ "MAHABANK|S5": {
+  "count": 5,
+  "digest": "9d262b900442bdb9",
+  "first": "2025-04-08",
+  "last": "2026-07-15"
+ },
+ "MAPMYINDIA|S1": {
+  "count": 12,
+  "digest": "37ddd2f07157e152",
+  "first": "2025-05-07",
+  "last": "2025-11-10"
+ },
+ "MAPMYINDIA|S3": {
+  "count": 26,
+  "digest": "7023276b51d7f27c",
+  "first": "2024-10-14",
+  "last": "2025-11-10"
+ },
+ "MAPMYINDIA|S5": {
+  "count": 9,
+  "digest": "0f0acf54cc24ccb7",
+  "first": "2024-08-28",
+  "last": "2026-08-11"
+ },
+ "MAXHEALTH|S1": {
+  "count": 106,
+  "digest": "96c0bd17d8d7f7eb",
+  "first": "2025-02-01",
+  "last": "2025-11-28"
+ },
+ "MAXHEALTH|S2": {
+  "count": 10,
+  "digest": "9610fa9677fda657",
+  "first": "2025-04-02",
+  "last": "2026-07-29"
+ },
+ "MAXHEALTH|S3": {
+  "count": 160,
+  "digest": "3435160c841c56cc",
+  "first": "2024-10-14",
+  "last": "2026-08-10"
+ },
+ "MAXHEALTH|S5": {
+  "count": 1,
+  "digest": "80425515505b4b60",
+  "first": "2024-06-12",
+  "last": "2024-06-12"
+ },
+ "MEDANTA|S2": {
+  "count": 8,
+  "digest": "0e98cde1e8087376",
+  "first": "2025-03-07",
+  "last": "2025-04-04"
+ },
+ "MEDANTA|S3": {
+  "count": 112,
+  "digest": "85806839c1a66b65",
+  "first": "2024-12-10",
+  "last": "2026-09-17"
+ },
+ "MEDANTA|S5": {
+  "count": 2,
+  "digest": "1bb145e3c53f8ba0",
+  "first": "2024-05-27",
+  "last": "2025-04-08"
+ },
+ "MINDACORP|S1": {
+  "count": 21,
+  "digest": "de7036ce0586bd4e",
+  "first": "2026-06-01",
+  "last": "2026-09-18"
+ },
+ "MINDACORP|S2": {
+  "count": 31,
+  "digest": "63075ad453b314d5",
+  "first": "2025-02-07",
+  "last": "2026-06-29"
+ },
+ "MINDACORP|S3": {
+  "count": 163,
+  "digest": "2ae6f99bf34a0f05",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "MINDACORP|S4": {
+  "count": 1,
+  "digest": "0d4d1b402e1b60a7",
+  "first": "2026-05-29",
+  "last": "2026-05-29"
+ },
+ "MINDACORP|S5": {
+  "count": 1,
+  "digest": "e4199e08749140b1",
+  "first": "2025-04-11",
+  "last": "2025-04-11"
+ },
+ "MOTILALOFS|S1": {
+  "count": 137,
+  "digest": "1b9ef67bd4385979",
+  "first": "2025-05-05",
+  "last": "2026-09-18"
+ },
+ "MOTILALOFS|S2": {
+  "count": 16,
+  "digest": "939ddaa0d451dcf3",
+  "first": "2025-06-02",
+  "last": "2026-09-15"
+ },
+ "MOTILALOFS|S3": {
+  "count": 82,
+  "digest": "42727380f6626956",
+  "first": "2024-11-18",
+  "last": "2026-09-17"
+ },
+ "MOTILALOFS|S4": {
+  "count": 13,
+  "digest": "c75d92f581d748dc",
+  "first": "2026-04-15",
+  "last": "2026-08-31"
+ },
+ "MOTILALOFS|S5": {
+  "count": 8,
+  "digest": "90fdf1973439951c",
+  "first": "2024-03-01",
+  "last": "2026-02-02"
+ },
+ "MRPL|S1": {
+  "count": 96,
+  "digest": "934e73fea21c1f02",
+  "first": "2025-11-03",
+  "last": "2026-09-11"
+ },
+ "MRPL|S2": {
+  "count": 18,
+  "digest": "9c9f9823ac011622",
+  "first": "2025-11-10",
+  "last": "2026-08-21"
+ },
+ "MRPL|S3": {
+  "count": 73,
+  "digest": "e518a0a6ced05e99",
+  "first": "2025-11-26",
+  "last": "2026-09-18"
+ },
+ "MRPL|S5": {
+  "count": 11,
+  "digest": "a249e266c4e7a05b",
+  "first": "2024-02-02",
+  "last": "2026-09-18"
+ },
+ "NAM-INDIA|S1": {
+  "count": 157,
+  "digest": "5b6950d02425de97",
+  "first": "2025-05-02",
+  "last": "2026-09-11"
+ },
+ "NAM-INDIA|S2": {
+  "count": 15,
+  "digest": "31ae7feb073a13de",
+  "first": "2025-05-23",
+  "last": "2026-05-13"
+ },
+ "NAM-INDIA|S3": {
+  "count": 173,
+  "digest": "f7c15aafb93f3675",
+  "first": "2024-10-22",
+  "last": "2026-09-18"
+ },
+ "NAM-INDIA|S4": {
+  "count": 11,
+  "digest": "2ccf1c6cc623503b",
+  "first": "2026-04-16",
+  "last": "2026-04-30"
+ },
+ "NAM-INDIA|S5": {
+  "count": 8,
+  "digest": "137f2d647dc42bb7",
+  "first": "2024-01-25",
+  "last": "2026-03-24"
+ },
+ "NAUKRI|S1": {
+  "count": 12,
+  "digest": "500528e9d4640a1d",
+  "first": "2026-08-03",
+  "last": "2026-09-17"
+ },
+ "NAUKRI|S3": {
+  "count": 77,
+  "digest": "5f9995a74b26e48c",
+  "first": "2024-10-17",
+  "last": "2026-09-18"
+ },
+ "NAUKRI|S5": {
+  "count": 3,
+  "digest": "bf990007db05699b",
+  "first": "2025-01-28",
+  "last": "2026-02-09"
+ },
+ "NBCC|S1": {
+  "count": 121,
+  "digest": "677acbb6a6e78ead",
+  "first": "2025-05-02",
+  "last": "2026-07-13"
+ },
+ "NBCC|S2": {
+  "count": 3,
+  "digest": "8276ddcb9daa77c4",
+  "first": "2025-05-23",
+  "last": "2025-05-29"
+ },
+ "NBCC|S3": {
+  "count": 107,
+  "digest": "8c813d69dd3f9337",
+  "first": "2024-10-14",
+  "last": "2026-07-13"
+ },
+ "NBCC|S4": {
+  "count": 10,
+  "digest": "bcd61a0728b9d1ea",
+  "first": "2026-04-16",
+  "last": "2026-04-29"
+ },
+ "NBCC|S5": {
+  "count": 7,
+  "digest": "82e246312e113da4",
+  "first": "2024-01-19",
+  "last": "2026-04-01"
+ },
+ "NETWEB|S1": {
+  "count": 158,
+  "digest": "2778c1b27089e69a",
+  "first": "2025-06-02",
+  "last": "2026-09-18"
+ },
+ "NETWEB|S2": {
+  "count": 6,
+  "digest": "b3b31ddc278a65c3",
+  "first": "2025-08-14",
+  "last": "2026-03-11"
+ },
+ "NETWEB|S3": {
+  "count": 136,
+  "digest": "93e9ead576538338",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "NETWEB|S4": {
+  "count": 18,
+  "digest": "4b3884c752b9ac46",
+  "first": "2025-09-19",
+  "last": "2026-04-30"
+ },
+ "NETWEB|S5": {
+  "count": 15,
+  "digest": "4bc16c6d6cab4abe",
+  "first": "2024-05-31",
+  "last": "2026-08-20"
+ },
+ "NH|S1": {
+  "count": 145,
+  "digest": "d76e6afe8bafa440",
+  "first": "2025-07-01",
+  "last": "2026-09-18"
+ },
+ "NH|S2": {
+  "count": 9,
+  "digest": "33c578d05eaf1738",
+  "first": "2025-11-26",
+  "last": "2025-12-12"
+ },
+ "NH|S3": {
+  "count": 253,
+  "digest": "4165e78782108da1",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "NH|S5": {
+  "count": 3,
+  "digest": "466aa921aab90422",
+  "first": "2024-03-15",
+  "last": "2025-03-03"
+ },
+ "NIVABUPA|S3": {
+  "count": 44,
+  "digest": "a62bbb8ff23b1aee",
+  "first": "2025-09-04",
+  "last": "2026-08-25"
+ },
+ "NIVABUPA|S5": {
+  "count": 3,
+  "digest": "31240a2992bed842",
+  "first": "2025-01-14",
+  "last": "2025-05-29"
+ },
+ "NSLNISP|S1": {
+  "count": 42,
+  "digest": "091ab46001fa3c08",
+  "first": "2026-05-04",
+  "last": "2026-09-11"
+ },
+ "NSLNISP|S2": {
+  "count": 8,
+  "digest": "b7d0a88222590545",
+  "first": "2025-10-10",
+  "last": "2026-06-16"
+ },
+ "NSLNISP|S3": {
+  "count": 57,
+  "digest": "380173023a549859",
+  "first": "2025-10-13",
+  "last": "2026-09-11"
+ },
+ "NSLNISP|S5": {
+  "count": 4,
+  "digest": "00e6b25071711071",
+  "first": "2024-05-10",
+  "last": "2026-04-01"
+ },
+ "NUVAMA|S1": {
+  "count": 100,
+  "digest": "47690a4d7ca85e34",
+  "first": "2025-03-20",
+  "last": "2026-01-20"
+ },
+ "NUVAMA|S2": {
+  "count": 14,
+  "digest": "7f8b6f9b7aef1373",
+  "first": "2025-05-22",
+  "last": "2026-06-09"
+ },
+ "NUVAMA|S3": {
+  "count": 131,
+  "digest": "25f964c7a0e2c1a7",
+  "first": "2024-10-22",
+  "last": "2026-09-18"
+ },
+ "NUVAMA|S4": {
+  "count": 3,
+  "digest": "7adaf1d9adbf444a",
+  "first": "2026-04-17",
+  "last": "2026-05-11"
+ },
+ "NUVAMA|S5": {
+  "count": 7,
+  "digest": "56007ab3b8e9aa2f",
+  "first": "2024-01-25",
+  "last": "2026-08-11"
+ },
+ "OBEROIRLTY|S3": {
+  "count": 87,
+  "digest": "fceabcc5cc69de42",
+  "first": "2024-10-17",
+  "last": "2026-09-18"
+ },
+ "OBEROIRLTY|S5": {
+  "count": 3,
+  "digest": "cbbac258365b77ab",
+  "first": "2025-01-20",
+  "last": "2025-04-08"
+ },
+ "OLAELEC|S3": {
+  "count": 6,
+  "digest": "20c9523207d55061",
+  "first": "2026-06-29",
+  "last": "2026-09-01"
+ },
+ "OLAELEC|S5": {
+  "count": 8,
+  "digest": "08ca1f072aaee3ed",
+  "first": "2024-10-01",
+  "last": "2026-07-15"
+ },
+ "ONGC|S1": {
+  "count": 27,
+  "digest": "de8806a068a68de8",
+  "first": "2025-11-03",
+  "last": "2026-02-25"
+ },
+ "ONGC|S2": {
+  "count": 7,
+  "digest": "6e0437f83cc980b3",
+  "first": "2026-02-05",
+  "last": "2026-02-27"
+ },
+ "ONGC|S3": {
+  "count": 62,
+  "digest": "c95f393098a4eb79",
+  "first": "2025-06-17",
+  "last": "2026-05-27"
+ },
+ "ONGC|S5": {
+  "count": 1,
+  "digest": "932033369a843170",
+  "first": "2024-02-15",
+  "last": "2024-02-15"
+ },
+ "PATANJALI|S2": {
+  "count": 8,
+  "digest": "1866c73975a591b2",
+  "first": "2025-07-24",
+  "last": "2025-08-13"
+ },
+ "PATANJALI|S3": {
+  "count": 160,
+  "digest": "d35e7670d2ca8baf",
+  "first": "2024-10-14",
+  "last": "2025-10-31"
+ },
+ "PATANJALI|S5": {
+  "count": 1,
+  "digest": "b1861a9c2b3dbc8a",
+  "first": "2024-06-05",
+  "last": "2024-06-05"
+ },
+ "PERSISTENT|S1": {
+  "count": 133,
+  "digest": "1420a85b5a9c0b54",
+  "first": "2025-02-01",
+  "last": "2026-09-18"
+ },
+ "PERSISTENT|S2": {
+  "count": 25,
+  "digest": "de17e38fa469cdef",
+  "first": "2025-05-15",
+  "last": "2025-11-25"
+ },
+ "PERSISTENT|S3": {
+  "count": 116,
+  "digest": "f3beef93551891eb",
+  "first": "2024-10-21",
+  "last": "2026-09-18"
+ },
+ "PERSISTENT|S4": {
+  "count": 10,
+  "digest": "2c79f92053d16495",
+  "first": "2025-10-16",
+  "last": "2025-10-31"
+ },
+ "PFIZER|S1": {
+  "count": 52,
+  "digest": "79ebbaa2a2f7e622",
+  "first": "2025-06-02",
+  "last": "2026-08-17"
+ },
+ "PFIZER|S2": {
+  "count": 7,
+  "digest": "31c1d6145b561e81",
+  "first": "2025-06-11",
+  "last": "2025-06-30"
+ },
+ "PFIZER|S3": {
+  "count": 87,
+  "digest": "4da0cf16eb330b8d",
+  "first": "2024-10-14",
+  "last": "2026-08-26"
+ },
+ "PHOENIXLTD|S2": {
+  "count": 13,
+  "digest": "006505ff7a4870ed",
+  "first": "2025-03-28",
+  "last": "2026-05-19"
+ },
+ "PHOENIXLTD|S3": {
+  "count": 168,
+  "digest": "77f679241de224af",
+  "first": "2024-10-16",
+  "last": "2026-09-18"
+ },
+ "PHOENIXLTD|S4": {
+  "count": 1,
+  "digest": "5f0f53a65c09f70d",
+  "first": "2026-04-22",
+  "last": "2026-04-22"
+ },
+ "PHOENIXLTD|S5": {
+  "count": 6,
+  "digest": "836f5a7a9743f9d9",
+  "first": "2024-03-15",
+  "last": "2025-05-12"
+ },
+ "PNB|S2": {
+  "count": 1,
+  "digest": "43833086dcbaea83",
+  "first": "2026-08-25",
+  "last": "2026-08-25"
+ },
+ "PNB|S3": {
+  "count": 118,
+  "digest": "a672d9cf7355e044",
+  "first": "2025-06-17",
+  "last": "2026-09-18"
+ },
+ "PNB|S5": {
+  "count": 3,
+  "digest": "18fc427a3f0f9e25",
+  "first": "2024-02-15",
+  "last": "2026-04-06"
+ },
+ "POLYCAB|S1": {
+  "count": 42,
+  "digest": "c7b9b62ec2d460b5",
+  "first": "2026-06-01",
+  "last": "2026-08-31"
+ },
+ "POLYCAB|S3": {
+  "count": 154,
+  "digest": "9b154d4b5444cbe5",
+  "first": "2024-10-16",
+  "last": "2026-09-03"
+ },
+ "POLYCAB|S5": {
+  "count": 3,
+  "digest": "e27ad2263a1c8575",
+  "first": "2025-01-29",
+  "last": "2026-03-24"
+ },
+ "POWERGRID|S2": {
+  "count": 1,
+  "digest": "c6afdb90b9f81623",
+  "first": "2026-03-11",
+  "last": "2026-03-11"
+ },
+ "POWERGRID|S3": {
+  "count": 93,
+  "digest": "817e757dbdaf6960",
+  "first": "2024-10-14",
+  "last": "2026-06-23"
+ },
+ "PREMIERENE|S3": {
+  "count": 106,
+  "digest": "d67c30e318e39fec",
+  "first": "2025-06-23",
+  "last": "2026-09-08"
+ },
+ "PREMIERENE|S5": {
+  "count": 3,
+  "digest": "462ff4ae65e4f3e4",
+  "first": "2024-11-29",
+  "last": "2026-01-22"
+ },
+ "PVRINOX|S3": {
+  "count": 36,
+  "digest": "e818c4b36088a9c8",
+  "first": "2024-10-14",
+  "last": "2026-09-09"
+ },
+ "PVRINOX|S5": {
+  "count": 1,
+  "digest": "d2a5d89c234497d0",
+  "first": "2026-01-27",
+  "last": "2026-01-27"
+ },
+ "RAINBOW|S2": {
+  "count": 4,
+  "digest": "ca02e0e9885ef6e4",
+  "first": "2025-04-16",
+  "last": "2025-04-24"
+ },
+ "RAINBOW|S3": {
+  "count": 100,
+  "digest": "ef4bb28af419cfd8",
+  "first": "2024-10-21",
+  "last": "2026-09-01"
+ },
+ "RECLTD|S3": {
+  "count": 35,
+  "digest": "d8a88d8a0d2a24c5",
+  "first": "2024-10-14",
+  "last": "2026-08-07"
+ },
+ "RECLTD|S5": {
+  "count": 10,
+  "digest": "a0be9f3a5e9ce206",
+  "first": "2024-03-21",
+  "last": "2026-04-01"
+ },
+ "RHIM|S3": {
+  "count": 2,
+  "digest": "83ccfa6041d2e580",
+  "first": "2025-08-06",
+  "last": "2025-08-19"
+ },
+ "RHIM|S5": {
+  "count": 2,
+  "digest": "1e76c07eeddca250",
+  "first": "2025-05-12",
+  "last": "2026-04-01"
+ },
+ "RPOWER|S1": {
+  "count": 63,
+  "digest": "d8d708bd53bad6d8",
+  "first": "2025-02-01",
+  "last": "2025-07-24"
+ },
+ "RPOWER|S2": {
+  "count": 5,
+  "digest": "a3ed0f20032bfbeb",
+  "first": "2025-04-16",
+  "last": "2025-05-05"
+ },
+ "RPOWER|S3": {
+  "count": 53,
+  "digest": "b995fd9d6b96fbf4",
+  "first": "2024-10-22",
+  "last": "2025-10-10"
+ },
+ "RPOWER|S5": {
+  "count": 10,
+  "digest": "e69f9c15ac9924f5",
+  "first": "2024-02-08",
+  "last": "2026-06-12"
+ },
+ "SAGILITY|S1": {
+  "count": 48,
+  "digest": "508453b864dc6a12",
+  "first": "2026-01-01",
+  "last": "2026-09-18"
+ },
+ "SAGILITY|S3": {
+  "count": 83,
+  "digest": "533f72c941a46d2a",
+  "first": "2025-09-02",
+  "last": "2026-09-18"
+ },
+ "SAGILITY|S5": {
+  "count": 3,
+  "digest": "40ab0e2dcba23e22",
+  "first": "2025-01-24",
+  "last": "2026-03-24"
+ },
+ "SAMMAANCAP|S1": {
+  "count": 76,
+  "digest": "3ceeea16cb1182dc",
+  "first": "2025-10-06",
+  "last": "2026-09-04"
+ },
+ "SAMMAANCAP|S2": {
+  "count": 10,
+  "digest": "290bd3f355d93ac4",
+  "first": "2025-10-09",
+  "last": "2026-06-22"
+ },
+ "SAMMAANCAP|S3": {
+  "count": 71,
+  "digest": "32cd39018fbb83e2",
+  "first": "2025-09-23",
+  "last": "2026-09-07"
+ },
+ "SAMMAANCAP|S4": {
+  "count": 1,
+  "digest": "0d4d1b402e1b60a7",
+  "first": "2026-05-29",
+  "last": "2026-05-29"
+ },
+ "SAMMAANCAP|S5": {
+  "count": 7,
+  "digest": "1da4853fcfeb8797",
+  "first": "2024-06-05",
+  "last": "2025-12-19"
+ },
+ "SAREGAMA|S1": {
+  "count": 59,
+  "digest": "22ae00c718200744",
+  "first": "2025-05-08",
+  "last": "2026-09-18"
+ },
+ "SAREGAMA|S3": {
+  "count": 108,
+  "digest": "38a65611b448b2aa",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "SAREGAMA|S5": {
+  "count": 2,
+  "digest": "401e7871998767e8",
+  "first": "2024-11-14",
+  "last": "2026-07-27"
+ },
+ "SBILIFE|S2": {
+  "count": 3,
+  "digest": "a95cfb8ce9f60e26",
+  "first": "2025-05-19",
+  "last": "2025-05-27"
+ },
+ "SBILIFE|S3": {
+  "count": 169,
+  "digest": "ceab024d74f993d0",
+  "first": "2024-10-14",
+  "last": "2026-08-05"
+ },
+ "SCHNEIDER|S1": {
+  "count": 129,
+  "digest": "1e0b51af8385a02b",
+  "first": "2025-06-02",
+  "last": "2026-09-18"
+ },
+ "SCHNEIDER|S2": {
+  "count": 18,
+  "digest": "8c0cadf1d36b82b7",
+  "first": "2025-06-19",
+  "last": "2026-03-25"
+ },
+ "SCHNEIDER|S3": {
+  "count": 62,
+  "digest": "e8266cd7b529bd79",
+  "first": "2024-10-17",
+  "last": "2026-09-18"
+ },
+ "SCHNEIDER|S4": {
+  "count": 17,
+  "digest": "a331660a31643d8a",
+  "first": "2026-02-17",
+  "last": "2026-04-30"
+ },
+ "SCHNEIDER|S5": {
+  "count": 9,
+  "digest": "20e5ea90cdfa8bf8",
+  "first": "2024-02-06",
+  "last": "2026-08-26"
+ },
+ "SHRIRAMFIN|S1": {
+  "count": 177,
+  "digest": "90c9419c3447e32f",
+  "first": "2025-02-20",
+  "last": "2026-09-01"
+ },
+ "SHRIRAMFIN|S2": {
+  "count": 23,
+  "digest": "9f3886936de407f7",
+  "first": "2025-03-11",
+  "last": "2026-07-17"
+ },
+ "SHRIRAMFIN|S3": {
+  "count": 173,
+  "digest": "a1ef1e7bdae39e75",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "SHRIRAMFIN|S4": {
+  "count": 1,
+  "digest": "724342c280ef908e",
+  "first": "2025-10-31",
+  "last": "2025-10-31"
+ },
+ "SHRIRAMFIN|S5": {
+  "count": 1,
+  "digest": "c7b068f85950ab4c",
+  "first": "2026-04-06",
+  "last": "2026-04-06"
+ },
+ "SIGNATURE|S1": {
+  "count": 30,
+  "digest": "036e481dea4917df",
+  "first": "2025-02-05",
+  "last": "2025-07-23"
+ },
+ "SIGNATURE|S3": {
+  "count": 44,
+  "digest": "a41f4a387bcf5c3e",
+  "first": "2024-10-14",
+  "last": "2025-07-21"
+ },
+ "SIGNATURE|S5": {
+  "count": 2,
+  "digest": "52c23dc2df6169a4",
+  "first": "2025-01-23",
+  "last": "2025-03-07"
+ },
+ "SOLARINDS|S1": {
+  "count": 155,
+  "digest": "ca0046ba91f8488e",
+  "first": "2025-03-13",
+  "last": "2026-09-18"
+ },
+ "SOLARINDS|S2": {
+  "count": 7,
+  "digest": "449a9a864881ed8a",
+  "first": "2026-02-04",
+  "last": "2026-05-07"
+ },
+ "SOLARINDS|S3": {
+  "count": 137,
+  "digest": "a3b329af69bc49ae",
+  "first": "2024-10-14",
+  "last": "2026-09-15"
+ },
+ "SOLARINDS|S4": {
+  "count": 13,
+  "digest": "01d85139def806e2",
+  "first": "2026-04-13",
+  "last": "2026-04-30"
+ },
+ "SOLARINDS|S5": {
+  "count": 3,
+  "digest": "17c28b7307b21d0f",
+  "first": "2024-06-05",
+  "last": "2026-04-01"
+ },
+ "SPLPETRO|S1": {
+  "count": 139,
+  "digest": "d03b7ee5b71f06f7",
+  "first": "2025-06-02",
+  "last": "2026-09-03"
+ },
+ "SPLPETRO|S2": {
+  "count": 16,
+  "digest": "5434b864e1e4734e",
+  "first": "2025-06-13",
+  "last": "2026-09-16"
+ },
+ "SPLPETRO|S3": {
+  "count": 30,
+  "digest": "bb69fde371b82203",
+  "first": "2025-09-30",
+  "last": "2026-08-18"
+ },
+ "SPLPETRO|S5": {
+  "count": 4,
+  "digest": "9f120d8ca9a670ed",
+  "first": "2024-02-19",
+  "last": "2026-04-15"
+ },
+ "SUMICHEM|S1": {
+  "count": 94,
+  "digest": "db705148049e0411",
+  "first": "2025-04-01",
+  "last": "2026-09-02"
+ },
+ "SUMICHEM|S2": {
+  "count": 8,
+  "digest": "5b1f041d0517f117",
+  "first": "2025-04-04",
+  "last": "2025-04-23"
+ },
+ "SUMICHEM|S3": {
+  "count": 128,
+  "digest": "79a16016fc943fc3",
+  "first": "2024-10-14",
+  "last": "2026-09-04"
+ },
+ "SUMICHEM|S4": {
+  "count": 2,
+  "digest": "bf5a6dbc7427907d",
+  "first": "2025-07-30",
+  "last": "2025-07-31"
+ },
+ "SUMICHEM|S5": {
+  "count": 1,
+  "digest": "a47362d0bdd76769",
+  "first": "2024-10-28",
+  "last": "2024-10-28"
+ },
+ "SUNTV|S3": {
+  "count": 37,
+  "digest": "36db8efb8bbc45e6",
+  "first": "2024-10-14",
+  "last": "2026-04-30"
+ },
+ "SUNTV|S5": {
+  "count": 3,
+  "digest": "353efab82a00588b",
+  "first": "2024-08-26",
+  "last": "2026-05-15"
+ },
+ "SWANCORP|S3": {
+  "count": 8,
+  "digest": "6992028af1c712eb",
+  "first": "2025-01-08",
+  "last": "2026-01-05"
+ },
+ "SWANCORP|S5": {
+  "count": 11,
+  "digest": "e4e55666264f8292",
+  "first": "2024-01-25",
+  "last": "2026-04-01"
+ },
+ "SYRMA|S1": {
+  "count": 52,
+  "digest": "9293591c39b53de8",
+  "first": "2025-10-01",
+  "last": "2026-09-16"
+ },
+ "SYRMA|S2": {
+  "count": 5,
+  "digest": "4e5137b4ae7fef23",
+  "first": "2026-02-12",
+  "last": "2026-04-29"
+ },
+ "SYRMA|S3": {
+  "count": 73,
+  "digest": "940abf3e9776e844",
+  "first": "2025-01-10",
+  "last": "2026-09-02"
+ },
+ "SYRMA|S4": {
+  "count": 11,
+  "digest": "2ccf1c6cc623503b",
+  "first": "2026-04-16",
+  "last": "2026-04-30"
+ },
+ "SYRMA|S5": {
+  "count": 7,
+  "digest": "48ca1bdca033647f",
+  "first": "2024-08-14",
+  "last": "2026-07-27"
+ },
+ "TATACOMM|S1": {
+  "count": 32,
+  "digest": "507e2f6cd2d53ad3",
+  "first": "2026-06-01",
+  "last": "2026-09-18"
+ },
+ "TATACOMM|S2": {
+  "count": 9,
+  "digest": "fa775197ad0365fd",
+  "first": "2026-06-05",
+  "last": "2026-06-30"
+ },
+ "TATACOMM|S3": {
+  "count": 106,
+  "digest": "e12b5e1ca3fac725",
+  "first": "2024-10-14",
+  "last": "2026-09-18"
+ },
+ "TATAINVEST|S1": {
+  "count": 106,
+  "digest": "c1c045cd93a0fa3a",
+  "first": "2025-03-07",
+  "last": "2026-09-18"
+ },
+ "TATAINVEST|S2": {
+  "count": 8,
+  "digest": "ce4457d2a8380c1f",
+  "first": "2025-06-17",
+  "last": "2025-07-03"
+ },
+ "TATAINVEST|S3": {
+  "count": 34,
+  "digest": "9379b1f936d56a54",
+  "first": "2025-10-20",
+  "last": "2026-09-16"
+ },
+ "TATAINVEST|S4": {
+  "count": 19,
+  "digest": "a999ceef27841836",
+  "first": "2025-09-24",
+  "last": "2026-04-30"
+ },
+ "TATAINVEST|S5": {
+  "count": 3,
+  "digest": "b0a4d56f44d383c1",
+  "first": "2024-01-29",
+  "last": "2025-09-30"
+ },
+ "TATATECH|S3": {
+  "count": 30,
+  "digest": "655e3a9178f081b2",
+  "first": "2024-10-16",
+  "last": "2026-09-17"
+ },
+ "TATATECH|S5": {
+  "count": 1,
+  "digest": "6838d1d2aa57d859",
+  "first": "2026-04-01",
+  "last": "2026-04-01"
+ },
+ "TECHM|S2": {
+  "count": 2,
+  "digest": "7d6b03941fa03816",
+  "first": "2025-06-18",
+  "last": "2026-01-21"
+ },
+ "TECHM|S3": {
+  "count": 128,
+  "digest": "956d491e952ea992",
+  "first": "2024-10-16",
+  "last": "2026-09-18"
+ },
+ "TEJASNET|S3": {
+  "count": 48,
+  "digest": "4f3b230779352be5",
+  "first": "2024-10-14",
+  "last": "2026-09-11"
+ },
+ "TEJASNET|S5": {
+  "count": 8,
+  "digest": "6a69bcfebaa4f183",
+  "first": "2024-05-13",
+  "last": "2025-05-06"
+ },
+ "TIINDIA|S2": {
+  "count": 5,
+  "digest": "4383a5e83a231a21",
+  "first": "2026-06-04",
+  "last": "2026-06-17"
+ },
+ "TIINDIA|S3": {
+  "count": 41,
+  "digest": "f6d31c4da8355f36",
+  "first": "2024-10-14",
+  "last": "2026-08-25"
+ },
+ "TIINDIA|S5": {
+  "count": 3,
+  "digest": "66e3bc311274526c",
+  "first": "2024-07-26",
+  "last": "2026-03-17"
+ },
+ "TITAN|S2": {
+  "count": 5,
+  "digest": "734e79aa0bb2ae14",
+  "first": "2026-04-28",
+  "last": "2026-05-07"
+ },
+ "TITAN|S3": {
+  "count": 176,
+  "digest": "28271e76ced51ee7",
+  "first": "2024-12-10",
+  "last": "2026-09-18"
+ },
+ "TORNTPOWER|S1": {
+  "count": 36,
+  "digest": "dac528167e28d110",
+  "first": "2025-03-20",
+  "last": "2026-07-14"
+ },
+ "TORNTPOWER|S3": {
+  "count": 64,
+  "digest": "8da2bd0fec7b015e",
+  "first": "2024-10-28",
+  "last": "2026-07-27"
+ },
+ "TORNTPOWER|S4": {
+  "count": 9,
+  "digest": "155c0478729b6e22",
+  "first": "2026-04-20",
+  "last": "2026-04-30"
+ },
+ "TORNTPOWER|S5": {
+  "count": 3,
+  "digest": "efc0bc4a6ef810db",
+  "first": "2024-06-05",
+  "last": "2025-05-12"
+ },
+ "TRITURBINE|S1": {
+  "count": 29,
+  "digest": "ec137efacfbad7bd",
+  "first": "2026-06-01",
+  "last": "2026-08-10"
+ },
+ "TRITURBINE|S3": {
+  "count": 60,
+  "digest": "27576cd29b746731",
+  "first": "2024-10-22",
+  "last": "2026-08-17"
+ },
+ "TRITURBINE|S4": {
+  "count": 5,
+  "digest": "ff5fad6113c3b9f5",
+  "first": "2026-05-22",
+  "last": "2026-05-29"
+ },
+ "TRITURBINE|S5": {
+  "count": 4,
+  "digest": "ed9d2a46753eee8b",
+  "first": "2024-02-29",
+  "last": "2025-02-07"
+ },
+ "UBL|S3": {
+  "count": 98,
+  "digest": "fc56d982c96e1096",
+  "first": "2024-10-14",
+  "last": "2025-07-25"
+ },
+ "UNIONBANK|S2": {
+  "count": 9,
+  "digest": "1d16135f19adc69e",
+  "first": "2025-06-05",
+  "last": "2026-07-02"
+ },
+ "UNIONBANK|S3": {
+  "count": 160,
+  "digest": "cabfc9559fb7af68",
+  "first": "2025-04-04",
+  "last": "2026-09-18"
+ },
+ "UNIONBANK|S5": {
+  "count": 5,
+  "digest": "a2e330e17b2a0588",
+  "first": "2024-03-18",
+  "last": "2026-04-01"
+ },
+ "UPL|S1": {
+  "count": 39,
+  "digest": "38246bb4041f8a0d",
+  "first": "2025-12-01",
+  "last": "2026-02-20"
+ },
+ "UPL|S3": {
+  "count": 181,
+  "digest": "a3dddd54e34b1820",
+  "first": "2024-10-14",
+  "last": "2026-02-20"
+ },
+ "UPL|S5": {
+  "count": 2,
+  "digest": "5da9d012a746aa69",
+  "first": "2026-02-02",
+  "last": "2026-03-05"
+ },
+ "VBL|S1": {
+  "count": 42,
+  "digest": "4e114b5dd6113f42",
+  "first": "2026-05-04",
+  "last": "2026-07-03"
+ },
+ "VBL|S2": {
+  "count": 3,
+  "digest": "2084eb91b8e2f7f7",
+  "first": "2026-05-26",
+  "last": "2026-06-09"
+ },
+ "VBL|S3": {
+  "count": 54,
+  "digest": "c2a22e45da2c4e1b",
+  "first": "2024-10-14",
+  "last": "2026-07-06"
+ },
+ "VBL|S5": {
+  "count": 2,
+  "digest": "ed88da75fb852ab8",
+  "first": "2025-02-12",
+  "last": "2025-05-12"
+ },
+ "VMM|S3": {
+  "count": 40,
+  "digest": "9736c4fb5108ae88",
+  "first": "2025-10-07",
+  "last": "2026-01-05"
+ },
+ "VMM|S5": {
+  "count": 1,
+  "digest": "b830f14a9b2a6b0b",
+  "first": "2026-03-24",
+  "last": "2026-03-24"
+ },
+ "WAAREEENER|S2": {
+  "count": 1,
+  "digest": "718aea8b69f745d5",
+  "first": "2026-04-21",
+  "last": "2026-04-21"
+ },
+ "WAAREEENER|S3": {
+  "count": 69,
+  "digest": "190b05402febc700",
+  "first": "2025-08-18",
+  "last": "2026-06-22"
+ },
+ "WAAREEENER|S5": {
+  "count": 4,
+  "digest": "8c112f026e400038",
+  "first": "2025-06-30",
+  "last": "2026-03-10"
+ },
+ "WHIRLPOOL|S3": {
+  "count": 16,
+  "digest": "7565f3d141ea7207",
+  "first": "2024-10-23",
+  "last": "2025-01-03"
+ },
+ "WHIRLPOOL|S5": {
+  "count": 3,
+  "digest": "17dec96908e9921d",
+  "first": "2024-06-05",
+  "last": "2025-12-10"
+ },
+ "YESBANK|S1": {
+  "count": 105,
+  "digest": "7afc747288225c27",
+  "first": "2025-06-03",
+  "last": "2026-09-18"
+ },
+ "YESBANK|S2": {
+  "count": 8,
+  "digest": "d6f074b49b7c38f6",
+  "first": "2025-10-15",
+  "last": "2026-06-16"
+ },
+ "YESBANK|S3": {
+  "count": 138,
+  "digest": "1d0e7b1c3e5c5c11",
+  "first": "2025-06-12",
+  "last": "2026-09-18"
+ },
+ "YESBANK|S5": {
+  "count": 4,
+  "digest": "074c18d4e78aaf83",
+  "first": "2024-01-16",
+  "last": "2024-08-07"
+ },
+ "ZENTEC|S1": {
+  "count": 108,
+  "digest": "3380e88409add4f1",
+  "first": "2025-06-02",
+  "last": "2026-09-11"
+ },
+ "ZENTEC|S2": {
+  "count": 13,
+  "digest": "2c3bfe7a61a8641b",
+  "first": "2025-06-16",
+  "last": "2026-09-04"
+ },
+ "ZENTEC|S3": {
+  "count": 75,
+  "digest": "9c93a5cbcc249cc0",
+  "first": "2024-10-22",
+  "last": "2026-09-11"
+ },
+ "ZENTEC|S4": {
+  "count": 12,
+  "digest": "00ddb528604d707d",
+  "first": "2026-04-10",
+  "last": "2026-08-18"
+ },
+ "ZENTEC|S5": {
+  "count": 8,
+  "digest": "e013b5e074f39262",
+  "first": "2024-05-10",
+  "last": "2026-04-01"
+ },
+ "ZYDUSWELL|S1": {
+  "count": 57,
+  "digest": "704a1a5577ba782a",
+  "first": "2025-07-17",
+  "last": "2026-02-01"
+ },
+ "ZYDUSWELL|S2": {
+  "count": 7,
+  "digest": "5acbf2e498797be2",
+  "first": "2026-01-07",
+  "last": "2026-05-06"
+ },
+ "ZYDUSWELL|S3": {
+  "count": 59,
+  "digest": "02db6f402aaeeca6",
+  "first": "2025-09-30",
+  "last": "2026-09-18"
+ },
+ "ZYDUSWELL|S4": {
+  "count": 11,
+  "digest": "e6bcc736bab51fdb",
+  "first": "2025-09-09",
+  "last": "2026-04-13"
+ },
+ "ZYDUSWELL|S5": {
+  "count": 4,
+  "digest": "9538a7aea2f08382",
+  "first": "2025-11-10",
+  "last": "2026-07-29"
+ }
+}

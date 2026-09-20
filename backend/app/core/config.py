@@ -24,7 +24,12 @@ class Settings(BaseSettings):
     # Browser origins allowed to call this API. Both spellings of the dev host
     # are allowed by default because a browser treats them as different origins
     # and developers use them interchangeably.
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # The deployed frontend plus both spellings of the dev host - a browser
+    # treats 127.0.0.1 and localhost as different origins and developers use
+    # them interchangeably. Never "*": with allow_credentials that lets any
+    # site on the internet call this API as the logged-in user.
+    cors_origins: str = ("https://ati-lab.onrender.com,"
+                         "http://localhost:3000,http://127.0.0.1:3000")
 
     # How many scans / backtests may run at once. These are CPU-bound pandas
     # workloads over the whole NSE universe; more workers than cores just makes

@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import install_error_handlers
+from app.core.guard import guard_middleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,13 @@ async def lifespan(_: FastAPI):
 
     try:
         app_store.ensure_app_tables()
+        # The in-memory job registry died with the previous container; its
+        # database rows did not. Anything still QUEUED or RUNNING belongs to a
+        # process that no longer exists.
+        from app.services import jobs
+        closed = jobs.sweep_interrupted_runs()
+        if closed:
+            log.info("Marked %d unfinished run(s) as interrupted", closed)
     except Exception:
         # A database fault must be reported by /health, not kill the server:
         # the Data Manager endpoints are exactly what the user needs to
@@ -72,16 +80,33 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
+app.middleware("http")(guard_middleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Only the methods and headers the UI actually sends. "*" with
+    # allow_credentials also permits any header a hostile page invents.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "X-API-Key"],
+    max_age=600,
 )
 
 install_error_handlers(app)
 app.include_router(api_router, prefix=settings.api_prefix)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness only: no database, no imports, no work.
+
+    Render's health check and the browser's first request both hit this, and
+    both need it to answer while a scan is saturating SQLite and the GIL. The
+    deeper check that reports the database and the cold-start restore lives at
+    /api/v1/health, where taking a moment is acceptable.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/", include_in_schema=False)
