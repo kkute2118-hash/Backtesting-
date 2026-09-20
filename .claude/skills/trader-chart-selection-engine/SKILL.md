@@ -18,71 +18,84 @@ You are also bound by the platform's ABSOLUTE RULE: **do not change what S1-S5 s
 or score.** This engine reads their output and re-orders it. It never modifies scanner
 logic, thresholds, indicators, scoring, stops, targets, or stored records.
 
+## What has been measured, and what it changed
+
+The procedure below is **not** the methodology applied as written. It is what
+survived testing against 22,530 scanner signals. Three things were built from
+the source material and measured; two of them failed, and saying so is the
+point of this section.
+
+**Use this (validated out of sample, z=+7.6, all five strategies improved,
+survives Indian transaction costs):**
+
+```
+keep a candidate only if ALL THREE hold
+  1. volume cluster, NOT a single isolated tower
+  2. CB purity between 0.30 and 0.70     <- a BAND. above 0.75 turns negative
+  3. 20-day average turnover 100-400 cr  <- a BAND. a plain floor flips sign
+```
+
+**Do not use these — they were built and measured, and they lose money:**
+
+- **The hard-gate stack** (event on the LHS, EMA separation, containment,
+  upper-half). Applied together it inverted the funnel: accepted candidates
+  underperformed rejected ones. Containment in particular — the rule he calls
+  "one of the most important points that I'll ever give you in your trading" —
+  has **no measurable effect** (−0.066% vs −0.058% across 22,530 signals).
+- **Entry timing** (waiting for M10 / V12 / V25 or the inside bar after the
+  10>20 cross). It reproduces his stop widths correctly, and it costs **2.39
+  percentage points**, because S1–S5 are already pullback scanners: they fire
+  at the bar he would buy, so waiting waits for a second pullback.
+- **Ranking by tight stop.** Tighter stops predicted *worse* outcomes on three
+  independent constructions. His tight stop comes from entering on a 15-minute
+  chart inside the daily pullback, which our daily-only data cannot express.
+- **Any weighted score with top-N-per-day.** Looked strong in sample and had
+  zero edge out of sample; random N-per-day already earns ~0.4 points from day
+  weighting alone.
+
+**Two per-strategy exceptions:**
+
+- **S4 wants the opposite volume rule** — a single tower is +3.94% *better*
+  there. Do not apply rule 1 to S4.
+- **S3** is 54% of signal volume, nets −0.95% per trade and has four times
+  worse capital efficiency than any other strategy.
+
+**Still unvalidated:** everything above is 161 fixture symbols over two years,
+and the filter does most of its work in the up year (z=+7.6 one direction,
++2.0 reversed), so part of it may be a momentum filter rather than selection
+skill. Say so when it matters.
+
 ## Before you start: what this engine cannot do
 
-State these when they matter, rather than papering over them.
-
-1. **The blue-candle criterion is missing.** The author selects on candle colour from
-   an overlay he never defines (RG-01). A first-order filter is absent.
-2. **Almost every threshold is fitted by us, not stated by him** (RG-02). Say so when
-   you use one.
-3. **Candle quality is an approximation** (RG-03). `body/range` is a proxy, not his
-   rule.
-4. **None of this is validated yet.** Until `references/backtest_spec.md` has been run
-   and passed, every verdict is a hypothesis. Do not present output as a tested edge.
+1. **The 3% stop is out of reach.** His entry is a three-scale confluence —
+   daily at the 10 EMA = hourly at the 50 EMA = 15-minute at the 200 MA — and
+   he enters on the last. Our candle store is daily only. Anything built here
+   is his weekly-STF 6% case at best.
+2. **Every threshold is ours.** He refuses to give numbers: "Do not make it a
+   formula. If you do, you are in trouble." Only three constants come from the
+   source — the 20-day turnover lookback, the 10/20/50/200 EMAs, and the 50%
+   counter ratio.
+3. **Nothing here is wired into the live scan.** S1–S5 select and score exactly
+   as before.
 
 ## Procedure
 
-Work the gates in order. Stop at the first hard failure and say which gate failed.
+Apply the three-condition filter above. Then, for anything that survives, use
+the concepts below to *explain and rank* — not to reject, since gating on them
+was measured and failed.
 
-### Gate 1 — Liquidity (hard)
-20-day average turnover in rupees crore. **20 days, not 21** — that is the author's
-period, explicit in the transcripts.
-- Below ~₹3 cr/day: reject, he calls this "extremely less".
-- ~₹80 cr/day and up: he calls this "pretty healthy".
-- Rising average turnover through the expansion is confirmation.
+### Reference concepts (for reasoning, not gating)
 
-### Gate 2 — Event and EMA structure (hard)
-- An MA crossover on the left-hand side: 10>20, 10>50, 20>50, or all four converging.
-  This is his **primary filter**.
-- **The crossover must have survived the following contraction.** A cross that reverted
-  is not an event. This is the single strongest discriminator in the corpus.
-- EMA10 must be **clearly separated** from EMA20. Intermingled means range means reject.
-- 10 > 20 > 50 on the daily.
-- Strong optional filter: weekly 10>20 and 20>50. He skips the stock without it.
-- Bonus: all four EMAs compressed at one price. Rare, and the strongest setup he shows.
-
-### Gate 3 — Structure (hard where computable)
-- **Containment**: the whole contraction stays inside the high of the candle that ended
-  the expansion. He calls this "one of the most important points that I'll ever give
-  you."
-- **Upper half**: the contraction sits in the upper half of that range.
-- **Proportionality**: contraction time and depth must match the expansion. A 60% move
-  in 6 days is not resolved by 8 days of pause.
-- **Counter rule**: any red candle larger than the expansion candles must be countered
-  by a later up candle retracing ≥50%, ideally engulfing. Candles hovering below 50% of
-  a big red candle mean selling pressure on the ILHS — do not buy.
-- **Volume cluster**, not a single tower. He rejects charts with one big volume bar and
-  average volume either side.
-- Not forming in the lower half of the prior down move.
-
-### Gate 4 — Event risk (hard)
-No earnings imminent, unless already deep in profit. He will not enter in anticipation
-of earnings.
-
-### Rank the survivors
-**Primary: risk distance** — entry to structural pivot, ascending. This is his own
-logic: tighter stop means bigger position means the trade is worth the slot. If you use
-one signal, use this.
-
-Secondary: MA proximity (candle opens near the MA *and* closes near the MA is his best
-case), candle quality, pivot quality, volume cluster score, turnover trend, DNA-to-risk
-ratio, contraction tightness, extension penalty.
-
-**Emit 2-3 candidates, not a threshold-passing list.** His position sizing (35-40%
-starting) structurally limits concurrent positions, and opportunity cost is an explicit
-rejection reason: "if I have stocks which I showed you at number one, number two, why
-would I go for this one?"
+- **Event on the LHS** — an MA crossover that survived the following
+  contraction. Lecture 7's discriminator. Good explanation, no measured edge.
+- **Containment / upper half** — the contraction inside the high of the
+  expansion-ending candle, in the upper half of the leg. His most emphatic
+  rule; no measurable effect on our signals.
+- **EMA separation** — 10 clearly apart from 20, not intermingled.
+- **Pivot quality and risk distance** — still the right way to *place* a stop,
+  just not to rank candidates.
+- **Relativity** — judge the move against what the stock has already done.
+  After a large move expect the 20 or 50, not the 10.
 
 ## For each candidate you report
 
@@ -132,5 +145,10 @@ observation into a rigid formula.
 | `references/risk_engine.md` | Stops, sizing, charges |
 | `references/backtest_spec.md` | Validation design — read before claiming any edge |
 | `references/research_gaps.md` | What is unknown |
+| `references/case_studies_addendum.md` | The two PDFs: CB = Committed Buyers, the three-scale confluence, the 10/6/3% stop ladder |
+| `references/findings_run2.md` | Why the hard-gate stack was dropped |
+| `references/findings_entry.md` | Why entry timing was dropped |
+| `references/findings_ranker.md` | The filter that works, and the in-sample trap that nearly shipped |
+| `references/universe_audit.md` | "NSE All Cash (~2000)" is 9,922 names, 73% not equity |
 
 `scripts/calculations/features.py` implements the deterministic features only.
