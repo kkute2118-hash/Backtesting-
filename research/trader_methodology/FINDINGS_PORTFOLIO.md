@@ -122,3 +122,52 @@ compensating for it — and it is what he actually does.
 allocation assumes at most one position per signal and does not enforce one
 position per stock. The full-universe rebuild will materially change the
 signal supply and should move every number here.
+
+---
+
+## S4+S5 filtered — the one promising arm, and why its headline is not evidence
+
+The allocation sweep gave S4+S5 filtered **100% of 150 orderings profitable**
+at every slot count (2 slots +50.3%, 3 slots +38.1%, 5 slots +27.8%).
+
+**That 100% is an artefact and should be ignored.** There are only 184 S4+S5
+filtered signals in the whole period, and 3 slots have capacity for about 14
+trades. Nearly every ordering therefore takes nearly the *same* trades. The
+sweep varied almost nothing — it measured one path 150 times, not 150 paths.
+
+The uncertainty that matters is in the trades, not the ordering. Bootstrapping
+14 trades from the available pool, 20,000 times, at ₹33,333 a position net of
+costs:
+
+| trades | mean | median | 5th | 95th | P(above ₹1 lakh) |
+|---|---|---|---|---|---|
+| **14** | +17.9% | +15.7% | **−8.8%** | **+51.8%** | 84% |
+| 30 | +42.3% | +37.9% | −4.8% | +103.7% | 92% |
+| 60 | +102.1% | +91.0% | +13.3% | +229.9% | 98% |
+| 120 | +309.4% | +267.6% | +73.0% | +686.4% | 100% |
+
+The realised +38.1% sits between the median and the 95th percentile of the
+14-trade row. It is a normal draw, not a discovery.
+
+**The lower rows are not forecasts.** They compound an estimated mean as if it
+were the truth. +309% on 120 trades is precisely the sort of number that
+should provoke suspicion rather than enthusiasm: it says the arithmetic works
+*if* +4.14% per signal is real, and that is the thing not yet established.
+
+### What +4.14% per signal actually rests on
+
+- 184 signals, 161 symbols, 1.68 years.
+- Clustered in time and by regime, so far fewer than 184 independent
+  observations.
+- The filter bands were chosen partly on this data; only the 2026 half is
+  genuinely held out, and S4+S5 filtered in 2026 alone is **n=26**.
+- 34.8% of these signals hit the +21% target, so the mean is again
+  tail-carried — the same fragility described above, just with better odds.
+
+**Verdict: S4+S5 filtered is the most promising thing in this whole study and
+it is nowhere near sized.** 184 signals is enough to justify the next test,
+not a position.
+
+The full-universe rebuild is the right next step: on ~3,500 symbols instead of
+161, S4+S5 should produce enough signals to answer this properly rather than
+suggestively.
