@@ -59,7 +59,32 @@ fail() {
   exit 1
 }
 
-json_id() { sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$BODY" | head -1; }
+# Parsed with python rather than sed/grep. The shell version looked fine
+# against a hand-written fixture and then failed on the real thing: an asset
+# object nests an "uploader" object between its "name" and its "size", so
+# splitting the response on "}" put those two fields on different lines and
+# the size lookup found nothing. It reported a perfectly good 48.7 MB upload
+# as not saved. Python is on the runner already; there is no reason to parse
+# JSON with line tools.
+json_get() {
+  # $1 = python expression over `d`, the decoded body. Prints nothing on any
+  # failure, so callers can test for an empty string.
+  python3 -c "
+import json,sys
+try:
+    d=json.load(open('$BODY'))
+except Exception:
+    sys.exit(0)
+try:
+    v=($1)
+except Exception:
+    sys.exit(0)
+print('' if v is None else v)
+" 2>/dev/null
+}
+
+json_id() { json_get "d.get('id')"; }
+asset_field() { json_get "next((a['$2'] for a in d if a.get('name')=='$1'), None)"; }
 
 # The release is a container, not an announcement: it is marked as a
 # prerelease so it never shows up as the repository's latest release, and the
@@ -95,10 +120,8 @@ fi
 # keeping a stale database that looks current.
 status="$(gh_api "${API}/releases/${release_id}/assets")"
 [ "$status" = "200" ] || fail "Could not list release assets" "HTTP ${status}."
-# `|| true`: no existing asset is the normal first-run case, and grep exiting
-# 1 on no match would otherwise abort the script under `set -euo pipefail`.
-old_id="$(tr '}' '\n' < "$BODY" | grep -F "\"name\":\"${ASSET}\"" \
-  | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1 || true)"
+# Empty is the normal first-run case: no asset exists yet.
+old_id="$(asset_field "${ASSET}" id)"
 
 if [ -n "$old_id" ]; then
   echo "Replacing the existing '${ASSET}' asset."
@@ -127,13 +150,14 @@ esac
 # before reporting success.
 status="$(gh_api "${API}/releases/${release_id}/assets")"
 [ "$status" = "200" ] || fail "Could not verify the upload" "HTTP ${status}."
-stored="$(tr '}' '\n' < "$BODY" | grep -F "\"name\":\"${ASSET}\"" \
-  | sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1 || true)"
+stored="$(asset_field "${ASSET}" size)"
+state="$(asset_field "${ASSET}" state)"
 actual="$(stat -c%s "$BACKUP_STAGE_PATH")"
 
 if [ "$stored" != "$actual" ]; then
-  echo "::error title=Backup did not store correctly::Uploaded ${actual} bytes but the release reports '${stored:-none}'. The database is NOT saved."
-  exit 1
+  fail "Backup did not store correctly" \
+       "Uploaded ${actual} bytes; the release reports size '${stored:-none}' state '${state:-none}'. The database is NOT saved."
 fi
+[ "$state" = "uploaded" ] || echo "note: asset state is '${state}', not 'uploaded'"
 
 echo "Stored ${size_mb} MB at ${GITHUB_REPOSITORY} release ${TAG} -> ${ASSET}"
