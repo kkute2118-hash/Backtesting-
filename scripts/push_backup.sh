@@ -35,64 +35,100 @@ fi
 
 size_mb=$(awk "BEGIN{printf \"%.1f\", $(stat -c%s "$BACKUP_STAGE_PATH") / 1048576}")
 
+# Writes the body to a file and returns the HTTP status, instead of relying on
+# curl's exit code. The first version used --fail-with-body inside a command
+# substitution under `set -e`: when the release POST was rejected, the body was
+# captured into a variable, the shell aborted, and the log showed a bare "exit
+# code 1" with no reason at all. An error you cannot read is worse than no
+# check, so the status and the body are both surfaced here.
+BODY="$(mktemp)"
+trap 'rm -f "$BODY"' EXIT
+
 gh_api() {
-  curl --silent --show-error --fail-with-body \
+  curl --silent --show-error --output "$BODY" --write-out '%{http_code}' \
        -H "Authorization: token ${GH_PUSH_TOKEN}" \
        -H "Accept: application/vnd.github+json" \
        -H "X-GitHub-Api-Version: 2022-11-28" "$@"
 }
 
+fail() {
+  echo "::error title=$1::$2"
+  echo "--- response body ---"
+  head -c 2000 "$BODY"
+  echo
+  exit 1
+}
+
+json_id() { sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' "$BODY" | head -1; }
+
 # The release is a container, not an announcement: it is marked as a
 # prerelease so it never shows up as the repository's latest release, and the
 # body says what it is so nobody deletes it wondering.
-release_json="$(gh_api "${API}/releases/tags/${TAG}" 2>/dev/null || true)"
-release_id="$(printf '%s' "$release_json" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)"
-
-if [ -z "$release_id" ]; then
+status="$(gh_api "${API}/releases/tags/${TAG}")"
+release_id=""
+if [ "$status" = "200" ]; then
+  release_id="$(json_id)"
+  echo "Using existing release '${TAG}'."
+elif [ "$status" = "404" ]; then
   echo "Release '${TAG}' does not exist yet; creating it."
-  created="$(gh_api -X POST "${API}/releases" -d "$(cat <<JSON
-{"tag_name":"${TAG}","name":"Database backup","prerelease":true,
- "body":"Automated candle-store backup. The asset on this release is the live database; it is replaced in place by the sync and history-build workflows. Deleting it loses every stored candle and forward test."}
-JSON
-)")"
-  release_id="$(printf '%s' "$created" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)"
+  # target_commitish is set explicitly: the tag does not exist either, so
+  # GitHub has to be told which commit to hang it on. Left out, the API
+  # rejects the create on a repository whose default branch it cannot infer.
+  status="$(gh_api -X POST "${API}/releases" \
+    -d "{\"tag_name\":\"${TAG}\",\"target_commitish\":\"${GITHUB_SHA}\",\"name\":\"Database backup\",\"prerelease\":true,\"body\":\"Automated candle-store backup. The asset on this release is the live database; it is replaced in place by the sync and history-build workflows. Deleting it loses every stored candle and forward test.\"}")"
+  if [ "$status" != "201" ]; then
+    fail "Could not create the backup release" \
+         "POST /releases returned HTTP ${status}. A 403 here usually means the workflow is missing 'permissions: contents: write'."
+  fi
+  release_id="$(json_id)"
+else
+  fail "Could not read the backup release" "GET /releases/tags/${TAG} returned HTTP ${status}."
 fi
 
 if [ -z "$release_id" ]; then
-  echo "::error title=Could not resolve the backup release::Creating or reading release '${TAG}' did not return an id."
-  exit 1
+  fail "Could not resolve the backup release" "No release id came back for '${TAG}'."
 fi
 
 # An asset name is unique per release, so the old one has to go before the new
 # one can take its name. Deleting first means a failed upload leaves the
 # release with no asset at all - which is loud, and better than silently
 # keeping a stale database that looks current.
-assets="$(gh_api "${API}/releases/${release_id}/assets")"
-old_id="$(printf '%s' "$assets" \
-  | tr '}' '\n' \
-  | grep -F "\"name\":\"${ASSET}\"" \
-  | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)"
+status="$(gh_api "${API}/releases/${release_id}/assets")"
+[ "$status" = "200" ] || fail "Could not list release assets" "HTTP ${status}."
+# `|| true`: no existing asset is the normal first-run case, and grep exiting
+# 1 on no match would otherwise abort the script under `set -euo pipefail`.
+old_id="$(tr '}' '\n' < "$BODY" | grep -F "\"name\":\"${ASSET}\"" \
+  | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1 || true)"
 
 if [ -n "$old_id" ]; then
   echo "Replacing the existing '${ASSET}' asset."
-  gh_api -X DELETE "${API}/releases/assets/${old_id}" >/dev/null
+  status="$(gh_api -X DELETE "${API}/releases/assets/${old_id}")"
+  case "$status" in
+    204|404) ;;
+    *) fail "Could not remove the previous asset" "HTTP ${status}." ;;
+  esac
 fi
 
 echo "Uploading ${size_mb} MB as '${ASSET}'..."
-curl --silent --show-error --fail-with-body \
+status="$(curl --silent --show-error --output "$BODY" --write-out '%{http_code}' \
      -H "Authorization: token ${GH_PUSH_TOKEN}" \
      -H "Accept: application/vnd.github+json" \
      -H "Content-Type: application/gzip" \
      --data-binary @"${BACKUP_STAGE_PATH}" \
-     "${UPLOADS}/releases/${release_id}/assets?name=${ASSET}" >/dev/null
+     "${UPLOADS}/releases/${release_id}/assets?name=${ASSET}")"
+case "$status" in
+  200|201) ;;
+  *) fail "Upload rejected" "HTTP ${status} uploading ${size_mb} MB." ;;
+esac
 
 # Read it back. An upload that returns 201 and stores nothing usable is the
 # failure this whole script exists to prevent, and the run is worthless
 # without a saved database - so confirm the asset is there and the right size
 # before reporting success.
-check="$(gh_api "${API}/releases/${release_id}/assets")"
-stored="$(printf '%s' "$check" | tr '}' '\n' | grep -F "\"name\":\"${ASSET}\"" \
-  | sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)"
+status="$(gh_api "${API}/releases/${release_id}/assets")"
+[ "$status" = "200" ] || fail "Could not verify the upload" "HTTP ${status}."
+stored="$(tr '}' '\n' < "$BODY" | grep -F "\"name\":\"${ASSET}\"" \
+  | sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1 || true)"
 actual="$(stat -c%s "$BACKUP_STAGE_PATH")"
 
 if [ "$stored" != "$actual" ]; then
