@@ -678,7 +678,24 @@ MARKING_PARAMS = {
 }
 
 
-def dna(close: pd.Series, params: dict | None = None) -> dict:
+def swing_low_positions(close: pd.Series, params: dict | None = None) -> np.ndarray:
+    """Every swing low in the series, as integer positions.
+
+    Split out so a backtest can compute them once per symbol instead of once
+    per signal, and still run the same detection the live marking runs. A
+    position is only a swing low once `span` bars have printed on BOTH sides,
+    so a caller evaluating bar i must ignore any position above i - span -
+    dna() does exactly that, which is what keeps this free of lookahead.
+    """
+    p = {**MARKING_PARAMS, **(params or {})}
+    span = int(p["DNA_SWING_SPAN"])
+    v = close.to_numpy(dtype=float)
+    return np.array([i for i in range(span, len(v) - span)
+                     if v[i] == v[i - span: i + span + 1].min()], dtype=int)
+
+
+def dna(close: pd.Series, params: dict | None = None,
+        at: int | None = None, swings: np.ndarray | None = None) -> dict:
     """What a normal move looks like for this stock.
 
     Two numbers, because he uses the word for both and they answer different
@@ -700,10 +717,14 @@ def dna(close: pd.Series, params: dict | None = None) -> dict:
     """
     p = {**MARKING_PARAMS, **(params or {})}
     n = len(close)
-    if n < p["DNA_MIN_OBS"]:
+    end = (n - 1) if at is None else int(at)
+    if end < 0 or end >= n:
+        return {"dna_candle": None, "dna_move": None, "legs": 0}
+    if end + 1 < p["DNA_MIN_OBS"]:
         return {"dna_candle": None, "dna_move": None, "legs": 0}
 
-    tail = close.iloc[-p["DNA_LOOKBACK"]:] if n > p["DNA_LOOKBACK"] else close
+    start = max(0, end + 1 - int(p["DNA_LOOKBACK"]))
+    tail = close.iloc[start: end + 1]
     ret = tail.pct_change() * 100.0
     pos = ret[ret > 0]
     if len(pos) < p["DNA_MIN_OBS"] // 2:
@@ -715,8 +736,15 @@ def dna(close: pd.Series, params: dict | None = None) -> dict:
     # leg is then measured with.
     span = int(p["DNA_SWING_SPAN"])
     v = tail.to_numpy(dtype=float)
-    lows = [i for i in range(span, len(v) - span)
-            if v[i] == v[i - span: i + span + 1].min()]
+    if swings is None:
+        lows = [i for i in range(span, len(v) - span)
+                if v[i] == v[i - span: i + span + 1].min()]
+    else:
+        # Precomputed over the whole series. Everything above end - span is
+        # dropped: those positions are only knowable once bars after `end`
+        # have printed, and using them here would be lookahead.
+        lows = [int(x) - start for x in swings
+                if start + span <= int(x) <= end - span]
 
     # A leg runs from one swing low to the HIGHEST close before the next swing
     # low, not to the first minor high after it. Taking the first high chops a

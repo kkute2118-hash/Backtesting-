@@ -6,4 +6,6 @@
 #   DATA_DB=<store> python backtest_rank.py --sample 500 --out rank_results_full.csv
 flow_results.csv
 rank_deep.csv
+smallsl_*.csv
+smallsl_results.csv
 *_results_local.csv
