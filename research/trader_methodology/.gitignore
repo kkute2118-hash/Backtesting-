@@ -10,3 +10,4 @@ smallsl_*.csv
 smallsl_results.csv
 *_results_local.csv
 dnafirst_*.csv
+dnaturnover_*.csv
