@@ -12379,15 +12379,33 @@ def signal_history(symbol=None, start=None, end=None, strategy=None,
         con.close()
 
 
-# Narrow the forward book to the candidates that pass the three conditions
-# that survived testing against 22,530 historical signals. Set to False to
-# record every scanner candidate again, which is what the book did before.
+# OFF. The CB-purity gate this ran did not survive five years of history.
 #
-# Deliberately a flag rather than a hard-coded behaviour: the filter's edge is
-# ~1.2 points of within-day stock selection (z=+4.3 held out, survives costs),
-# which is real but modest, and it did NOT turn into portfolio returns on a
-# 1 lakh book with three slots. Running it on paper is how that gets settled.
-APPLY_FORWARD_TRADER_FILTER = True
+# It was adopted on 2025-2026 only, where it looked like ~1.2 points of
+# within-day stock selection. The deep run (389 symbols with 1,100+ bars,
+# 2022-2026, 37,478 live-equivalent signals) says otherwise. Same within-day
+# matched test, restricted as before to signals already past the Rs 40 cr
+# entry floor:
+#
+#     2022  -4.05  (t -6.5)     2023  +0.90     2024  -0.11
+#     2025  -0.53               2026  +2.18     ALL   -0.15  (t -0.52)
+#
+# Positive in two years of five and flat overall. The pooled number is still
+# +0.54, but that gain is WHICH DAYS the gate is active, not which stock it
+# picks on a given day - and the day-selection half is a market-timing claim
+# that two positive years out of five does not support.
+#
+# Leaving it on would also cost the forward test its own control: the gate
+# passes 8.4% of live-equivalent signals, and a rejected candidate never gets
+# a forward record, so "would the skipped ones have done better?" becomes
+# unanswerable in the book itself. With the filter off every candidate is
+# enrolled and the CB subset can still be measured retrospectively at any
+# time. Off is strictly more informative.
+#
+# The module, its tests and the rejection plumbing stay. Set this back to True
+# to re-enable the gate - nothing else needs to change.
+# See research/trader_methodology/FINDINGS_DEEP.md.
+APPLY_FORWARD_TRADER_FILTER = False
 
 _TRADER_FILTER_BARS = 400          # enough for the 250-bar CB percentile window
 
