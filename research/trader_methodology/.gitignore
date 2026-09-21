@@ -1,0 +1,9 @@
+# Backtest result tables. Reproducible from the candle store plus the scripts
+# in this directory, and large - the four already committed are ~17 MB of
+# history that cannot be reclaimed without a rewrite. New ones stay local.
+#
+# To regenerate:
+#   DATA_DB=<store> python backtest_rank.py --sample 500 --out rank_results_full.csv
+flow_results.csv
+rank_deep.csv
+*_results_local.csv

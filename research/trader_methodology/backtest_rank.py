@@ -191,6 +191,7 @@ def main():
     ap.add_argument("--sample", type=int, default=0,
                     help="random subset of symbols; the full store takes hours")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--min-bars", type=int, default=300)
     ap.add_argument("--out", default=os.path.join(HERE, "rank_results.csv"))
     a = ap.parse_args()
 
@@ -204,9 +205,13 @@ def main():
         from app.engine import core
         con = core._db()
         try:
+            # --min-bars raises the history requirement. The default 300
+            # admits symbols added in the last top-up, whose signals then all
+            # land in the most recent two years - and two years cannot tell a
+            # regime effect from an edge. Asking for 1100+ bars buys five.
             symbols = [r[0] for r in con.execute(
                 "SELECT symbol FROM candles WHERE symbol NOT LIKE '^%' "
-                "GROUP BY symbol HAVING COUNT(*)>=300 ORDER BY symbol")]
+                "GROUP BY symbol HAVING COUNT(*)>=? ORDER BY symbol", (a.min_bars,))]
         finally:
             con.close()
 
