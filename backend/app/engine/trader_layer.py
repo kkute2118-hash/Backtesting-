@@ -512,50 +512,65 @@ def rank_score(v: dict, weights: dict | None = None) -> float:
 # Forward-test selection: the three conditions that actually survived testing
 # --------------------------------------------------------------------------
 
-# Everything else extracted from the transcripts and case studies was measured
-# and dropped: the hard-gate stack inverted the funnel, entry timing cost 2.39
-# points, his exit lost half the account, and a weighted score with
-# top-N-per-day had no edge out of sample. These three are what is left.
+# ONE condition. Everything else was measured on the full 3,303-symbol store
+# and dropped, including two rules that looked good on the 161-symbol fixture
+# and did not survive a real universe.
 #
-#   not a single tower of volume   lecture 1, and the cleanest confirmation
-#                                  in the study (-0.62% against +0.06%)
-#   CB purity 0.30-0.70            a BAND. above 0.75 turns sharply negative,
-#                                  which is his own extension warning
-#   turnover 100-400 crore         also a BAND. a plain floor flips sign
-#                                  between years; the band holds
+#   CB purity >= 0.60 over the expansion tail
 #
-# Held out (bands chosen on 2025, applied to 2026): kept +2.446% against
-# +0.348% dropped, z=+7.6 against a same-size random subset. Shuffling within
-# each day - which removes the benefit of merely being active on good days -
-# leaves z=+4.3, so about 1.2 points of it is genuine stock selection.
+# What the fixture got wrong, and why:
 #
-# What it does NOT do is turn into portfolio returns on a 1 lakh book with
-# three slots: ~26 trades a year against a tail-carried payoff is too few
-# draws. Applying it to the forward test is how that gets more evidence,
-# which is the point of a paper book.
+#   turnover ceiling (was 100-400 cr).  HARMFUL. The fixture is Nifty 500, so
+#     "above 400 crore" there meant index heavyweights, and the rule was really
+#     measuring "avoid mega-caps". On the full store, where 400 crore is an
+#     ordinary strong mid-cap, >400cr OUTPERFORMS: +1.36% against +1.04% in
+#     2025 and +2.07% against +1.30% in 2026. Removed.
+#
+#   turnover floor.  REDUNDANT. entry_filter_verdict() already rejects below
+#     ENTRY_MIN_TURNOVER_CR (40) before the per-strategy rule, so every live
+#     candidate has cleared it. It only looked powerful in backtests because
+#     those call strategy_signal() directly, bypassing the entry filter - 56%
+#     of raw signals are below 40 crore and none of them reach a live scan.
+#
+#   single tower of volume.  NO STABLE EDGE. The gap is -0.91% in 2025 and
+#     +0.08% in 2026 on live-equivalent signals: it flips sign. Per strategy
+#     S3, S4 and S5 all do BETTER on a tower. The S4-only exemption was
+#     directionally right and far too narrow, so the rule goes entirely.
+#
+# CB purity threshold, live-equivalent signals, both controls:
+#
+#   thr    2025 gap  z(within-day)   2026 gap  z(within-day)
+#   0.30     +0.08%       -1.2         +1.88%      +4.9      fails 2025
+#   0.40     -0.24%       -1.8         +0.72%      -0.0      fails both
+#   0.45     +1.25%       +2.3         +0.84%      +1.1      marginal
+#   0.60     +2.19%       +3.4         +2.09%      +3.0      holds
+#
+# 0.60 is the only threshold positive in both years on both controls, and the
+# within-day null is the one that matters - it removes any benefit from merely
+# being active on good days. Note this sweep is itself a best-of-5 choice, so
+# discount the size; what is not a selection effect is that 0.30 and 0.40 fail
+# outright while 0.60 holds on both sides.
+#
+# No upper bound. The fixture showed CB purity above 0.75 turning negative and
+# that also reversed: on the full store the >0.75 bucket is the BEST one
+# (+3.12% combined). The band was fixture noise.
 
 FORWARD_FILTER_PARAMS = {
-    "CB_MIN": 0.30,
-    "CB_MAX": 0.70,
-    "TURNOVER_MIN_CR": 100.0,
-    "TURNOVER_MAX_CR": 400.0,
-    "EXPANSION_TAIL_BARS": 10,   # the window CB purity and cluster are read over
+    "CB_MIN": 0.60,
+    "CB_MAX": 1.01,              # no effective ceiling; see above
+    "TURNOVER_MIN_CR": 40.0,     # belt and braces - the entry filter already
+                                 # enforces this, but the filter can be turned
+                                 # off and this should not silently follow it
+    "TURNOVER_MAX_CR": 1e9,      # no ceiling; it was harmful
+    "EXPANSION_TAIL_BARS": 10,
 }
 
-# S4 is exempt from the volume-cluster condition, and only that one. Measured
-# per strategy, the not-a-tower rule is worth +0.83 on S1 and +0.61 on S3 and
-# is -3.94 on S4 - a single isolated volume tower is BETTER there. S4 is SEPA
-# and an isolated spike is plausibly the institutional-entry signature it
-# exists to catch. Applying a rule that is measurably backwards for a strategy
-# would be knowingly wrong, so it is skipped rather than averaged away.
-#
-# Caveat kept visible: that -3.94 rests on 413 S4 signals in the fixture. It
-# is strong enough not to ignore and thin enough to revisit on the full store.
-# Both spellings, as STRATEGY_SLOT_PRIORITY does: the engine labels this
-# strategy "S4_SEPA" in scan output and forward tests, and "S4" survives in
-# older records. Matching only "S4" would have silently never exempted
-# anything, which is the kind of bug that looks like a working filter.
-TOWER_RULE_EXEMPT = {"S4", "S4_SEPA"}
+# The volume-cluster rule is gone, so there is nothing to exempt S4 from. Kept
+# as an empty set rather than deleted: the test that asserts it covers whatever
+# label FORWARD_TRACKED_STRATEGIES emits is still worth having if the rule ever
+# comes back.
+TOWER_RULE_EXEMPT: set[str] = set()
+APPLY_TOWER_RULE = False
 
 
 def forward_selection_verdict(frame, strategy, params=None):
@@ -605,7 +620,7 @@ def forward_selection_verdict(frame, strategy, params=None):
         return False, (f"CB purity {m['cb_purity']:.2f} outside the "
                        f"{p['CB_MIN']:.2f}-{p['CB_MAX']:.2f} band"), m
 
-    if s not in TOWER_RULE_EXEMPT and m["single_tower"]:
+    if APPLY_TOWER_RULE and s not in TOWER_RULE_EXEMPT and m["single_tower"]:
         return False, "single tower of volume, no cluster", m
 
     return True, None, m

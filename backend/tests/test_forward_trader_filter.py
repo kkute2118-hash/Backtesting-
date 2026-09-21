@@ -32,58 +32,68 @@ def frame(n=300, price=200.0, vol=7.0e6, drift=0.0015, seed=11, tower_at=None):
                          "close": close, "volume": v})
 
 
-def test_turnover_band_rejects_both_ends():
-    """A floor alone flips sign between years; the band is what held."""
+def test_turnover_has_a_floor_but_no_ceiling():
+    """The ceiling was measured as HARMFUL on the full store and removed.
+
+    On the 161-symbol fixture ">400 crore" meant index heavyweights, so the
+    rule was really "avoid mega-caps". On 3,303 symbols, where 400 crore is an
+    ordinary mid-cap, high turnover outperforms in both years. A ceiling must
+    never come back without evidence from a broad universe.
+    """
     low = tl.forward_selection_verdict(frame(vol=3.0e5), "S1")
-    high = tl.forward_selection_verdict(frame(vol=8.0e7), "S1")
     assert low[0] is False and "turnover" in low[1]
-    assert high[0] is False and "turnover" in high[1]
-    assert low[2]["avg_turnover_20"] < tl.FORWARD_FILTER_PARAMS["TURNOVER_MIN_CR"]
-    assert high[2]["avg_turnover_20"] > tl.FORWARD_FILTER_PARAMS["TURNOVER_MAX_CR"]
+
+    very_high = tl.forward_selection_verdict(
+        frame(vol=8.0e7), "S1", {"CB_MIN": 0.0})
+    assert very_high[2]["avg_turnover_20"] > 400, "fixture is not high-turnover"
+    assert very_high[0] is True, "a very liquid stock must not be rejected"
 
 
-def test_cb_purity_is_a_band_not_a_floor():
-    """Above 0.75 the measured return turned sharply negative, so the top
-    of the band must reject as firmly as the bottom."""
+def test_cb_purity_is_a_floor_with_no_upper_bound():
+    """The fixture's upper bound also reversed on the full store.
+
+    There, purity above 0.75 was the BEST bucket (+3.12%), not the worst, so
+    the band was fixture noise. The threshold that survives both years on both
+    controls is a plain floor at 0.60.
+    """
     p = tl.FORWARD_FILTER_PARAMS
-    assert p["CB_MIN"] > 0.0 and p["CB_MAX"] < 1.0, \
-        "CB purity must be bounded on both sides"
-    ok, why, m = tl.forward_selection_verdict(
-        frame(), "S1", {"CB_MIN": 0.95, "CB_MAX": 1.0})
+    assert p["CB_MIN"] >= 0.60, "0.30 and 0.40 both failed 2025"
+    assert p["CB_MAX"] > 1.0, "a CB ceiling was measured as harmful"
+
+    ok, why, _ = tl.forward_selection_verdict(frame(), "S1", {"CB_MIN": 0.95})
     assert ok is False and "CB purity" in why
 
 
-@pytest.mark.parametrize("strategy,expected", [
-    ("S1", False), ("S2", False), ("S3", False),
-    ("S5_POCKETPIVOT", False),
-    ("S4", True),            # historical label
-    ("S4_SEPA", True),       # the label the engine actually emits
-])
-def test_single_tower_rejects_except_for_s4(strategy, expected):
-    """not-a-tower is worth +0.83 on S1 and -3.94 on S4, so S4 is exempt.
+@pytest.mark.parametrize("strategy", ["S1", "S2", "S3", "S4", "S4_SEPA",
+                                      "S5_POCKETPIVOT"])
+def test_single_tower_no_longer_rejects_anything(strategy):
+    """The tower rule is off: it had no stable edge on the full store.
 
-    Both spellings must be exempt: matching only "S4" would silently never
-    fire, because scan output and forward tests say "S4_SEPA".
+    The gap is -0.91% in 2025 and +0.08% in 2026 on live-equivalent signals -
+    it flips sign - and S3, S4 and S5 all do BETTER on a tower. The earlier
+    S4-only exemption was directionally right and far too narrow.
     """
+    expected = True
     f = frame(tower_at=-4)
     assert tl.volume_cluster(f.volume, len(f) - 11, len(f) - 1)["single_tower"]
     # Widen the other two bands so this test isolates the tower rule. With the
     # live bands a synthetic frame can reject on CB purity first and the test
     # would pass for the wrong reason - green while the exemption is dead.
-    wide = {"CB_MIN": 0.0, "CB_MAX": 1.0,
-            "TURNOVER_MIN_CR": 0.0, "TURNOVER_MAX_CR": 1e9}
+    wide = {"CB_MIN": 0.0, "TURNOVER_MIN_CR": 0.0}
     ok, why, _ = tl.forward_selection_verdict(f, strategy, wide)
     assert ok is expected, f"{strategy}: {why}"
-    if not expected:
-        assert "tower" in why
+    assert not tl.APPLY_TOWER_RULE
 
 
 def test_exempt_set_covers_the_label_the_engine_emits():
+    """Only meaningful while the tower rule is on. Kept because the trap it
+    guards is subtle: the engine emits "S4_SEPA", so an exemption written
+    against "S4" never fires and the filter looks like it is working."""
+    if not tl.APPLY_TOWER_RULE:
+        pytest.skip("tower rule is off; nothing to exempt")
     from app.engine import core
     s4 = {s for s in core.FORWARD_TRACKED_STRATEGIES if s.startswith("S4")}
-    assert s4, "no S4 strategy in FORWARD_TRACKED_STRATEGIES"
-    assert s4 <= tl.TOWER_RULE_EXEMPT, (
-        f"engine emits {s4} but the exemption only covers {tl.TOWER_RULE_EXEMPT}")
+    assert s4 and s4 <= tl.TOWER_RULE_EXEMPT
 
 
 def test_short_history_fails_closed():
