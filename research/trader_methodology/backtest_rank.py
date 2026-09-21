@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(ROOT, "backend"))
 FLAT_STOP = 0.07
 R_TARGET = 3.0
 MAX_HOLD = 120
+LOOKBACK_DAYS = 2200        # ~6 years, so the sample spans several regimes
 
 
 def band(x, lo, hi, soft=0.25):
@@ -78,7 +79,12 @@ def build(symbols, core, tl):
     for k, sym in enumerate(symbols):
         if k % 25 == 0:
             print(f"  {k}/{len(symbols)}", file=sys.stderr, flush=True)
-        d = core.load_scan_dataset([sym]).get(sym)
+        # lookback_days defaults to 1000 (~2.7 years) for a live scan, which
+        # is plenty there and quietly truncates a backtest: after the 260-bar
+        # warmup every signal lands in the last two years. That is why the
+        # first deep-history attempt still returned only 2025-2026 despite
+        # sampling symbols with 1,100+ bars.
+        d = core.load_scan_dataset([sym], lookback_days=LOOKBACK_DAYS).get(sym)
         if d is None or len(d) < 300:
             continue
         d = d.sort_index()
