@@ -3278,15 +3278,190 @@ def advanced_small_micro_safety(info,d,news_risk=0):
 # manipulated/illiquid name. The SEPA strategy logic itself lives further down,
 # next to s4_base_conditions()/strategy_signal().
 
-def nse_liquid_universe(exclude_sme=True):
-    """The Dhan NSE cash-equity list (~1900-2100 names depending on the day's
-    scrip master). Same universe for S1, S2, S3, and S4 - no BSE, no SME board
-    by default, no derivatives-only names."""
+# What "cash equity" means on the NSE, by SEM_SERIES. Dhan labels Sovereign
+# Gold Bonds, debentures, treasury bills, government securities, ETFs and the
+# SME board all as SEM_INSTRUMENT_NAME = EQUITY, so the segment filter in
+# dhan_map() cannot tell them apart. The series column can, and this is the
+# only column that distinguishes them.
+#
+# EQ is ordinary rolling settlement. BE (trade-to-trade, delivery only) and BZ
+# (surveillance) are shares but are restricted in ways that make his liquidity
+# and stop rules unworkable, so they are out.
+NSE_EQUITY_SERIES = ("EQ",)
+
+# The label has always said ~2000; before the series filter the universe
+# resolved to 9,922 names, 73% of which were not shares (see
+# research/trader_methodology/UNIVERSE_AUDIT.md). The series filter alone
+# brings it to ~2,700 and this caps the rest by liquidity, which is the
+# measure he checks first and the one that decides what is tradable at all.
+FULL_NSE_UNIVERSE_CAP = 2000
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def dhan_series_map():
+    """{symbol: SEM_SERIES} from the instrument master, same rows as dhan_map().
+
+    Separate from dhan_map() rather than folded into it: dhan_map() returns a
+    {symbol: security_id} dict that a dozen call sites index directly, and
+    widening its return type to carry one more field would touch all of them
+    for no benefit.
+
+    An empty dict when the master has no series column, which callers must
+    treat as "cannot filter" rather than "nothing qualifies".
+    """
+    try:
+        m = dhan_master()
+    except Exception:
+        return {}
+    cols = {str(c).strip().lower(): c for c in m.columns}
+    sym = next((cols[k] for k in ["sem_trading_symbol", "trading_symbol",
+                                  "sem_custom_symbol", "custom_symbol"] if k in cols), None)
+    ser = next((cols[k] for k in ["sem_series", "series"] if k in cols), None)
+    if not sym or not ser:
+        return {}
+    out = m[[sym, ser]].copy()
+    out.columns = ["symbol", "series"]
+    out.symbol = out.symbol.astype(str).str.upper().str.strip()
+    out.series = out.series.astype(str).str.upper().str.strip()
+    return dict(zip(out.symbol, out.series))
+
+
+# A symbol needs this many stored sessions before its turnover means anything,
+# and its newest bar must be this recent. Both exist because of what the first
+# ranking produced: IRBIT, one stored bar from June 2024 on a 267-million-share
+# day, ranked as the most liquid stock on the exchange, ahead of HDFCBANK.
+# Three names with two or three bars each took the next slots. A median over
+# three observations is not a liquidity measure, and a 2024 bar is not news.
+TURNOVER_RANK_MIN_BARS = 20
+TURNOVER_RANK_MAX_STALE_DAYS = 45
+
+
+def stored_turnover_cr(symbols=None, bars=20, min_bars=TURNOVER_RANK_MIN_BARS,
+                       max_stale_days=TURNOVER_RANK_MAX_STALE_DAYS):
+    """{symbol: median daily turnover in Rs crore} from the local candle store.
+
+    The ranking key for the cap. Median rather than mean over the last `bars`
+    sessions, so one delivery-day spike cannot lift a dead stock into the
+    universe.
+
+    A symbol is absent - not zero - when it has fewer than `min_bars` stored
+    sessions or its newest bar is more than `max_stale_days` behind the store's
+    own latest date. Absent means unranked, and an unranked name sorts below
+    every ranked one rather than being scored as illiquid, which is a
+    different claim.
+    """
+    out = {}
+    try:
+        con = _db()
+    except Exception:
+        return out
+    # The last `bars` rows per symbol, chosen in SQL. Reading the whole table
+    # and keeping a tail per symbol in Python works and costs 3 million rows;
+    # this costs 20 per symbol.
+    sql = ("SELECT symbol, t FROM (SELECT symbol, close*volume/1e7 AS t, "
+           "ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY dt DESC) AS rn "
+           "FROM candles WHERE symbol NOT LIKE '^%') WHERE rn <= ?")
+    try:
+        rows = con.execute(sql, (int(bars),)).fetchall()
+    except Exception:
+        # No window functions on this SQLite. Fall back to the whole table
+        # rather than returning nothing, because an empty result silently
+        # disables the cap.
+        try:
+            rows = None
+            raw = con.execute("SELECT symbol, close, volume FROM candles "
+                              "WHERE symbol NOT LIKE '^%' ORDER BY symbol, dt").fetchall()
+        except Exception:
+            con.close()
+            return out
+        tail = {}
+        for sym, close, volume in raw:
+            t = tail.setdefault(str(sym).upper(), [])
+            try:
+                t.append(float(close) * float(volume) / 1e7)
+            except (TypeError, ValueError):
+                continue
+            if len(t) > bars:
+                t.pop(0)
+        rows = [(s, v) for s, vs in tail.items() for v in vs]
+    finally:
+        con.close()
+
+    want = None if symbols is None else {str(s).upper() for s in symbols}
+    buckets = {}
+    for sym, t in rows:
+        s = str(sym).upper()
+        if want is not None and s not in want:
+            continue
+        if t is None:
+            continue
+        buckets.setdefault(s, []).append(float(t))
+    for s, v in buckets.items():
+        if len(v) >= min_bars:
+            out[s] = float(np.median(v))
+    if max_stale_days and out:
+        try:
+            con = _db()
+            try:
+                last = dict(con.execute(
+                    "SELECT symbol, MAX(dt) FROM candles WHERE symbol NOT LIKE '^%' "
+                    "GROUP BY symbol").fetchall())
+            finally:
+                con.close()
+            newest = max(last.values())
+            cutoff = (pd.Timestamp(newest) - pd.Timedelta(days=int(max_stale_days))).date()
+            out = {k: v for k, v in out.items()
+                   if k in last and pd.Timestamp(last[k]).date() >= cutoff}
+        except Exception:
+            pass          # a staleness check we could not run must not empty the map
+    return out
+
+
+def nse_liquid_universe(exclude_sme=True, cap=FULL_NSE_UNIVERSE_CAP):
+    """The NSE cash-equity list: real shares only, capped at the most liquid.
+
+    Two filters, in this order.
+
+    SERIES. Only NSE_EQUITY_SERIES. Without it the list is 9,922 names of
+    which 4,325 are Sovereign Gold Bonds and only 2,688 are shares - the
+    universe audit found the single largest group in our "equity" universe was
+    not equity at all. This also fixes the SME exclusion, which used to look
+    for an "SM" suffix on the trading symbol and so removed 2 of 466: SME is
+    marked in the series column, and the EQ filter drops the whole board.
+
+    LIQUIDITY. The remaining ~2,700 are then cut to the `cap` most liquid by
+    stored 20-day median turnover. That is the measure he checks before he
+    looks at a chart, and it is the one that decides what can be traded at
+    size at all.
+
+    When the store holds no turnover yet - a first build, an empty database -
+    the cap is NOT applied. Truncating an unranked list would pick an
+    arbitrary 2,000 by alphabet and quietly hide the rest from the very job
+    that is supposed to download them. Better to return every eligible share
+    and let the cap start working once there is data to rank on.
+
+    `exclude_sme` is kept for callers that pass it; the series filter already
+    removes the SME board, so it only still matters when the master has no
+    series column and the old suffix check is all there is.
+    """
     symbols = sorted(dhan_map().keys())
+    series = dhan_series_map()
+    if series:
+        allowed = {s.upper() for s in NSE_EQUITY_SERIES}
+        symbols = [s for s in symbols if series.get(s, "").upper() in allowed]
     tickers = [f"{s}.NS" for s in symbols]
-    if exclude_sme:
+    if exclude_sme and not series:
         tickers = [t for t in tickers if not t.endswith("SM.NS") and "-SM" not in t]
-    return tickers
+
+    if not cap or len(tickers) <= cap:
+        return tickers
+
+    turnover = stored_turnover_cr([t.replace(".NS", "") for t in tickers])
+    if not turnover:
+        return tickers
+    ranked = sorted(tickers,
+                    key=lambda t: (-turnover.get(t.replace(".NS", ""), -1.0), t))
+    return sorted(ranked[:cap])
 
 
 def _price_action_quality(d, lookback=60):
