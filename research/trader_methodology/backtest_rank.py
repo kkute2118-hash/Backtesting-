@@ -188,6 +188,9 @@ def summarise(df):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixture", action="store_true")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="random subset of symbols; the full store takes hours")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.path.join(HERE, "rank_results.csv"))
     a = ap.parse_args()
 
@@ -206,6 +209,12 @@ def main():
                 "GROUP BY symbol HAVING COUNT(*)>=300 ORDER BY symbol")]
         finally:
             con.close()
+
+    if a.sample and a.sample < len(symbols):
+        # Random, not the first N alphabetically: an alphabetical slice of an
+        # exchange listing is a biased sample, and the full store takes hours.
+        rng = np.random.default_rng(a.seed)
+        symbols = sorted(rng.choice(symbols, size=a.sample, replace=False).tolist())
 
     import importlib.util as u
     spec = u.spec_from_file_location(
