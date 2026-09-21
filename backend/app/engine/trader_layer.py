@@ -892,21 +892,145 @@ def stop_marking(frame: pd.DataFrame, entry: float, stop: float,
     return out
 
 
+# His daily DNA band, from the lectures' worked examples rather than from a
+# rule he states: roughly 8-20% for a typical daily up move, 15-30% weekly,
+# 25-40% monthly. Used to WORD the reading, never to reject anything.
+DNA_DAILY_BAND = (8.0, 20.0)
+
+
+def dna_verdict(d: dict) -> str:
+    """The DNA reading in words: what a normal move is worth in this stock.
+
+    "No measurable DNA" is a real answer and not a missing value. He is
+    explicit that DNA is measured on genuine up moves and never inside a
+    range, so a stock that has not produced qualifying legs is telling you it
+    has been ranging - which is itself a reason to leave it alone.
+    """
+    move, candle, legs = d.get("dna_move"), d.get("dna_candle"), d.get("legs") or 0
+    if move is None or legs < 3:
+        if candle is None:
+            return "no measurable DNA - not enough history"
+        return (f"no measurable DNA - {legs} clean up-legs in 250 sessions, "
+                f"so this has been ranging rather than moving")
+    lo, hi = DNA_DAILY_BAND
+    if move < lo * 0.75:
+        shape = "quiet - below the band his daily examples sit in"
+    elif move < lo:
+        shape = "on the quiet side of his daily band"
+    elif move <= hi:
+        shape = "a normal daily mover by his band"
+    else:
+        shape = "wide - above his daily band, so expect wider stops too"
+    return (f"typical up move {move:.0f}% over {legs} legs, "
+            f"typical up candle {candle:.2f}% - {shape}")
+
+
+def smart_money_verdict(liq: dict) -> str:
+    """Did money arrive, or did it just pass through?
+
+    The distinction is his, and it is the turnover version of a volume cluster
+    against a single tower: one enormous day that leaves the 20-day average
+    where it was is not money entering the stock. What he reads is the average
+    itself climbing - "175, 200, 255" - and that is the second clause here.
+    """
+    spike, drift = liq.get("turnover_spike"), liq.get("turnover_drift_pct")
+    avg = liq.get("avg_turnover_20")
+    if spike is None or avg is None:
+        return "cannot tell - not enough history for a 20-day average"
+    if avg < 2.5:
+        # "extremely less", the level he rejects outright on liquidity alone.
+        return (f"too thin to read - Rs {avg:.1f} cr a day is below the level "
+                f"he rejects on sight")
+    rising = drift is not None and drift > 0
+    if spike >= 2.0 and rising:
+        return (f"MONEY ARRIVING - {spike:.1f}x its own average, and the average "
+                f"itself is up {drift:.0f}% over 20 sessions")
+    if spike >= 2.0:
+        return (f"ONE BIG DAY ONLY - {spike:.1f}x its average, but the average is "
+                + (f"down {abs(drift):.0f}%" if drift is not None else "flat")
+                + " - money passed through, it did not arrive")
+    if spike >= 1.2 and rising:
+        return (f"money building quietly - {spike:.1f}x its average, average up "
+                f"{drift:.0f}% over 20 sessions")
+    if spike >= 1.2:
+        return f"mildly busy - {spike:.1f}x its average, but the average is not rising"
+    if spike >= 0.7:
+        return f"ordinary day - {spike:.1f}x its average, nothing has changed hands"
+    return (f"NO MONEY BEHIND IT - {spike:.1f}x its average; whatever the price "
+            f"did today, it did on nothing")
+
+
+# Short codes for the table. The sentence above is the tooltip; this is what
+# fits in a column and what a filter can key on. Derived here rather than in
+# the UI so the wording and the status can never disagree.
+def dna_status(d: dict) -> str:
+    move, legs = d.get("dna_move"), d.get("legs") or 0
+    if move is None or legs < 3:
+        return "UNKNOWN" if d.get("dna_candle") is None else "RANGING"
+    lo, hi = DNA_DAILY_BAND
+    if move < lo:
+        return "QUIET"
+    if move <= hi:
+        return "NORMAL"
+    return "WIDE"
+
+
+def smart_money_status(liq: dict) -> str:
+    spike, drift = liq.get("turnover_spike"), liq.get("turnover_drift_pct")
+    avg = liq.get("avg_turnover_20")
+    if spike is None or avg is None:
+        return "UNKNOWN"
+    if avg < 2.5:
+        return "TOO THIN"
+    rising = drift is not None and drift > 0
+    if spike >= 2.0:
+        return "ARRIVING" if rising else "ONE DAY ONLY"
+    if spike >= 1.2:
+        return "BUILDING" if rising else "MILD"
+    if spike >= 0.7:
+        return "ORDINARY"
+    return "NO MONEY"
+
+
+def describe(out: dict) -> str:
+    """One line per stock: liquidity, DNA, money flow, and the stop.
+
+    Ordered the way he checks them - turnover before the chart, DNA before
+    structure - so the sentence reads as the sequence a person would work
+    through, and stops at the first thing that is missing.
+    """
+    bits = []
+    avg = out.get("avg_turnover_20")
+    bits.append(f"Rs {avg:.0f} cr/day" if avg is not None else "turnover unknown")
+    bits.append(out.get("dna_verdict") or "")
+    bits.append(out.get("smart_money") or "")
+    sl = out.get("sl_verdict")
+    if sl and sl != "not evaluated":
+        bits.append(sl)
+    return ". ".join(b for b in bits if b) + "."
+
+
 def marking(frame: pd.DataFrame, entry: float | None = None,
             stop: float | None = None, params: dict | None = None) -> dict:
     """All three readings for one candidate. Flat dict, display only."""
     out = {"dna_candle": None, "dna_move": None, "dna_legs": 0,
+           "dna_verdict": "no measurable DNA - not enough history",
+           "dna_status": "UNKNOWN",
            "turnover_cr": None, "avg_turnover_20": None, "turnover_spike": None,
            "turnover_drift_pct": None, "liquidity_verdict": "no data",
+           "smart_money": "cannot tell - not enough history for a 20-day average",
+           "money_status": "UNKNOWN",
            "sl_pct": None, "sl_vs_dna": None, "pivot_low": None,
            "pivot_sl_pct": None, "inside_demand_zone": None,
-           "sl_verdict": "not evaluated"}
+           "sl_verdict": "not evaluated", "description": "not enough history to read."}
     if frame is None or len(frame) < 60:
         return out
 
     d = dna(frame["close"], params)
     out["dna_candle"], out["dna_move"], out["dna_legs"] = (
         d["dna_candle"], d["dna_move"], d["legs"])
+    out["dna_verdict"] = dna_verdict(d)
+    out["dna_status"] = dna_status(d)
 
     liq = liquidity_marking(frame["close"], frame["volume"])
     out["turnover_cr"] = liq["turnover_cr"]
@@ -914,10 +1038,13 @@ def marking(frame: pd.DataFrame, entry: float | None = None,
     out["turnover_spike"] = liq["turnover_spike"]
     out["turnover_drift_pct"] = liq["turnover_drift_pct"]
     out["liquidity_verdict"] = liq["verdict"]
+    out["smart_money"] = smart_money_verdict(liq)
+    out["money_status"] = smart_money_status(liq)
 
     if entry is not None and stop is not None:
         sl = stop_marking(frame, float(entry), float(stop), d["dna_move"], params)
         out.update({k: sl[k] for k in ("sl_pct", "sl_vs_dna", "pivot_low",
                                        "pivot_sl_pct", "inside_demand_zone")})
         out["sl_verdict"] = sl["verdict"]
+    out["description"] = describe(out)
     return out

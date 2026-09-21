@@ -8,7 +8,7 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Page, PageHeader } from "@/components/layout/PageShell";
-import { Badge, toneForRegime, toneForSafety } from "@/components/ui/Badge";
+import { Badge, type Tone, toneForRegime, toneForSafety } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { DataTable, type Column } from "@/components/ui/DataTable";
@@ -169,6 +169,55 @@ export function ResultsPage({ runId }: { runId: string }) {
         value: (row) => n(row, "Avg Turnover 20D Cr"),
         description: "20-day average turnover, and today against it. A big candle on an " +
           "ordinary turnover day is a move with no money behind it.",
+      },
+      {
+        key: "Money Status", header: "Smart money", width: "8.5rem",
+        render: (row) => {
+          const st = str(row, "Money Status");
+          const read = str(row, "Smart Money");
+          if (!st || st === "UNKNOWN") {
+            return <span className="text-faint" title={read}>—</span>;
+          }
+          // "One big day" is the one that matters most and reads as good on a
+          // spike alone: a huge day that leaves the 20-day average where it
+          // was is money passing through, not arriving. It is warned, not
+          // praised.
+          const tone: Tone =
+            st === "ARRIVING" || st === "BUILDING" ? "up"
+            : st === "ONE DAY ONLY" ? "warn"
+            : st === "NO MONEY" || st === "TOO THIN" ? "down"
+            : "neutral";
+          // Badge carries no title of its own; the sentence lives on a wrapper
+          // so hovering the chip still explains it.
+          return <span title={read}><Badge tone={tone}>{st}</Badge></span>;
+        },
+        value: (row) => str(row, "Money Status"),
+        description: "Whether money is ARRIVING (today above its average AND the 20-day " +
+          "average itself rising) or it was ONE DAY ONLY (a spike that left the average " +
+          "flat - money passed through rather than entering).",
+      },
+      {
+        key: "DNA Status", header: "DNA", width: "7rem",
+        render: (row) => {
+          const st = str(row, "DNA Status");
+          const read = str(row, "DNA Read");
+          const move = n(row, "DNA Move %");
+          if (!st || st === "UNKNOWN") {
+            return <span className="text-faint" title={read}>—</span>;
+          }
+          const tone = st === "NORMAL" ? "text-up"
+            : st === "RANGING" ? "text-down"
+            : "text-muted";
+          return (
+            <span className={tone} title={read}>
+              {st}{move === null ? "" : ` ${move.toFixed(0)}%`}
+            </span>
+          );
+        },
+        value: (row) => str(row, "DNA Status"),
+        description: "What a normal up move is worth in this stock, against the 8-20% band " +
+          "his daily examples sit in. RANGING means it has not produced clean up-legs at " +
+          "all, which he treats as a reason to leave it alone.",
       },
       {
         key: "SL vs DNA", header: "SL quality", align: "right",
@@ -339,6 +388,45 @@ export function ResultsPage({ runId }: { runId: string }) {
             : <span className="text-faint">—</span>;
         },
         value: (row) => str(row, "Liquidity Read"),
+      },
+      {
+        key: "Description", header: "Read", optional: true, sortable: false,
+        render: (row) => {
+          const d = str(row, "Description");
+          return d
+            ? <span className="text-2xs text-muted" title={d}>{d}</span>
+            : <span className="text-faint">—</span>;
+        },
+        value: (row) => str(row, "Description"),
+        description: "Turnover, DNA, money flow and the stop in one sentence, in the order " +
+          "he checks them.",
+      },
+      {
+        key: "DNA Read", header: "DNA read", optional: true, sortable: false,
+        render: (row) => {
+          const d = str(row, "DNA Read");
+          return d
+            ? <span className="text-2xs text-muted" title={d}>{d}</span>
+            : <span className="text-faint">—</span>;
+        },
+        value: (row) => str(row, "DNA Read"),
+      },
+      {
+        key: "Smart Money", header: "Money read", optional: true, sortable: false,
+        render: (row) => {
+          const d = str(row, "Smart Money");
+          return d
+            ? <span className="text-2xs text-muted" title={d}>{d}</span>
+            : <span className="text-faint">—</span>;
+        },
+        value: (row) => str(row, "Smart Money"),
+      },
+      {
+        key: "DNA Legs", header: "DNA legs", align: "right", optional: true,
+        render: (row) => num(n(row, "DNA Legs"), 0),
+        value: (row) => n(row, "DNA Legs"),
+        description: "Clean up-legs found in 250 sessions. Few legs means it has been " +
+          "ranging, and DNA is not measured inside a range.",
       },
       {
         key: "Safety Flags", header: "Flags", optional: true, sortable: false,

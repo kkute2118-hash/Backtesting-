@@ -12282,15 +12282,21 @@ def _marking_fields(frame, entry, stop):
     return {
         "DNA Candle %": m["dna_candle"],
         "DNA Move %": m["dna_move"],
+        "DNA Legs": m["dna_legs"],
+        "DNA Read": m["dna_verdict"],
+        "DNA Status": m["dna_status"],
         "Avg Turnover 20D Cr": m["avg_turnover_20"],
         "Turnover x Avg": m["turnover_spike"],
         "Turnover Trend %": m["turnover_drift_pct"],
         "Liquidity Read": m["liquidity_verdict"],
+        "Money Status": m["money_status"],
+        "Smart Money": m["smart_money"],
         "SL %": m["sl_pct"],
         "SL vs DNA": m["sl_vs_dna"],
         "Pivot SL %": m["pivot_sl_pct"],
         "SL Inside Demand Zone": m["inside_demand_zone"],
         "SL Read": m["sl_verdict"],
+        "Description": m["description"],
     }
 
 
@@ -12394,6 +12400,12 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                                     if np.isfinite(ev["sector_rank"]) else None),
                     "Entry Filter": why,
                 })
+                # The marking belongs on a rejected row as much as on a taken
+                # one - more, arguably: "the filter turned this away, but was
+                # there money in it?" is the question that keeps the filter
+                # answerable. No entry or stop exists yet, so the stop half is
+                # left unevaluated and the DNA and turnover halves are not.
+                rejected[-1].update(_marking_fields(df, None, None))
                 continue
 
             score, parts = final_setup_score(f, s, regime, safe)

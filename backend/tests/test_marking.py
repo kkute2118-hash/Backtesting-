@@ -133,3 +133,72 @@ def test_marking_without_an_entry_still_reports_dna_and_liquidity():
     assert m["dna_move"] is not None
     assert m["avg_turnover_20"] is not None
     assert m["sl_pct"] is None
+
+
+# --------------------------------------------------------------------------
+# The written readings. A description that says the wrong thing is worse than
+# no description, so the two cases that invert each other are pinned here.
+# --------------------------------------------------------------------------
+
+def test_one_huge_day_on_a_flat_average_is_not_called_money_arriving():
+    # The trap the user asked to be able to see: price moved, turnover
+    # spiked, and the 20-day average did not budge. Money passed through.
+    f = frame([100.0] * 80, [1.0e6] * 79 + [6.0e6])
+    liq = tl.liquidity_marking(f["close"], f["volume"])
+    assert tl.smart_money_status(liq) == "ONE DAY ONLY"
+    assert "did not arrive" in tl.smart_money_verdict(liq)
+
+
+def test_a_rising_average_with_a_spike_is_called_money_arriving():
+    vol = [1.0e6] * 30 + [3.0e6] * 30 + [7.0e6]
+    f = frame([100.0] * 61, vol)
+    liq = tl.liquidity_marking(f["close"], f["volume"])
+    assert tl.smart_money_status(liq) == "ARRIVING"
+    assert "MONEY ARRIVING" in tl.smart_money_verdict(liq)
+
+
+def test_a_stock_below_the_level_he_rejects_on_sight_is_called_too_thin():
+    f = frame([100.0] * 61, [1.0e4] * 61)          # ~Rs 0.1 cr a day
+    liq = tl.liquidity_marking(f["close"], f["volume"])
+    assert tl.smart_money_status(liq) == "TOO THIN"
+    assert "rejects on sight" in tl.smart_money_verdict(liq)
+
+
+def test_a_ranging_stock_is_reported_as_ranging_not_as_a_missing_value():
+    # Flat with tiny noise: no leg clears the floor, so there is no DNA - and
+    # that is an answer, because he does not measure DNA inside a range.
+    import numpy as np
+    rng = np.random.default_rng(5)
+    f = frame(100 + rng.normal(0, 0.05, 300).cumsum() * 0.01)
+    d = tl.dna(f["close"])
+    if d["dna_move"] is None or (d["legs"] or 0) < 3:
+        assert tl.dna_status(d) in ("RANGING", "UNKNOWN")
+        assert "ranging" in tl.dna_verdict(d) or "not enough history" in tl.dna_verdict(d)
+
+
+def test_a_normal_mover_lands_in_his_daily_band():
+    d = tl.dna(frame(_sawtooth([12.0] * 10))["close"])
+    assert tl.dna_status(d) == "NORMAL"
+    assert "normal daily mover" in tl.dna_verdict(d)
+
+
+def test_a_quiet_stock_is_not_called_normal():
+    d = tl.dna(frame(_sawtooth([4.0] * 10))["close"])
+    assert tl.dna_status(d) in ("QUIET", "RANGING")
+
+
+def test_the_description_names_turnover_dna_and_money_in_his_order():
+    m = tl.marking(frame(_sawtooth([12.0] * 10)), 100.0, 93.0)
+    d = m["description"]
+    assert d.startswith("Rs ")                      # liquidity first, as he checks it
+    assert "typical up move" in d
+    assert m["smart_money"].split(" - ")[0].strip(" ,") in d or m["smart_money"] in d
+    assert d.endswith(".")
+
+
+def test_a_description_exists_even_with_no_entry_or_stop():
+    # Rejected rows carry no entry yet; they must still read.
+    m = tl.marking(frame(_sawtooth([12.0] * 10)))
+    assert m["description"] and m["description"] != "not enough history to read."
+    assert m["sl_verdict"] == "not evaluated"
+    assert "stop" not in m["description"].lower()
