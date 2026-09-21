@@ -124,6 +124,76 @@ export function ResultsPage({ runId }: { runId: string }) {
         render: (row) => str(row, "R:R") || "—",
         value: (row) => str(row, "R:R"),
       },
+      // --- Marking: DNA, liquidity, stop quality ------------------------
+      // His three pre-chart checks, on the row. Read-only by design: every
+      // attempt in this project to rank or gate candidates on measures like
+      // these failed out of sample, so they describe the stock and leave the
+      // judgement with whoever is reading. See FINDINGS_DEEP.md.
+      {
+        key: "DNA Move %", header: "DNA move", align: "right",
+        render: (row) => {
+          const move = n(row, "DNA Move %");
+          const candle = n(row, "DNA Candle %");
+          if (move === null) return <span className="text-faint">—</span>;
+          return (
+            <span title={candle === null ? undefined
+              : `Typical up candle ${candle.toFixed(2)}%`}>
+              {pct(move, 0)}
+            </span>
+          );
+        },
+        value: (row) => n(row, "DNA Move %"),
+        description: "What a normal up move is worth in THIS stock: the median leg, " +
+          "measured by summing its positive candles rather than high minus low.",
+      },
+      {
+        key: "Avg Turnover 20D Cr", header: "Turnover 20D", align: "right",
+        render: (row) => {
+          const avg = n(row, "Avg Turnover 20D Cr");
+          const spike = n(row, "Turnover x Avg");
+          if (avg === null) return <span className="text-faint">—</span>;
+          const tone = spike === null ? "text-faint"
+            : spike >= 2 ? "text-up"
+            : spike >= 1.2 ? "text-muted"
+            : spike < 0.7 ? "text-down"
+            : "text-faint";
+          return (
+            <span title={str(row, "Liquidity Read")}>
+              {num(avg, avg >= 100 ? 0 : 1)} cr
+              {spike === null ? null : (
+                <span className={`ml-1 text-2xs ${tone}`}>{spike.toFixed(1)}x</span>
+              )}
+            </span>
+          );
+        },
+        value: (row) => n(row, "Avg Turnover 20D Cr"),
+        description: "20-day average turnover, and today against it. A big candle on an " +
+          "ordinary turnover day is a move with no money behind it.",
+      },
+      {
+        key: "SL vs DNA", header: "SL quality", align: "right",
+        render: (row) => {
+          const frac = n(row, "SL vs DNA");
+          const inside = row["SL Inside Demand Zone"] === true;
+          const read = str(row, "SL Read");
+          if (inside) {
+            return <span className="text-down" title={read}>inside zone</span>;
+          }
+          if (frac === null) return <span className="text-faint" title={read}>—</span>;
+          // Only 1.0 carries a judgement: a stop as wide as a whole typical
+          // move means one normal move does not clear the risk. Below that the
+          // number is reported without a verdict, because any cut we drew
+          // there would be ours rather than his.
+          return (
+            <span className={frac >= 1 ? "text-down" : ""} title={read}>
+              {frac.toFixed(2)}x
+            </span>
+          );
+        },
+        value: (row) => n(row, "SL vs DNA"),
+        description: "Stop width as a fraction of this stock's typical up move. Red at 1.0 " +
+          "and above, where one normal move does not even clear the risk.",
+      },
       {
         key: "RSI", header: "RSI", align: "right",
         render: (row) => num(n(row, "RSI"), 1),
@@ -212,6 +282,63 @@ export function ResultsPage({ runId }: { runId: string }) {
         key: "Trend Score", header: "Trend", align: "right", optional: true,
         render: (row) => num(n(row, "Trend Score"), 0),
         value: (row) => n(row, "Trend Score"),
+      },
+      {
+        key: "DNA Candle %", header: "DNA candle", align: "right", optional: true,
+        render: (row) => pct(n(row, "DNA Candle %"), 2),
+        value: (row) => n(row, "DNA Candle %"),
+        description: "The stock's typical single up candle: median of its own positive days.",
+      },
+      {
+        key: "Turnover Trend %", header: "Turnover trend", align: "right", optional: true,
+        render: (row) => {
+          const drift = n(row, "Turnover Trend %");
+          if (drift === null) return <span className="text-faint">—</span>;
+          return <span className={drift > 0 ? "text-up" : drift < 0 ? "text-down" : ""}>
+            {pct(drift, 0)}
+          </span>;
+        },
+        value: (row) => n(row, "Turnover Trend %"),
+        description: "How far the 20-day AVERAGE itself has moved over the last 20 sessions. " +
+          "One huge day that leaves the average flat is money passing through, not arriving.",
+      },
+      {
+        key: "SL %", header: "SL width", align: "right", optional: true,
+        render: (row) => pct(n(row, "SL %"), 1),
+        value: (row) => n(row, "SL %"),
+      },
+      {
+        key: "Pivot SL %", header: "Pivot SL", align: "right", optional: true,
+        render: (row) => {
+          const piv = n(row, "Pivot SL %");
+          const flat = n(row, "SL %");
+          if (piv === null) return <span className="text-faint" title="No demand candle found">—</span>;
+          const tighter = flat !== null && piv < flat;
+          return <span className={tighter ? "text-up" : ""}>{pct(piv, 1)}</span>;
+        },
+        value: (row) => n(row, "Pivot SL %"),
+        description: "What the stop would be under the demand candle's low. Shown because " +
+          "his stop is structural; the 7% one is ours. Nothing is changed by it.",
+      },
+      {
+        key: "SL Read", header: "Stop read", optional: true, sortable: false,
+        render: (row) => {
+          const read = str(row, "SL Read");
+          return read
+            ? <span className="text-2xs text-muted" title={read}>{read}</span>
+            : <span className="text-faint">—</span>;
+        },
+        value: (row) => str(row, "SL Read"),
+      },
+      {
+        key: "Liquidity Read", header: "Money flow", optional: true, sortable: false,
+        render: (row) => {
+          const read = str(row, "Liquidity Read");
+          return read
+            ? <span className="text-2xs text-muted" title={read}>{read}</span>
+            : <span className="text-faint">—</span>;
+        },
+        value: (row) => str(row, "Liquidity Read"),
       },
       {
         key: "Safety Flags", header: "Flags", optional: true, sortable: false,

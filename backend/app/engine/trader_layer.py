@@ -624,3 +624,272 @@ def forward_selection_verdict(frame, strategy, params=None):
         return False, "single tower of volume, no cluster", m
 
     return True, None, m
+
+
+# --------------------------------------------------------------------------
+# MARKING - three readings, shown next to every candidate, gating nothing
+# --------------------------------------------------------------------------
+#
+# His "marking" is a report card on a candidate, not a filter and not a
+# ranking. Everything measured in this project that tried to RANK candidates
+# failed (FINDINGS_DEEP.md), so these numbers are deliberately read-only: they
+# say what the stock is, and the judgement stays with the person reading them.
+#
+# Three readings, the three he checks before anything else:
+#
+#   DNA        what a normal move looks like FOR THIS STOCK
+#   LIQUIDITY  the 20-day average turnover, and whether money is arriving
+#   SL QUALITY the stop's width judged against that stock's DNA, and whether
+#              a structural pivot would give a tighter one
+#
+# Nothing here changes the stop a forward test is opened with. `SL 7%` stays
+# what it was; this only says whether 7% is a good stop for this stock.
+
+MARKING_PARAMS = {
+    # How far back a stock's character is read. Same window as CB, because it
+    # is the same question - what is normal for this stock - asked of the
+    # size of the moves rather than of the days.
+    "DNA_LOOKBACK": 250,
+    "DNA_MIN_OBS": 40,
+
+    # A leg has to clear this multiple of the typical single candle to count
+    # as an up MOVE rather than noise inside a range. He says only "never
+    # measure DNA inside a range" and gives no number.      [threshold: OURS]
+    "DNA_LEG_MIN_MULT": 2.0,
+
+    # Bars each side that make a swing low. Five - a trading week - is the
+    # smallest window in which "a low" means anything on a daily chart; at
+    # three the series fragments into noise and the legs it returns are a few
+    # percent each, which is not what he is pointing at when he talks about a
+    # stock's typical move.                                 [threshold: OURS]
+    "DNA_SWING_SPAN": 5,
+
+    # The one cut here that does not need inventing: a stop as wide as a whole
+    # typical move means one normal move does not even clear the risk. He gives
+    # the shape by example - a 17-20% stop against a monthly DNA of 25-30% is
+    # wrong - but no threshold, and a fitted one would be ours wearing his
+    # name. Measured on the fixture the ratio runs median 0.87, so a "good"
+    # band at a third would label almost every row the same way and say
+    # nothing. The number is reported; only 1.0 carries a judgement.
+    "SL_OVER_DNA": 1.0,
+
+    # A structural stop this much tighter than the flat one is worth naming.
+    "SL_TIGHTER_BY_PCT": 1.5,
+}
+
+
+def dna(close: pd.Series, params: dict | None = None) -> dict:
+    """What a normal move looks like for this stock.
+
+    Two numbers, because he uses the word for both and they answer different
+    questions:
+
+      dna_candle  the typical single up candle, as a %. Median rather than
+                  mean of the POSITIVE returns - the mean of a return series
+                  is dragged by the few days that are exactly the outliers a
+                  median is meant to exclude here.
+      dna_move    the typical full up move, as a %, computed by SUMMING THE
+                  POSITIVE CANDLES of each leg. That is stated outright and it
+                  is not the same as high minus low: the drawdowns inside a
+                  leg are excluded on purpose, because what he is measuring is
+                  how much upside the stock delivers when it is working.
+
+    Legs are found between swing lows and the swing high that follows, and a
+    leg smaller than DNA_LEG_MIN_MULT single candles is discarded - his
+    "never measure DNA inside a range", with a number we had to choose.
+    """
+    p = {**MARKING_PARAMS, **(params or {})}
+    n = len(close)
+    if n < p["DNA_MIN_OBS"]:
+        return {"dna_candle": None, "dna_move": None, "legs": 0}
+
+    tail = close.iloc[-p["DNA_LOOKBACK"]:] if n > p["DNA_LOOKBACK"] else close
+    ret = tail.pct_change() * 100.0
+    pos = ret[ret > 0]
+    if len(pos) < p["DNA_MIN_OBS"] // 2:
+        return {"dna_candle": None, "dna_move": None, "legs": 0}
+    dna_candle = float(pos.median())
+
+    # Swing lows on closes: a bar lower than every bar within span on both
+    # sides. Closes rather than lows, to match the sum of closing changes the
+    # leg is then measured with.
+    span = int(p["DNA_SWING_SPAN"])
+    v = tail.to_numpy(dtype=float)
+    lows = [i for i in range(span, len(v) - span)
+            if v[i] == v[i - span: i + span + 1].min()]
+
+    # A leg runs from one swing low to the HIGHEST close before the next swing
+    # low, not to the first minor high after it. Taking the first high chops a
+    # real move into its constituent steps and reports each step as if it were
+    # the whole thing - which is how a stock that moves 18% at a time ends up
+    # described as a 6% stock.
+    r = ret.to_numpy(dtype=float)
+    floor = dna_candle * float(p["DNA_LEG_MIN_MULT"])
+    moves = []
+    bounds = lows + [len(v) - 1]
+    for k in range(len(bounds) - 1):
+        lo, nxt = bounds[k], bounds[k + 1]
+        if nxt - lo < 2:
+            continue
+        hi = lo + 1 + int(np.argmax(v[lo + 1: nxt + 1]))
+        leg = r[lo + 1: hi + 1]
+        gain = float(np.nansum(leg[leg > 0]))
+        if gain >= floor:
+            moves.append(gain)
+
+    return {
+        "dna_candle": round(dna_candle, 2),
+        "dna_move": round(float(np.median(moves)), 1) if moves else None,
+        "legs": len(moves),
+    }
+
+
+def liquidity_marking(close: pd.Series, volume: pd.Series) -> dict:
+    """The 20-day average turnover, and whether money is arriving or just passing.
+
+    `spike` and `avg` are read against the TRAILING window, excluding today.
+    turnover_frame's own average includes the current bar, which is correct for
+    the band it feeds but wrong here: a 5x day that is inside its own benchmark
+    reports itself as about 4x, and the number on the chart would not match the
+    number in the table. The chart excludes the bar; so does this.
+    """
+    t = turnover_cr(close, volume)
+    prior = t.shift(1).rolling(AUTHOR_AVERAGE_TURNOVER_LOOKBACK,
+                               min_periods=AUTHOR_AVERAGE_TURNOVER_LOOKBACK).mean()
+    if len(t) == 0:
+        return {"turnover_cr": None, "avg_turnover_20": None,
+                "turnover_spike": None, "turnover_drift_pct": None, "verdict": "no data"}
+
+    i = len(t) - 1
+    day = float(t.iloc[i]) if np.isfinite(t.iloc[i]) else None
+    avg = float(prior.iloc[i]) if np.isfinite(prior.iloc[i]) else None
+    spike = (day / avg) if (day is not None and avg) else None
+
+    # The drift he actually reads: the AVERAGE itself climbing over the last
+    # 20 sessions - 175 to 200 to 255 - rather than one big day. A single day
+    # that leaves the average flat is the turnover version of a single tower
+    # of volume: money passed through, it did not arrive.
+    drift = None
+    j = i - AUTHOR_AVERAGE_TURNOVER_LOOKBACK
+    if j >= 0 and np.isfinite(prior.iloc[j]) and float(prior.iloc[j]) > 0 and avg:
+        drift = (avg / float(prior.iloc[j]) - 1.0) * 100.0
+
+    if spike is None:
+        verdict = "not enough history"
+    elif spike >= 3.0:
+        verdict = "money flooded in"
+    elif spike >= 2.0:
+        verdict = "clear money flow"
+    elif spike >= 1.2:
+        verdict = "above its own average"
+    elif spike >= 0.7:
+        verdict = "ordinary day"
+    else:
+        verdict = "thin - the move has no money behind it"
+    if drift is not None and spike is not None and spike >= 1.2 and drift <= 0:
+        verdict += "; average flat - one day, not a trend"
+
+    return {
+        "turnover_cr": None if day is None else round(day, 1),
+        "avg_turnover_20": None if avg is None else round(avg, 1),
+        "turnover_spike": None if spike is None else round(spike, 2),
+        "turnover_drift_pct": None if drift is None else round(drift, 1),
+        "verdict": verdict,
+    }
+
+
+def stop_marking(frame: pd.DataFrame, entry: float, stop: float,
+                 dna_move: float | None, params: dict | None = None) -> dict:
+    """Is this a good stop for THIS stock, and is there a tighter honest one?
+
+    Two separate questions, and they fail in opposite directions:
+
+      width vs DNA   "stop width must be proportionate to DNA" - a 17-20% stop
+                     against a 25-30% typical move is wrong, because the trade
+                     has to be nearly perfect to pay for its own risk.
+      vs the pivot   the stop belongs BELOW a demand candle's low. A stop that
+                     sits ABOVE the nearest pivot is inside the demand zone,
+                     which he refuses outright: it supplies the market with
+                     exactly the liquidity that takes it out.
+
+    Reports, never overrides. The forward test still opens on the stop it was
+    handed.
+    """
+    p = {**MARKING_PARAMS, **(params or {})}
+    out = {"sl_pct": None, "sl_vs_dna": None, "pivot_low": None,
+           "pivot_sl_pct": None, "inside_demand_zone": None, "verdict": "not evaluated"}
+    if not entry or not np.isfinite(entry) or entry <= 0 or not np.isfinite(stop):
+        return out
+
+    width = (entry - stop) / entry * 100.0
+    out["sl_pct"] = round(width, 2)
+    if width <= 0:
+        out["verdict"] = "stop is at or above entry"
+        return out
+
+    if dna_move:
+        frac = width / float(dna_move)
+        out["sl_vs_dna"] = round(frac, 2)
+
+    piv = None
+    try:
+        i = len(frame) - 1
+        start = expansion_end(frame["close"], i)
+        piv = pivot_low(frame["low"], frame["close"], frame["open"], i, search_from=start)
+    except Exception:
+        piv = None
+
+    if piv and np.isfinite(piv) and piv < entry:
+        out["pivot_low"] = round(float(piv), 2)
+        structural = float(piv) * (1.0 - PARAMS["STOP_BUFFER"])
+        out["pivot_sl_pct"] = round((entry - structural) / entry * 100.0, 2)
+        out["inside_demand_zone"] = bool(stop > piv)
+
+    bits = []
+    if out["sl_vs_dna"] is None:
+        bits.append(f"{width:.1f}% stop; this stock's typical move is unknown")
+    elif out["sl_vs_dna"] >= p["SL_OVER_DNA"]:
+        bits.append(f"{width:.1f}% stop is wider than this stock's whole typical "
+                    f"{dna_move:.0f}% move - one normal move does not clear the risk")
+    else:
+        bits.append(f"{width:.1f}% stop = {out['sl_vs_dna']:.2f} of this stock's "
+                    f"{dna_move:.0f}% typical move")
+
+    if out["inside_demand_zone"]:
+        bits.append("stop sits INSIDE the demand zone - he refuses this outright")
+    elif out["pivot_sl_pct"] is not None and out["pivot_sl_pct"] <= width - p["SL_TIGHTER_BY_PCT"]:
+        bits.append(f"a structural stop under the demand candle would be "
+                    f"{out['pivot_sl_pct']:.1f}%")
+    out["verdict"] = "; ".join(bits)
+    return out
+
+
+def marking(frame: pd.DataFrame, entry: float | None = None,
+            stop: float | None = None, params: dict | None = None) -> dict:
+    """All three readings for one candidate. Flat dict, display only."""
+    out = {"dna_candle": None, "dna_move": None, "dna_legs": 0,
+           "turnover_cr": None, "avg_turnover_20": None, "turnover_spike": None,
+           "turnover_drift_pct": None, "liquidity_verdict": "no data",
+           "sl_pct": None, "sl_vs_dna": None, "pivot_low": None,
+           "pivot_sl_pct": None, "inside_demand_zone": None,
+           "sl_verdict": "not evaluated"}
+    if frame is None or len(frame) < 60:
+        return out
+
+    d = dna(frame["close"], params)
+    out["dna_candle"], out["dna_move"], out["dna_legs"] = (
+        d["dna_candle"], d["dna_move"], d["legs"])
+
+    liq = liquidity_marking(frame["close"], frame["volume"])
+    out["turnover_cr"] = liq["turnover_cr"]
+    out["avg_turnover_20"] = liq["avg_turnover_20"]
+    out["turnover_spike"] = liq["turnover_spike"]
+    out["turnover_drift_pct"] = liq["turnover_drift_pct"]
+    out["liquidity_verdict"] = liq["verdict"]
+
+    if entry is not None and stop is not None:
+        sl = stop_marking(frame, float(entry), float(stop), d["dna_move"], params)
+        out.update({k: sl[k] for k in ("sl_pct", "sl_vs_dna", "pivot_low",
+                                       "pivot_sl_pct", "inside_demand_zone")})
+        out["sl_verdict"] = sl["verdict"]
+    return out

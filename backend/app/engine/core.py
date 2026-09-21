@@ -12085,6 +12085,40 @@ def release_memory():
     return round(before - after, 1)
 
 
+# Three readings shown next to every candidate: what a normal move looks like
+# for this stock, whether money is arriving, and whether the stop it was given
+# is a good one for a stock that moves like this.
+#
+# DISPLAY ONLY, and that is not a disclaimer - it is the finding. Every
+# construction in this project that tried to RANK or GATE candidates on
+# measures like these failed out of sample (research/trader_methodology/
+# FINDINGS_DEEP.md), so these numbers go on the row and stop there. They do
+# not feed the score, they do not reorder anything, and they never change the
+# stop a forward test opens with.
+#
+# Fails silent: a marking that cannot be computed must never cost a candidate
+# its place in the scan.
+def _marking_fields(frame, entry, stop):
+    try:
+        from . import trader_layer
+        m = trader_layer.marking(frame, entry, stop)
+    except Exception:
+        return {}
+    return {
+        "DNA Candle %": m["dna_candle"],
+        "DNA Move %": m["dna_move"],
+        "Avg Turnover 20D Cr": m["avg_turnover_20"],
+        "Turnover x Avg": m["turnover_spike"],
+        "Turnover Trend %": m["turnover_drift_pct"],
+        "Liquidity Read": m["liquidity_verdict"],
+        "SL %": m["sl_pct"],
+        "SL vs DNA": m["sl_vs_dna"],
+        "Pivot SL %": m["pivot_sl_pct"],
+        "SL Inside Demand Zone": m["inside_demand_zone"],
+        "SL Read": m["sl_verdict"],
+    }
+
+
 def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     """The scan itself: every stock against every selected strategy.
 
@@ -12261,6 +12295,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             if pd.isna(win_prob):
                 win_prob = fallback_win_probability("INDIA", f"S{s}", float(score))
             row["Win Probability %"] = win_prob
+            row.update(_marking_fields(df, entry, stop))
             rows.append(row)
 
         if progress_cb:
