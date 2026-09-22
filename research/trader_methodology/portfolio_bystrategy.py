@@ -214,6 +214,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smallsl", default=os.path.join(HERE, "smallsl_all.csv"))
     ap.add_argument("--dnafirst", default=os.path.join(HERE, "dnafirst_500.csv"))
+    ap.add_argument("--dnaturnover", default=os.path.join(HERE, "dnaturnover_500.csv"))
+    ap.add_argument("--entry-only", action="store_true",
+                    help="just the entry comparison, skipping the stop arms")
     a = ap.parse_args()
 
     cal, days = calendar()
@@ -231,7 +234,7 @@ def main():
                f"(against {C.round_trip_pct(CAPITAL, C.SLIPPAGE[SLIPPAGE]):.3f}% at Rs 1 lakh - "
                f"the Rs 20 brokerage cap stops binding on a small slot).")
 
-    if os.path.exists(a.smallsl):
+    if os.path.exists(a.smallsl) and not a.entry_only:
         cols = ["symbol", "strategy", "date", "flat_ret", "flat_bars",
                 "pivot_ret", "pivot_bars", "pivot_sl_pct", "sl_vs_dna",
                 "turnover_spike", "inside_zone"]
@@ -247,7 +250,40 @@ def main():
         table("PIVOT_MK - his stop plus the marking gates",
               prepare(df, "pivot_ret", "pivot_bars", cal, mk), out)
 
-    if os.path.exists(a.dnafirst):
+    if os.path.exists(a.dnaturnover):
+        cols = ["symbol", "strategy", "date", "close_ret", "close_bars",
+                "piv5_ret", "piv5_bars", "piv10_ret", "piv10_bars",
+                "pivot_raw", "close_entry"]
+        d3 = pd.read_csv(a.dnaturnover, usecols=cols)
+        print(f"dnaturnover: {len(d3):,} signals", file=sys.stderr)
+        # Only signals that HAD a usable pivot, so the three entries are
+        # offered the same opportunities and the comparison is not between
+        # different populations. That confusion is what made the per-trade
+        # table misleading: E_PIVOT's average was computed over the 35% of
+        # signals where price came back, and the ones it never filled were
+        # the trades that ran away - worth +2.85% each on the close.
+        pool = d3[d3.pivot_raw.notna() & (d3.pivot_raw < d3.close_entry)]
+        table("E_CLOSE - buy the close (signals that had a pivot)",
+              prepare(pool, "close_ret", "close_bars", cal), out)
+        for w in (5, 10):
+            # An unfilled limit still ties up buying power while it rests, so
+            # it holds the slot for its wait period and then releases it with
+            # no P&L. Treating an unfilled order as free would hand this arm a
+            # slot-recycling advantage it does not have with a broker that
+            # blocks margin on a resting buy.
+            blocked = pool[pool[f"piv{w}_ret"].isna()].copy()
+            blocked["ret_pct"] = 0.0
+            blocked["bars"] = float(w)
+            taken = pool[pool[f"piv{w}_ret"].notna()].copy()
+            taken["ret_pct"] = taken[f"piv{w}_ret"]
+            taken["bars"] = taken[f"piv{w}_bars"]
+            both = pd.concat([taken, blocked], ignore_index=True)
+            table(f"E_PIVOT {w} bars - resting limit holds the slot while live",
+                  prepare(both, "ret_pct", "bars", cal), out)
+            table(f"E_PIVOT {w} bars - unfilled order costs nothing",
+                  prepare(taken, "ret_pct", "bars", cal), out)
+
+    if os.path.exists(a.dnafirst) and not a.entry_only:
         cols = ["symbol", "strategy", "date", "his_ret", "his_bars", "dna_move",
                 "dna_legs", "avg_turnover_20", "turnover_drift_pct",
                 "pivot_stop", "inside_zone"]
