@@ -1,0 +1,30 @@
+# The post-close run: sync candles, resolve forward tests, scan, record.
+# Oneshot - the timer decides when.
+[Unit]
+Description=ATI Lab daily job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@APP_USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=/etc/ati-lab/env
+Environment=GTF_DATA_DIR=@DATA_DIR@
+# /opt is read-only under ProtectSystem=strict, so every import would
+# otherwise try to write a .pyc, fail, and retry on the next start.
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@APP_DIR@/.venv/bin/python daily_job.py daily
+# A universe build can take hours; a daily top-up should not. If it is still
+# going after 90 minutes something is wrong and a stuck job must not block
+# tomorrow's.
+TimeoutStartSec=5400
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@
+
+[Install]
+WantedBy=multi-user.target

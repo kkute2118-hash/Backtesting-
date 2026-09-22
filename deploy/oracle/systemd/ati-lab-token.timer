@@ -1,0 +1,12 @@
+# 08:30 IST daily, an hour before the 09:15 open, so a fresh token is in place
+# before anything wants to quote a price.
+[Unit]
+Description=ATI Lab Dhan token renewal (daily, pre-open)
+
+[Timer]
+OnCalendar=*-*-* 08:30 Asia/Kolkata
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

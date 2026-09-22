@@ -1,0 +1,40 @@
+# The FastAPI backend. Placeholders are filled in by bootstrap.sh.
+[Unit]
+Description=ATI Lab API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=@APP_USER@
+WorkingDirectory=@APP_DIR@/backend
+EnvironmentFile=/etc/ati-lab/env
+# The database lives OUTSIDE the git checkout. Inside it, a deploy's `git
+# pull` or a stray committed file can overwrite or delete the live store -
+# both of which have happened on the previous host.
+Environment=GTF_DATA_DIR=@DATA_DIR@
+# /opt is read-only under ProtectSystem=strict, so every import would
+# otherwise try to write a .pyc, fail, and retry on the next start.
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Four cores, so more than one scan can run without them fighting. The old
+# value of 2 was sized for a 0.1-CPU instance.
+Environment=JOB_WORKERS=3
+# Nothing here needs the 512 MB-era tuning: 24 GB means the arena limit and
+# the small cache ceiling only cost speed now.
+Environment=CACHE_MAX_ENTRIES=4096
+ExecStart=@APP_DIR@/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+
+# The API listens on loopback only; Caddy is the thing facing the internet.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+# Dhan access tokens last 24 hours, so they are renewed from PIN + TOTP daily.
+# Separate from the daily job: if the token renewal fails, that is the thing
+# to see in the log, not a failure buried in a four-step run.
+[Unit]
+Description=ATI Lab Dhan token renewal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@APP_USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=/etc/ati-lab/env
+Environment=GTF_DATA_DIR=@DATA_DIR@
+# /opt is read-only under ProtectSystem=strict, so every import would
+# otherwise try to write a .pyc, fail, and retry on the next start.
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@APP_DIR@/.venv/bin/python daily_job.py token
+TimeoutStartSec=600
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@

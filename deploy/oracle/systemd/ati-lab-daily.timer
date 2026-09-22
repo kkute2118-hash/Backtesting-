@@ -1,0 +1,17 @@
+# 18:30 IST, weekdays. Well after the 15:30 close, so Dhan's end-of-day candle
+# for the session has been published.
+#
+# Persistent=true matters on a box that can be rebooted or reclaimed: a run
+# missed while the machine was down happens on the next boot instead of being
+# silently skipped, which is how a store quietly falls days behind.
+[Unit]
+Description=ATI Lab daily job (weekdays after the close)
+
+[Timer]
+OnCalendar=Mon-Fri 18:30 Asia/Kolkata
+Persistent=true
+# Spread the start a little so a restart storm does not hit Dhan at once.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

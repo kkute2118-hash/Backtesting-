@@ -1,0 +1,65 @@
+# Caddy config for the Oracle box. Copy to /etc/caddy/Caddyfile and replace
+# the hostname on the first line.
+#
+# ONE hostname serves both halves, which works because the two /api paths do
+# not collide:
+#
+#   /api/v1/*        the FastAPI backend   (the browser reads from here)
+#   /api/gateway/*   Next's own route      (mutations, it attaches the key)
+#   everything else  the Next.js app
+#
+# Same origin for both means no CORS preflight at all, and no second DNS
+# record or certificate.
+#
+# NO DOMAIN YET? Use a wildcard-DNS hostname so Caddy can still get a real
+# certificate - Let's Encrypt will not issue one for a bare IP:
+#
+#     203.0.113.10.nip.io
+#
+# Substitute your instance's public IP. Swap in a real domain later by editing
+# this line and NEXT_PUBLIC_API_URL in /etc/ati-lab/env.
+#
+# Plain HTTP, no certificate, for a first smoke test only:
+#     http://203.0.113.10 {
+
+your-host.example.com {
+	encode zstd gzip
+
+	# The backend. Loopback only, so nothing reaches uvicorn except through
+	# here - which is what lets the API bind 127.0.0.1 and stay off the
+	# internet directly.
+	handle /api/v1/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# A scan can run for minutes on a large universe; the default proxy
+	# timeouts would cut the response off partway.
+	handle /api/v1/scan* {
+		reverse_proxy 127.0.0.1:8000 {
+			transport http {
+				read_timeout 600s
+				write_timeout 600s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# Keep the browser from being talked into treating this as another origin's
+	# frame, and stop MIME sniffing. The app sets nothing else here.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/ati-lab.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

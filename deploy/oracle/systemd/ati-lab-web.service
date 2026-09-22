@@ -1,0 +1,35 @@
+# The Next.js frontend.
+#
+# It talks to the API two different ways and both have to be right:
+#   - reads go from the BROWSER to NEXT_PUBLIC_API_URL, so that must be the
+#     public hostname (Caddy routes /api/v1 to the backend);
+#   - mutations go through the Next server-side gateway, which uses
+#     API_BACKEND_URL and attaches API_ACCESS_KEY - that one stays on
+#     loopback so the key never leaves the box.
+[Unit]
+Description=ATI Lab web
+After=network-online.target ati-lab-api.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=@APP_USER@
+WorkingDirectory=@APP_DIR@/frontend
+EnvironmentFile=/etc/ati-lab/env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=API_BACKEND_URL=http://127.0.0.1:8000
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@/frontend/.next
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
