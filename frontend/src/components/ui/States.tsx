@@ -77,16 +77,19 @@ export function ErrorState({
   compact?: boolean;
 }) {
   const apiError = error instanceof ApiError ? error : null;
-  const isNetwork = apiError?.code === "network_error";
+  const isNetwork = apiError?.code === "network_error" || apiError?.code === "server_unavailable";
+  const isDhan = apiError?.code === "dhan_access";
   const isConfig = apiError?.isNotConfigured ?? false;
 
-  const Icon = isNetwork ? WifiOff : isConfig ? Settings2 : AlertTriangle;
-  const tone = isConfig ? "text-warn" : "text-down";
+  const Icon = isNetwork ? WifiOff : isConfig || isDhan ? Settings2 : AlertTriangle;
+  const tone = isConfig || isDhan ? "text-warn" : "text-down";
   const title = isNetwork
     ? "Cannot reach the server"
     : isConfig
       ? "Not configured yet"
-      : "Something went wrong";
+      : isDhan
+        ? "Dhan refused the request"
+        : "Something went wrong";
   const message =
     apiError?.message ??
     (error instanceof Error ? error.message : "An unexpected error occurred.");

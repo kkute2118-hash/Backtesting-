@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from app.core.errors import ApiError, NotConfigured
+from app.core.errors import ApiError, NotConfigured, UpstreamError
 from app.engine import core
 from app.services import bootstrap, jobs
 from app.services.jobs import JobHandle
@@ -79,6 +79,10 @@ def sync_latest(universes: list[str], tail_days: int | None = None) -> dict[str,
         summary = core.sync_latest_sessions(
             tickers, tail_days=days,
             progress_cb=lambda f: handle.progress(min(0.99, float(f)), "Downloading"))
+        if (summary or {}).get("aborted"):
+            # Dhan refused the account itself; nothing was downloaded, so there
+            # is nothing to back up and "succeeded" would be a lie.
+            raise UpstreamError(summary["aborted"])
 
         # Candles just cost real Dhan rate limit to fetch. On a host with no
         # persistent disk they are gone at the next restart unless pushed now.
@@ -107,6 +111,11 @@ def sync_full(universes: list[str], period: str = "2 Years") -> dict[str, Any]:
     def work(handle: JobHandle) -> dict[str, Any]:
         handle.progress(0.02, f"Filling missing history for {len(tickers):,} stocks")
         data = core.sync_missing_backtest_data(tickers, start, end)
+        # download_prices() replaces this list per run, so a hit is from this one.
+        access = next((e for e in (core._DHAN_LAST_DATA_ERRORS or [])
+                       if "DH-901" in str(e) or "DH-902" in str(e)), None)
+        if access:
+            raise UpstreamError(str(access).split(": ", 1)[-1])
         handle.progress(0.9, "Recording diagnostics")
         try:
             core.compute_and_store_sync_diagnostics(tickers)

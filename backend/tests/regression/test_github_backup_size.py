@@ -69,7 +69,7 @@ class Stub:
         self.files = {}
         self.rejected_too_large = False
 
-    def get(self, url, headers=None, timeout=None, params=None):
+    def get(self, url, headers=None, timeout=None, params=None, stream=False):
         path = url.split("/contents/", 1)[1]
         body = self.files.get(path)
         if body is None:
@@ -81,9 +81,13 @@ class Stub:
         content = "" if len(body) > self.JSON_READ_LIMIT else b64.b64encode(body).decode()
         return Resp(200, js.dumps({"content": content, "sha": "abc", "size": len(body)}).encode())
 
-    def put(self, url, headers=None, json=None, timeout=None):
+    def put(self, url, headers=None, json=None, data=None, timeout=None):
         import base64 as b64
         path = url.split("/contents/", 1)[1]
+        if json is None:
+            # The backup streams its body from a file rather than passing json=.
+            import json as js
+            json = js.loads(data.read() if hasattr(data, "read") else data)
         body = b64.b64decode(json["content"])
         if len(body) > self.WRITE_LIMIT:
             self.rejected_too_large = True
@@ -103,6 +107,17 @@ class Resp:
     def json(self):
         import json as js
         return js.loads(self.content)
+
+    # What the streamed download uses.
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, chunk_size=1):
+        for i in range(0, len(self.content), chunk_size):
+            yield self.content[i:i + chunk_size]
 
 
 stub = Stub()
@@ -134,8 +149,26 @@ os.remove(core.DATA_DB)
 check("the restore succeeds", core.restore_db_from_github())
 with open(core.DATA_DB, "rb") as f:
     restored = f.read()
-check("the restored file is byte-identical", restored == original,
-      f"{len(restored):,} vs {len(original):,} bytes")
+# The backup is a consistent SQLite snapshot (the online-backup API), not a raw
+# read of a file a sync may be writing, so its header bytes can differ from the
+# live file's. What must hold: the transport is lossless, and the data is equal.
+check("the restored file is exactly what was stored", restored == gzip.decompress(stored),
+      f"{len(restored):,} vs {len(gzip.decompress(stored)):,} bytes")
+
+
+def dump(path):
+    con = sqlite3.connect(path)
+    try:
+        return list(con.iterdump())
+    finally:
+        con.close()
+
+
+_orig_path = core.DATA_DB + ".original"
+with open(_orig_path, "wb") as f:
+    f.write(original)
+check("the restored database holds identical data", dump(core.DATA_DB) == dump(_orig_path))
+os.remove(_orig_path)
 
 con = sqlite3.connect(core.DATA_DB)
 rows = con.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
@@ -161,12 +194,12 @@ class FlakyStub(Stub):
         self.failures_left = failures
         self.attempts = 0
 
-    def put(self, url, headers=None, json=None, timeout=None):
+    def put(self, url, headers=None, json=None, data=None, timeout=None):
         self.attempts += 1
         if self.failures_left > 0:
             self.failures_left -= 1
             return Resp(502, b'{"message":"Server Error"}')
-        return super().put(url, headers=headers, json=json, timeout=timeout)
+        return super().put(url, headers=headers, json=json, data=data, timeout=timeout)
 
 
 core.time.sleep = lambda seconds: None      # do not actually back off in a test
@@ -202,12 +235,12 @@ class Throttled(Stub):
         self.failures_left = failures
         self.attempts = 0
 
-    def put(self, url, headers=None, json=None, timeout=None):
+    def put(self, url, headers=None, json=None, data=None, timeout=None):
         self.attempts += 1
         if self.failures_left > 0:
             self.failures_left -= 1
             return Resp(403, self.BODY)
-        return super().put(url, headers=headers, json=json, timeout=timeout)
+        return super().put(url, headers=headers, json=json, data=data, timeout=timeout)
 
 
 throttled = Throttled(failures=1)
@@ -241,7 +274,7 @@ class Denied(Stub):
         super().__init__()
         self.attempts = 0
 
-    def put(self, url, headers=None, json=None, timeout=None):
+    def put(self, url, headers=None, json=None, data=None, timeout=None):
         self.attempts += 1
         return Resp(403, b'{"message":"Resource not accessible by personal access token"}')
 

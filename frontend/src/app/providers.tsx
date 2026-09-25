@@ -7,6 +7,18 @@ import { Toaster } from "sonner";
 
 import { ApiError, pingHealth } from "@/lib/api";
 
+/**
+ * True when the failure came from the hosting layer rather than the API.
+ *
+ * Status 0 is a request that never got an answer (a sleeping or restarting
+ * instance, whose proxy page carries no CORS headers). A 502-504 WITHOUT the
+ * backend's error envelope - code "error" - is Render's own gateway page.
+ */
+function isServerAbsent(error: ApiError): boolean {
+  if (error.status === 0) return true;
+  return [502, 503, 504].includes(error.status) && error.code === "error";
+}
+
 export function Providers({ children }: { children: ReactNode }) {
   const [client] = useState(
     () =>
@@ -21,8 +33,19 @@ export function Providers({ children }: { children: ReactNode }) {
               if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
                 return false;
               }
+              // The server itself is not there yet: Render is waking it from
+              // sleep, or restarting it, which takes 40-60 seconds. The old two
+              // quick retries gave up after ~3s and showed "cannot reach" for a
+              // server that answered moments later. Wait it out instead. A 5xx
+              // in the backend's own envelope (a Dhan refusal, a missing
+              // setting) is a real answer and keeps the short budget.
+              if (error instanceof ApiError && isServerAbsent(error)) {
+                return failureCount < 6;
+              }
               return failureCount < 2;
             },
+            // 1s, 2s, 4s, 8s, 15s, 15s: about 45s in all, the span of a wake-up.
+            retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 15_000),
           },
           mutations: { retry: false },
         },

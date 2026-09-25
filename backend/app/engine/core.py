@@ -364,6 +364,24 @@ GITHUB_BACKUP_PATH_GZ = GITHUB_BACKUP_PATH + ".gz"
 # in backup_db_to_github().
 GITHUB_UPLOAD_ATTEMPTS = 3
 
+# The largest compressed backup worth offering to the contents API. GitHub
+# rejected a 48.8 MB one with "422 Sorry, the file is too large to be
+# processed", after the upload had been built and sent in full - and building
+# it in memory is what OOM-killed the 512 MB web instance. Above this the app
+# declines up front and leaves the candle store to the scheduled workflows,
+# which push the same file with git (scripts/push_backup.sh), where the limit
+# does not apply.
+GITHUB_CONTENTS_MAX_BYTES = int(float(os.environ.get("GITHUB_CONTENTS_MAX_MB", "35")) * 1_048_576)
+
+# Compressed/raw size of the last backup this process built. A database that
+# was too big to store last time is too big now unless it shrank, and finding
+# that out again costs a full snapshot and gzip of it - after every sync.
+_LAST_BACKUP_RATIO = None
+
+# Block size for every streamed copy below. A multiple of 3, so base64 of each
+# block concatenates to base64 of the whole.
+_STREAM_BLOCK = 3 * (1 << 20)
+
 
 # GitHub refuses to create any Actions secret or repository variable whose name
 # starts with "GITHUB_" — the prefix is reserved. The original setting names all
@@ -572,6 +590,58 @@ def db_row_count(path=None):
         return -1
 
 
+def _snapshot_db(dest):
+    """A consistent copy of DATA_DB at `dest`, via SQLite's online backup.
+
+    Reading the file directly while a sync writes to it can capture half a
+    transaction; the backup API copies page by page under SQLite's own locking.
+    """
+    src = sqlite3.connect(DATA_DB, timeout=60)
+    try:
+        dst = sqlite3.connect(dest)
+        try:
+            src.backup(dst, pages=4096)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def _gzip_file(src, dest, compresslevel=6):
+    with open(src, "rb") as fin, gzip.open(dest, "wb", compresslevel=compresslevel) as fout:
+        shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+
+
+def _write_contents_body(dest, fields, content_path):
+    """Write a contents-API JSON body whose "content" is base64 of a file.
+
+    The obvious version - read, b64encode, decode, json= - holds the file four
+    or five times over at once. This streams it, so memory stays at one block
+    whatever the file size.
+    """
+    head = json.dumps(fields)[:-1]  # drop the closing brace; content goes last
+    with open(dest, "wb") as out, open(content_path, "rb") as fin:
+        out.write(head.encode())
+        out.write(b', "content": "' if fields else b'"content": "')
+        while True:
+            block = fin.read(_STREAM_BLOCK)
+            if not block:
+                break
+            out.write(base64.b64encode(block))
+        out.write(b'"}')
+
+
+def _download_to(url, dest, headers, params=None, timeout=120):
+    """Stream a GET to `dest`. Returns (status, error_text); text only on failure."""
+    with requests.get(url, headers=headers, params=params, timeout=timeout, stream=True) as r:
+        if r.status_code != 200:
+            return r.status_code, r.text
+        with open(dest, "wb") as f:
+            for block in r.iter_content(chunk_size=1 << 20):
+                f.write(block)
+    return 200, ""
+
+
 def restore_db_from_github(force=False):
     """Pull the last backup from GitHub into the local database.
 
@@ -618,26 +688,38 @@ def restore_db_from_github(force=False):
         # gzipping existed would still be sitting at.
         for path, gzipped in ((GITHUB_BACKUP_PATH_GZ, True), (GITHUB_BACKUP_PATH, False)):
             url = f"https://api.github.com/repos/{repo}/contents/{path}"
-            # Raw bytes, not the JSON wrapper: above 1 MB GitHub returns the
-            # JSON with an empty content field and a 200, which used to write a
-            # zero-byte database over a perfectly good empty one.
-            r = requests.get(url, headers=_github_raw_headers(), timeout=120, params=params)
-            if r.status_code != 200:
-                last_status, last_body = r.status_code, r.text
-                continue
-
-            raw = gzip.decompress(r.content) if gzipped else r.content
-            if not raw:
-                last_status, last_body = 200, f"{path} is empty"
-                continue
-
             # Write beside the target and move into place, so an interrupted
             # download cannot leave a half-written database behind.
             tmp = f"{DATA_DB}.restore-tmp"
-            with open(tmp, "wb") as f:
-                f.write(raw)
-            os.replace(tmp, DATA_DB)
-            return True
+            dl = f"{tmp}.download"
+            try:
+                # Raw bytes, not the JSON wrapper: above 1 MB GitHub returns the
+                # JSON with an empty content field and a 200, which used to write
+                # a zero-byte database over a perfectly good empty one.
+                # Streamed to disk and decompressed from there: holding the 50 MB
+                # download and the 160 MB database in memory together is a third
+                # of the instance, on the cold start where everything else loads.
+                status, body = _download_to(url, dl, _github_raw_headers(), params=params)
+                if status != 200:
+                    last_status, last_body = status, body
+                    continue
+                if gzipped:
+                    with gzip.open(dl, "rb") as fin, open(tmp, "wb") as fout:
+                        shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+                else:
+                    os.replace(dl, tmp)
+                if os.path.getsize(tmp) == 0:
+                    last_status, last_body = 200, f"{path} is empty"
+                    continue
+                os.replace(tmp, DATA_DB)
+                return True
+            finally:
+                for leftover in (dl, tmp):
+                    try:
+                        if os.path.exists(leftover):
+                            os.remove(leftover)
+                    except OSError:
+                        pass
 
         # Nothing to restore. Record why so the Data Manager and the scheduled
         # job can report it instead of silently starting from an empty database.
@@ -655,7 +737,7 @@ def backup_db_to_github(return_reason=False):
     response entirely, so a wrong repo name, an expired token and a missing
     branch were all indistinguishable from each other — and from success.
     """
-    global _GITHUB_LAST_ERROR
+    global _GITHUB_LAST_ERROR, _LAST_BACKUP_RATIO
 
     def done(ok, reason=""):
         global _GITHUB_LAST_ERROR
@@ -683,66 +765,97 @@ def backup_db_to_github(return_reason=False):
                 return done(False, msg)
             note = msg
 
+        live_bytes = os.path.getsize(DATA_DB)
+        if _LAST_BACKUP_RATIO and live_bytes * _LAST_BACKUP_RATIO > GITHUB_CONTENTS_MAX_BYTES * 1.1:
+            est_mb = live_bytes * _LAST_BACKUP_RATIO / 1_048_576
+            return done(False, (
+                f"Skipped: the database would be about {est_mb:.0f} MB compressed, larger "
+                f"than GitHub's contents API will store (limit here "
+                f"{GITHUB_CONTENTS_MAX_BYTES / 1_048_576:.0f} MB). The candle store is backed "
+                "up by the scheduled GitHub Actions jobs instead, which push it with git; "
+                "forward tests and learning are covered by the small learning backup."))
+
         url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH_GZ}"
-        # Compressed, because the raw file is not storable past a certain size:
-        # GitHub answers a large upload with "422 Sorry, the file is too large
-        # to be processed", which is what the first full history build hit. The
-        # candle store compresses several-fold, so this is the difference
-        # between a backup that exists and one that does not.
-        with open(DATA_DB, "rb") as f:
-            packed = gzip.compress(f.read(), compresslevel=6)
-        content_b64 = base64.b64encode(packed).decode()
+        with tempfile.TemporaryDirectory(prefix="db-backup-",
+                                         dir=os.path.dirname(DATA_DB) or None) as work:
+            snap = os.path.join(work, "snapshot.sqlite3")
+            packed_path = os.path.join(work, "snapshot.sqlite3.gz")
+            body_path = os.path.join(work, "body.json")
 
-        # Need the current file's SHA if it already exists, else GitHub
-        # rejects the update as a conflicting create.
-        sha = None
-        r = requests.get(url, headers=_github_headers(), timeout=30,
-                         params={"ref": branch} if branch else None)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-        elif r.status_code in (401, 403):
-            return done(False, _github_error_hint(r.status_code, r.text))
+            # Compressed, because the raw file is not storable past a certain
+            # size: GitHub answers a large upload with "422 Sorry, the file is
+            # too large to be processed". Everything below goes through files,
+            # never whole-file bytes: the in-memory version held the database
+            # about five times over and OOM-killed the 512 MB instance.
+            _snapshot_db(snap)
+            raw_mb = os.path.getsize(snap) / 1_048_576
+            _gzip_file(snap, packed_path)
+            os.remove(snap)
+            packed_bytes = os.path.getsize(packed_path)
+            packed_mb = packed_bytes / 1_048_576
+            if raw_mb > 0:
+                _LAST_BACKUP_RATIO = packed_bytes / (raw_mb * 1_048_576)
 
-        payload = {
-            "message": f"Auto-backup DB {datetime.now().isoformat(timespec='seconds')}",
-            "content": content_b64,
-        }
-        if sha:
-            payload["sha"] = sha
-        if branch:
-            payload["branch"] = branch
+            if packed_bytes > GITHUB_CONTENTS_MAX_BYTES:
+                return done(False, (
+                    f"Skipped: the database is {packed_mb:.1f} MB compressed "
+                    f"({raw_mb:.0f} MB raw), larger than GitHub's contents API will store "
+                    f"(limit here {GITHUB_CONTENTS_MAX_BYTES / 1_048_576:.0f} MB). The candle "
+                    "store is backed up by the scheduled GitHub Actions jobs instead, which "
+                    "push it with git; forward tests and learning are covered by the small "
+                    "learning backup."))
 
-        # GitHub answers a multi-megabyte upload with a 502 often enough to
-        # matter: one did, and it cost a full scan — the day's forward-test
-        # candidates went into a container that was discarded a second later.
-        # A transient server error is worth retrying; a 4xx never is, because
-        # nothing about waiting makes a bad token or a too-large file valid.
-        put_r = None
-        for attempt in range(1, GITHUB_UPLOAD_ATTEMPTS + 1):
-            put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=300)
-            retryable = put_r.status_code >= 500 or _github_is_throttled(put_r.status_code,
-                                                                        put_r.text)
-            if not retryable or attempt == GITHUB_UPLOAD_ATTEMPTS:
-                break
-            # GitHub says how long to wait when it is throttling; believe it.
-            backoff = min(60, 2 ** attempt)
-            for header in ("Retry-After", "X-RateLimit-Reset"):
-                try:
-                    hinted = float(put_r.headers.get(header, "") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if header == "X-RateLimit-Reset" and hinted > 1_000_000_000:
-                    hinted -= time.time()          # it is an epoch, not a duration
-                if hinted > 0:
-                    backoff = max(backoff, min(120.0, hinted))
+            # Need the current file's SHA if it already exists, else GitHub
+            # rejects the update as a conflicting create.
+            sha = None
+            r = requests.get(url, headers=_github_headers(), timeout=30,
+                             params={"ref": branch} if branch else None)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+            elif r.status_code in (401, 403):
+                return done(False, _github_error_hint(r.status_code, r.text))
+
+            fields = {"message": f"Auto-backup DB {datetime.now().isoformat(timespec='seconds')}"}
+            if sha:
+                fields["sha"] = sha
+            if branch:
+                fields["branch"] = branch
+            _write_contents_body(body_path, fields, packed_path)
+            os.remove(packed_path)
+
+            headers = dict(_github_headers(), **{"Content-Type": "application/json"})
+            # GitHub answers a multi-megabyte upload with a 502 often enough to
+            # matter: one did, and it cost a full scan — the day's forward-test
+            # candidates went into a container that was discarded a second later.
+            # A transient server error is worth retrying; a 4xx never is, because
+            # nothing about waiting makes a bad token or a too-large file valid.
+            put_r = None
+            for attempt in range(1, GITHUB_UPLOAD_ATTEMPTS + 1):
+                # A file object with a known size: requests streams it with a
+                # Content-Length instead of reading it into memory.
+                with open(body_path, "rb") as body:
+                    put_r = requests.put(url, headers=headers, data=body, timeout=300)
+                retryable = put_r.status_code >= 500 or _github_is_throttled(put_r.status_code,
+                                                                            put_r.text)
+                if not retryable or attempt == GITHUB_UPLOAD_ATTEMPTS:
                     break
-            time.sleep(backoff)
+                # GitHub says how long to wait when it is throttling; believe it.
+                backoff = min(60, 2 ** attempt)
+                for header in ("Retry-After", "X-RateLimit-Reset"):
+                    try:
+                        hinted = float(put_r.headers.get(header, "") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if header == "X-RateLimit-Reset" and hinted > 1_000_000_000:
+                        hinted -= time.time()          # it is an epoch, not a duration
+                    if hinted > 0:
+                        backoff = max(backoff, min(120.0, hinted))
+                        break
+                time.sleep(backoff)
         if put_r.status_code in (200, 201):
-            mb = os.path.getsize(DATA_DB) / 1_048_576
-            packed_mb = len(packed) / 1_048_576
             where = f"{repo}@{branch or 'default branch'}:{GITHUB_BACKUP_PATH_GZ}"
             return done(True, (note + " " if note else "")
-                              + f"Backed up {mb:.1f} MB ({packed_mb:.1f} MB compressed) to {where}.")
+                              + f"Backed up {raw_mb:.1f} MB ({packed_mb:.1f} MB compressed) to {where}.")
         return done(False, _github_error_hint(put_r.status_code, put_r.text))
     except Exception as exc:
         return done(False, f"{type(exc).__name__}: {exc}")
@@ -1132,6 +1245,36 @@ _DHAN_NO_DATA_LOCK=threading.Lock()
 
 class DhanNoDataError(RuntimeError):
     """Dhan answered DH-907: no candles exist in the requested date range."""
+
+
+class DhanAccessError(RuntimeError):
+    """Dhan refused the ACCOUNT, not the request: every symbol will fail alike.
+
+    DH-901 is an invalid or expired access token; DH-902 is an account without
+    an active Data API subscription. Neither is fixed by retrying, or by asking
+    for a different stock, so a 500-symbol sync that meets one should stop at
+    the first and say so - not spend two minutes collecting 500 copies of it.
+    """
+
+
+# Dhan's words are accurate but not actionable; these say what to do.
+_DHAN_ACCESS_HINTS = {
+    "DH-901": ("The Dhan access token is invalid or expired. Use Data Manager → "
+               "Renew token (needs DHAN_PIN and DHAN_TOTP_SECRET), or paste a fresh "
+               "DHAN_ACCESS_TOKEN into the backend environment."),
+    "DH-902": ("Your Dhan account does not have an active Data API subscription, so "
+               "Dhan refuses every historical and quote request. Renew the Data API "
+               "plan in Dhan (web.dhan.co → My Profile → DhanHQ Trading APIs), then "
+               "retry. The stored candles and the GitHub backup still work meanwhile."),
+}
+
+
+def _dhan_access_error(text):
+    """A DhanAccessError for an account-level refusal in `text`, else None."""
+    for code, hint in _DHAN_ACCESS_HINTS.items():
+        if code in str(text):
+            return DhanAccessError(f"{code}: {hint}")
+    return None
 
 
 def _note_no_data(symbol,start_date,end_date,scope):
@@ -1534,16 +1677,70 @@ def _startup_restore_learning():
 _startup_restore_learning()
 
 
-@st.cache_data(ttl=86400,show_spinner=False)
+# The only scrip-master columns anything reads (dhan_map, dhan_index_map and
+# the stock page's name lookup), lower-cased. The file has ~16 columns and
+# ~250k rows, almost all of them derivatives; loaded whole it cost 100-200 MB
+# of a 512 MB instance, and stayed resident for the day.
+_DHAN_MASTER_COLUMNS = {
+    "sem_trading_symbol", "trading_symbol", "sem_custom_symbol", "custom_symbol",
+    "sem_smst_security_id", "sem_security_id", "security_id",
+    "sem_exm_exch_id", "exchange", "sem_segment", "segment",
+    "sem_instrument_name", "instrument", "sem_exch_instrument_type", "sm_symbol_name",
+}
+# Rows worth keeping: cash equity (dhan_map) and indices (dhan_index_map).
+_DHAN_MASTER_SEGMENTS = {"E", "EQUITY", "NSE_EQ", "I", "INDEX", "IDX_I"}
+_DHAN_MASTER_INSTRUMENTS = {"EQUITY", "INDEX", "IDX", "I"}
+
+
+def _dhan_master_rows(chunk):
+    """Keep equity and index rows; derivatives, currency and commodity go."""
+    cols = {str(c).strip().lower(): c for c in chunk.columns}
+    keep = None
+    seg = cols.get("sem_segment") or cols.get("segment")
+    if seg is not None:
+        keep = chunk[seg].astype(str).str.upper().str.strip().isin(_DHAN_MASTER_SEGMENTS)
+    for name in ("sem_instrument_name", "instrument", "sem_exch_instrument_type"):
+        ins = cols.get(name)
+        if ins is not None:
+            hit = chunk[ins].astype(str).str.upper().str.strip().isin(_DHAN_MASTER_INSTRUMENTS)
+            keep = hit if keep is None else (keep | hit)
+    return chunk if keep is None else chunk[keep]
+
+
+# cache_resource, not cache_data: cache_data hands every caller a fresh copy of
+# the frame, and the stock page asks for it on every view. No caller mutates it.
+@st.cache_resource(ttl=86400,show_spinner=False,max_entries=1)
 def dhan_master():
     urls=["https://images.dhan.co/api-data/api-scrip-master.csv",
           "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"]
     last=""
     for u in urls:
+        tmp=None
         try:
-            r=requests.get(u,timeout=45); r.raise_for_status()
-            if len(r.content)>1000:return pd.read_csv(io.BytesIO(r.content),low_memory=False)
+            # Streamed to disk rather than held as bytes: the raw CSV is tens of
+            # megabytes, and parsing it from memory doubled that at the peak.
+            with requests.get(u,timeout=45,stream=True) as r:
+                r.raise_for_status()
+                with tempfile.NamedTemporaryFile(prefix="dhan-master-",suffix=".csv",
+                                                 delete=False) as f:
+                    tmp=f.name
+                    for block in r.iter_content(chunk_size=1<<20):
+                        f.write(block)
+            if os.path.getsize(tmp)<=1000:
+                last=f"{u} returned an empty file"
+                continue
+            parts=[_dhan_master_rows(c) for c in pd.read_csv(
+                tmp,usecols=lambda c:str(c).strip().lower() in _DHAN_MASTER_COLUMNS,
+                dtype=str,chunksize=50_000)]
+            m=pd.concat(parts,ignore_index=True) if parts else pd.DataFrame()
+            if not m.empty:
+                return m
+            last=f"{u} held no equity or index rows"
         except Exception as e:last=str(e)
+        finally:
+            if tmp:
+                try:os.remove(tmp)
+                except OSError:pass
     raise RuntimeError("Dhan instrument master failed: "+last)
 
 @st.cache_data(ttl=86400,show_spinner=False)
@@ -2264,6 +2461,9 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
         # gets its own type instead of being reported as a build failure.
         if "DH-907" in r.text:
             raise DhanNoDataError(last_error)
+        access = _dhan_access_error(r.text)
+        if access is not None:
+            raise access
         if r.status_code in DHAN_RETRY_STATUSES or "DH-904" in r.text:
             backoff = min(8, 2 ** attempt)
             # Dhan does not always send Retry-After, but when it does it is
@@ -2488,10 +2688,17 @@ def download_prices(tickers,start,end,max_workers=4,refresh_tail_days=0):
     errors=[]
     workers=max(1,min(int(max_workers),5))
 
+    aborted=[]  # first DH-901/DH-902: the rest would fail identically
+
     def worker(symbol):
+        if aborted:
+            return symbol,0,None
         try:
             saved=update_dhan_symbol(symbol,start,end,refresh_tail_days=refresh_tail_days)
             return symbol,saved,None
+        except DhanAccessError as exc:
+            aborted.append(str(exc))
+            return symbol,0,str(exc)
         except Exception as exc:
             return symbol,0,str(exc)
 
@@ -9297,12 +9504,20 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
     updated = 0
     workers = max(1, min(int(max_workers), 5))
     done = 0
+    # Set on the first account-level refusal (DH-901/DH-902). Every remaining
+    # symbol would fail identically, so the rest are skipped, not requested.
+    aborted = []
 
     def worker(symbol):
+        if aborted:
+            return symbol, 0, None
         try:
             # tail refresh, so a candle stored mid-session is corrected once the
             # real close is published rather than being trusted forever.
             return symbol, update_dhan_symbol(symbol, start, end, refresh_tail_days=int(tail_days)), None
+        except DhanAccessError as exc:
+            aborted.append(str(exc))
+            return symbol, 0, str(exc)
         except Exception as exc:
             return symbol, 0, str(exc)
 
@@ -9344,7 +9559,8 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
 
     return {"symbols": len(symbols), "updated": updated, "latest": newest,
             "errors": errors[:20], "advanced": advanced,
-            "no_data": len(_DHAN_LAST_NO_DATA)}
+            "no_data": len(_DHAN_LAST_NO_DATA),
+            "aborted": aborted[0] if aborted else ""}
 
 
 def dhan_history_floor_table():
