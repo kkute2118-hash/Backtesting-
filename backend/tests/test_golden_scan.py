@@ -119,7 +119,8 @@ def test_every_strategy_fires_somewhere_in_the_census():
     census = load_golden("strategy_signal_census.json")
     seen = {k.split("|")[1] for k in census}
     from app.engine import core
-    expected = {f"S{s}" for s in core.IMPLEMENTED_STRATEGIES}
+    from tests.golden.conftest_helpers import GOLDEN_STRATEGIES
+    expected = {f"S{s}" for s in GOLDEN_STRATEGIES}
     assert seen == expected, f"missing from the census: {sorted(expected - seen)}"
     assert sum(v["count"] for v in census.values()) > 20000
 

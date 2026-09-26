@@ -21,13 +21,22 @@ class ScanRequest(BaseModel):
     @classmethod
     def _known_strategies(cls, value: list[int]) -> list[int]:
         known = core.IMPLEMENTED_STRATEGIES
-        bad = [s for s in value if s not in known]
+        retired = set(core.RETIRED_STRATEGIES)
+        bad = [s for s in value if s not in known and s not in retired]
         if bad:
             raise ValueError(
-                f"Unknown strategy: {bad}. The engine implements "
-                f"{min(known)}-{max(known)}."
+                f"Unknown strategy: {bad}. The scanner offers "
+                f"{', '.join(f'S{s}' for s in known)}."
             )
-        return sorted(set(value))
+        # A preset saved before S1-S3 were retired still names them. Drop them
+        # rather than fail the scan, as long as something scannable is left.
+        kept = sorted({s for s in value if s in known})
+        if not kept:
+            raise ValueError(
+                f"S1-S3 are retired. Choose from "
+                f"{', '.join(f'S{s}' for s in known)}."
+            )
+        return kept
 
 
 class SepaRequest(BaseModel):

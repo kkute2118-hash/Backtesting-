@@ -886,13 +886,15 @@ def test_the_filter_can_be_turned_off_for_measurement():
 
 
 def test_each_strategy_has_a_rule_and_only_s4_uses_the_sector_one():
-    assert set(core.ENTRY_FILTER_BY_STRATEGY) == set(core.IMPLEMENTED_STRATEGIES)
+    assert set(core.ENTRY_FILTER_BY_STRATEGY) == (set(core.IMPLEMENTED_STRATEGIES)
+                                                  | set(core.RETIRED_STRATEGIES))
     sector_rules = {s for s, r in core.ENTRY_FILTER_BY_STRATEGY.items() if r == "sector"}
     assert sector_rules == {4}
 
 
 def test_the_default_portfolio_is_the_measured_best_one():
-    assert tuple(core.DEFAULT_STRATEGIES) == (4, 5)
+    # S4 + S5 is the measured best pair; S6 joined as the breadth breakout.
+    assert tuple(core.DEFAULT_STRATEGIES) == (4, 5, 6)
     for s in core.DEFAULT_STRATEGIES:
         assert s in core.IMPLEMENTED_STRATEGIES
 

@@ -58,12 +58,12 @@ def _build_config() -> dict[str, Any]:
     return {
         "providers": market.provider_status(),
         "universes": core.UNIVERSE_CHOICES,
+        # The scanner's three strategies. S1-S3 are retired (see the engine's
+        # RETIRED_STRATEGIES) and no longer offered.
         "strategies": [
-            {"id": 1, "label": "S1", "name": "Monthly base continuation"},
-            {"id": 2, "label": "S2", "name": "Tight pullback in an uptrend"},
-            {"id": 3, "label": "S3", "name": "Liquid pullback to EMA50"},
             {"id": 4, "label": "S4_SEPA", "name": "SEPA stage analysis"},
             {"id": 5, "label": "S5_POCKETPIVOT", "name": "Pocket pivot (O'Neil disciple)"},
+            {"id": 6, "label": core.S6_LABEL, "name": "50-day breakout with market breadth"},
         ],
         "default_strategies": list(core.DEFAULT_STRATEGIES),
         "forward_gate_default": 85,

@@ -46,7 +46,7 @@ def test_missing_credentials_answer_503_not_500(client):
 
 def test_unknown_universe_is_rejected_with_its_name(client):
     response = client.post("/api/v1/scanner/runs",
-                           json={"universes": ["Nifty 9000"], "strategies": [1]})
+                           json={"universes": ["Nifty 9000"], "strategies": [4]})
     assert response.status_code == 400
     assert "Nifty 9000" in response.json()["error"]["message"]
 
@@ -55,6 +55,15 @@ def test_unknown_strategy_is_rejected(client):
     response = client.post("/api/v1/scanner/runs",
                            json={"universes": ["Nifty 500"], "strategies": [7]})
     assert response.status_code == 422
+
+
+def test_retired_strategies_are_dropped_not_rejected():
+    """A preset saved before S1-S3 were retired must still scan."""
+    from pydantic import ValidationError
+    from app.schemas.scanner import ScanRequest
+    assert ScanRequest(strategies=[1, 2, 4, 6]).strategies == [4, 6]
+    with pytest.raises(ValidationError):
+        ScanRequest(strategies=[1, 3])
 
 
 def test_unknown_job_is_a_404(client):
@@ -73,7 +82,7 @@ def scan_run(client, monkeypatch, frames):
     monkeypatch.setattr(scanner, "resolve", lambda names: sorted(frames))
 
     started = client.post("/api/v1/scanner/runs",
-                          json={"universes": ["Nifty 500"], "strategies": [1, 2, 3, 4],
+                          json={"universes": ["Nifty 500"], "strategies": [4, 5, 6],
                                 "min_score": 0})
     assert started.status_code == 202
     job = _wait(client, started.json()["id"])
@@ -197,10 +206,10 @@ def test_preset_validation_rejects_options_the_engine_has_no_screen_for(client):
     response = client.post("/api/v1/presets", json={
         "name": "Bad", "config": {"universes": ["Nifty 500"], "strategies": [9]}})
     assert response.status_code == 400
-    assert "strategies 1-5" in response.json()["error"]["message"]
+    assert "S4, S5, S6" in response.json()["error"]["message"]
 
     response = client.post("/api/v1/presets", json={
-        "name": "Bad", "config": {"universes": ["Made Up Index"], "strategies": [1]}})
+        "name": "Bad", "config": {"universes": ["Made Up Index"], "strategies": [4]}})
     assert response.status_code == 400
     assert "Made Up Index" in response.json()["error"]["message"]
 
