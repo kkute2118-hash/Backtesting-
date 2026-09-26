@@ -30,6 +30,20 @@ import time
 
 NAME = "ati-lab"
 SHAPE = "VM.Standard.A1.Flex"
+
+# ---------------------------------------------------------------------------
+# ALWAYS FREE ONLY. The account owner's card is on file, and the one rule for
+# this deployment is that it must never cost anything. Oracle's Always Free
+# allowance, per tenancy (https://docs.oracle.com/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm):
+#   Ampere A1: 4 OCPUs and 24 GB of memory in total, across every A1 instance
+#   Block storage: 200 GB in total, boot volumes included
+# Every launch is checked against what the tenancy ALREADY uses, and refused
+# if it would go over. Do not raise these, and do not add another shape.
+FREE_A1_OCPUS = 4
+FREE_A1_MEMORY_GB = 24
+FREE_STORAGE_GB = 200
+BOOT_VOLUME_GB = 50
+# ---------------------------------------------------------------------------
 HERE = pathlib.Path(__file__).resolve().parent
 
 # The values cloud-init.sh has a blank for, filled from the same-named
@@ -154,6 +168,54 @@ def ubuntu_image(compute, compartment: str):
     sys.exit("No Ubuntu image for the Ampere shape was found in this region.")
 
 
+def free_tier_problems(instances, volume_sizes_gb, ocpus: float, memory_gb: float,
+                       boot_gb: int) -> list[str]:
+    """Why launching this server would leave Always Free; empty when it would not.
+
+    `instances` are the tenancy's instances, `volume_sizes_gb` the sizes of its
+    boot and block volumes; both counted only while they exist.
+    """
+    live = [i for i in instances if i.lifecycle_state not in ("TERMINATED", "TERMINATING")]
+    problems = []
+    paid = sorted({i.shape for i in live if i.shape not in (SHAPE, "VM.Standard.E2.1.Micro")})
+    if paid:
+        problems.append("the account already runs a shape that is not Always Free: "
+                        + ", ".join(paid))
+    used_cpu = sum(float(i.shape_config.ocpus or 0) for i in live
+                   if i.shape == SHAPE and i.shape_config)
+    used_mem = sum(float(i.shape_config.memory_in_gbs or 0) for i in live
+                   if i.shape == SHAPE and i.shape_config)
+    if used_cpu + ocpus > FREE_A1_OCPUS:
+        problems.append(f"Ampere OCPUs would total {used_cpu + ocpus:g} "
+                        f"({used_cpu:g} in use + {ocpus:g}); Always Free allows {FREE_A1_OCPUS}")
+    if used_mem + memory_gb > FREE_A1_MEMORY_GB:
+        problems.append(f"Ampere memory would total {used_mem + memory_gb:g} GB "
+                        f"({used_mem:g} in use + {memory_gb:g}); Always Free allows "
+                        f"{FREE_A1_MEMORY_GB} GB")
+    used_disk = sum(float(v) for v in volume_sizes_gb)
+    if used_disk + boot_gb > FREE_STORAGE_GB:
+        problems.append(f"storage would total {used_disk + boot_gb:g} GB ({used_disk:g} in use "
+                        f"+ {boot_gb}); Always Free allows {FREE_STORAGE_GB} GB")
+    return problems
+
+
+def tenancy_volume_sizes(oci, compartment: str, ads: list[str]) -> list[float]:
+    storage = oci.core.BlockstorageClient(oci_config())
+    gone = ("TERMINATED", "TERMINATING", "FAULTY")
+    sizes = []
+    for ad in ads:
+        for v in oci.pagination.list_call_get_all_results(
+                storage.list_boot_volumes, availability_domain=ad,
+                compartment_id=compartment).data:
+            if v.lifecycle_state not in gone:
+                sizes.append(v.size_in_gbs or 0)
+    for v in oci.pagination.list_call_get_all_results(
+            storage.list_volumes, compartment_id=compartment).data:
+        if v.lifecycle_state not in gone:
+            sizes.append(v.size_in_gbs or 0)
+    return sizes
+
+
 def public_ip(compute, vn, compartment: str, instance_id: str) -> str | None:
     for att in compute.list_vnic_attachments(compartment, instance_id=instance_id).data:
         if att.lifecycle_state == "ATTACHED":
@@ -177,10 +239,14 @@ def main() -> None:
 
     ocpus = float(os.environ.get("OCI_OCPUS", "2"))
     memory = float(os.environ.get("OCI_MEMORY_GB", "12"))
+    if ocpus > FREE_A1_OCPUS or memory > FREE_A1_MEMORY_GB:
+        sys.exit(f"Refusing: {ocpus:g} OCPU / {memory:g} GB is beyond Always Free "
+                 f"({FREE_A1_OCPUS} OCPU / {FREE_A1_MEMORY_GB} GB).")
     if args.dry_run:
         say(f"Would create in {os.environ.get('OCI_REGION', '<OCI_REGION>')}: network "
             f"{NAME}-vcn with ports 22 and 80 open, and {SHAPE} '{NAME}' "
-            f"({ocpus:g} OCPU, {memory:g} GB, Ubuntu, 50 GB disk).")
+            f"({ocpus:g} OCPU, {memory:g} GB, Ubuntu, {BOOT_VOLUME_GB} GB disk) — only after "
+            "checking the account's existing usage stays inside Always Free.")
         return
 
     import oci
@@ -200,6 +266,18 @@ def main() -> None:
         say(f"OPEN: http://{ip}")
         return
 
+    ads = [ad.name for ad in identity.list_availability_domains(compartment).data]
+
+    # The free-tier check comes before anything is created, network included.
+    instances = oci.pagination.list_call_get_all_results(
+        compute.list_instances, compartment).data
+    problems = free_tier_problems(instances, tenancy_volume_sizes(oci, compartment, ads),
+                                  ocpus, memory, BOOT_VOLUME_GB)
+    if problems:
+        sys.exit("Refusing, to stay inside Always Free (nothing was created):\n  - "
+                 + "\n  - ".join(problems))
+    say("Always Free check passed: this server fits inside the free allowance.")
+
     subnet = ensure_network(vn, oci, compartment)
     image = ubuntu_image(compute, compartment)
     say(f"Image: {image.display_name}")
@@ -208,7 +286,6 @@ def main() -> None:
     if os.environ.get("OCI_SSH_PUBLIC_KEY"):
         metadata["ssh_authorized_keys"] = os.environ["OCI_SSH_PUBLIC_KEY"].strip()
 
-    ads = [ad.name for ad in identity.list_availability_domains(compartment).data]
     instance = None
     for ad in ads:
         say(f"Launching in {ad}…")
@@ -219,7 +296,7 @@ def main() -> None:
                 shape_config=m.LaunchInstanceShapeConfigDetails(ocpus=ocpus,
                                                                 memory_in_gbs=memory),
                 source_details=m.InstanceSourceViaImageDetails(
-                    image_id=image.id, boot_volume_size_in_gbs=50),
+                    image_id=image.id, boot_volume_size_in_gbs=BOOT_VOLUME_GB),
                 create_vnic_details=m.CreateVnicDetails(subnet_id=subnet.id,
                                                         assign_public_ip=True),
                 metadata=metadata)).data

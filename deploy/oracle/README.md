@@ -84,6 +84,22 @@ cd /opt/ati-lab && sudo git pull \
 The database lives in a Docker volume, not in the checkout, so `git pull` and
 rebuilds never touch it.
 
+## Staying free
+
+This setup is built to stay inside Oracle's **Always Free** allowance: one
+Ampere server of 2 OCPUs / 12 GB (the free limit is 4 / 24 in total) and a
+50 GB disk (the free limit is 200 GB in total). `provision.py` checks what the
+account already uses and refuses to create anything that would go over.
+
+Two things on your side keep it that way:
+
+- **Do not upgrade to "Pay As You Go".** On a Free Tier account Oracle cannot
+  bill for anything outside Always Free: those resources simply stop when the
+  30-day trial credit ends. Upgrading removes that safety net.
+- **Add a budget alert** as a second net: Billing & Cost Management → Budgets →
+  Create budget, amount **1** (in your currency), alert at 1% of actual spend,
+  with your email. Any charge at all then emails you at once.
+
 ## Good to know
 
 - **Settings** (Dhan, GitHub and the rest) live in
