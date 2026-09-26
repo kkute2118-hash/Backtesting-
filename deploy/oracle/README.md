@@ -10,6 +10,24 @@ creating the server. You need an Oracle Cloud account first
 (<https://signup.cloud.oracle.com>; card verification only, nothing charged
 on Always Free resources).
 
+## Or: let the API do steps 1-3
+
+`provision.py` creates the network, opens ports 22 and 80, and launches the
+server with the setup script already filled in, all through Oracle's API. It
+reads everything from environment variables (listed at the top of the file):
+an Oracle API key from **Profile → API keys → Add API key**, plus the same
+Dhan and GitHub values the script asks for.
+
+```bash
+pip install oci
+python deploy/oracle/provision.py --dry-run   # check the plan
+python deploy/oracle/provision.py             # create it; prints the address
+```
+
+It is safe to re-run, which matters because free Ampere servers are often
+out of capacity: it tries every availability domain, and a later run picks up
+where the last one stopped. Then continue at step 4.
+
 ## 1. Fill in the script
 
 Open `deploy/oracle/cloud-init.sh` and fill in the block at the top: your Dhan
