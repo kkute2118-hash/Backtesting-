@@ -36,7 +36,8 @@ Configuration comes from environment variables (see core._secret):
                SCAN_UNIVERSE     default "Nifty 500"; any name in
                                  core.UNIVERSE_CHOICES, including
                                  "NSE All Cash (~2000)" for the full list
-               SCAN_STRATEGIES   default "1,2,3,4" (S5 is opt-in)
+               SCAN_STRATEGIES   default core.DEFAULT_STRATEGIES ("4,5,6");
+                                 retired S1-S3 are ignored
                SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
                                  gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS

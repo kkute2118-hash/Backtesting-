@@ -35,7 +35,8 @@ def _validate(config: dict[str, Any]) -> dict[str, Any]:
                          if int(s) in core.IMPLEMENTED_STRATEGIES})
     if not strategies:
         known = core.IMPLEMENTED_STRATEGIES
-        raise ApiError(f"A preset needs at least one of strategies {min(known)}-{max(known)}.")
+        raise ApiError("A preset needs at least one of strategies "
+                       + ", ".join(f"S{s}" for s in known) + ".")
 
     min_score = float(config.get("min_score", core.DEFAULT_MIN_SCORE))
     if not 0 <= min_score <= 100:

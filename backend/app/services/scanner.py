@@ -214,11 +214,15 @@ def _scan_stats(stats: dict, regime: str, regime_score: int,
         "safety_gate_excluded": int(stats.get("safety_gate_excluded", 0) or 0),
         "regime": regime,
         "regime_score": regime_score,
+        # S6's market gate, so the page can say why S6 found nothing.
+        "market_breadth": clean_value(stats.get("market_breadth")),
+        "s6_min_breadth": core.S6_MIN_BREADTH,
         "per_strategy": [
             {"strategy": f"S{s}",
              "signals": int(signals.get(s, 0) or 0),
              "qualified": int(qualified.get(s, 0) or 0)}
             for s in sorted(set(list(signals.keys()) + list(qualified.keys())))
+            if s in core.IMPLEMENTED_STRATEGIES
         ],
         "safety_gate_audit": frame_to_records(audit) if isinstance(audit, pd.DataFrame) else [],
         "ml_model": model_info,

@@ -237,6 +237,8 @@ def condition_matrix(symbol: str, strategies: list[int] | None = None) -> dict[s
 
     wanted = sorted({int(s) for s in (strategies or core.DEFAULT_STRATEGIES)
                      if int(s) in core.IMPLEMENTED_STRATEGIES})
+    if 6 in wanted:
+        f = core.attach_market_breadth(f)
     out = []
     for s in wanted:
         matrix = core.strategy_condition_matrix(f, s)
@@ -253,7 +255,7 @@ def condition_matrix(symbol: str, strategies: list[int] | None = None) -> dict[s
         passed_count = sum(1 for c in conditions if c["passed"])
         out.append({
             "strategy": f"S{s}",
-            "label": f"S{s}_SEPA" if s == 4 else f"S{s}",
+            "label": ("S4_SEPA" if s == 4 else core.S6_LABEL if s == 6 else f"S{s}"),
             "signal": signal,
             "passed": passed_count,
             "total": len(conditions),

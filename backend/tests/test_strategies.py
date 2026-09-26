@@ -14,7 +14,8 @@ import pytest
 
 from app.engine import core
 
-STRATEGIES = list(core.IMPLEMENTED_STRATEGIES)
+# Retired strategies are still implemented, so their rules are still checked.
+STRATEGIES = sorted(set(core.IMPLEMENTED_STRATEGIES) | set(core.RETIRED_STRATEGIES))
 
 
 @pytest.fixture(scope="module")

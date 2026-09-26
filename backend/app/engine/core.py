@@ -6213,6 +6213,185 @@ def s5_tightness_diagnostic(data, min_bars=260):
     return out
 
 
+# ========================= STRATEGY 6 — BREAKOUT WITH BREADTH =========================
+# A fresh 50-day-high breakout, taken only when the whole market is breaking out
+# with it. Derived from the 25 biggest Nifty 500 gainers of Sep 2025 - Sep 2026
+# and tested against all 5,026 first-in-four-weeks 50-day-high breakouts from
+# 2022 to 2026. The textbook checklist (RS rank >= 80, volume surge, tight base,
+# strong close) did not beat ordinary breakouts on that sample and is
+# deliberately absent. What did separate them:
+#
+#   market breadth       the strongest single factor, and a property of the day
+#                        rather than the stock - see market_breakout_breadth()
+#   ATR >= 2.8% of price quieter names broke out and went nowhere
+#   >= 60% above the     already a leader, not a bounce off the lows
+#   52-week low
+#   within 15% of the    close enough that the breakout is a trend resuming
+#   52-week high
+#
+# Thresholds were chosen on 2022-24 only. On 2025-26, unseen, 60-session win
+# rate 67% and average +8.6%, against 51% and +2.3% for every breakout. With the
+# exit below (3 x ATR stop, 20% trail from the highest close) the average trade
+# was +19.1% over 2022-26 and +7.7% on 2025-26, win rate 44%: fewer than half
+# win, and the winners are about five times the size of the losers.
+#
+# Exit is part of the strategy, not a detail: the median winner fell 17% from a
+# high during its run (about 5.5 x ATR). A 2 x ATR, 8% or 21-EMA stop threw most
+# of them out.
+S6_BREAKOUT_LOOKBACK = 50          # close above the highest high of the prior 50 sessions
+S6_REARM_DAYS = 28                 # ... and more than 28 calendar days after the previous one
+S6_BREADTH_WINDOW = 10             # breadth = 10-session sum of the daily breakout share
+S6_MIN_BREADTH = 0.50              # 0.50 = on average 5% of stocks broke out each day
+S6_MIN_ATR_PCT = 2.8               # ATR(14), simple mean of true range, as % of close
+S6_MIN_ABOVE_52W_LOW_PCT = 60.0
+S6_MAX_BELOW_52W_HIGH_PCT = 15.0
+S6_INITIAL_STOP_ATR = 3.0          # initial stop = entry - 3 x ATR(14)
+S6_TRAIL_PCT = 20.0                # exit on a close 20% below the highest close since entry
+S6_LABEL = "S6_BREAKOUT"
+S6_BREADTH_COLUMN = "mkt_breadth10"
+
+# Breadth is one GROUP BY over every stored candle, so it is cached like the
+# session calendar. It only changes when a sync writes new candles.
+S6_BREADTH_TTL_SECONDS = 300.0
+_S6_BREADTH = {"at": 0.0, "series": None}
+_S6_BREADTH_LOCK = threading.Lock()
+
+
+def market_breakout_breadth(force=False):
+    """Market breadth per session: the share of stored stocks closing above
+    their prior 50-session high, summed over the last S6_BREADTH_WINDOW sessions.
+
+    Always measured across the whole stored equity universe, never the
+    universe being scanned. The thresholds were fitted on the full store, and a
+    Nifty 50 scan would otherwise read breadth off 50 names and gate on noise.
+    Indices (symbols starting with ^) are excluded. Returns an empty Series if
+    the store is empty or unreadable, which makes S6 fire nowhere rather than
+    everywhere.
+    """
+    now = time.monotonic()
+    with _S6_BREADTH_LOCK:
+        cached = _S6_BREADTH["series"]
+        if (not force and cached is not None
+                and now - _S6_BREADTH["at"] < S6_BREADTH_TTL_SECONDS):
+            return cached
+    n = int(S6_BREAKOUT_LOOKBACK)
+    q = f"""
+        SELECT dt, AVG(CASE WHEN n={n} AND close>prior_hi THEN 1.0 ELSE 0.0 END) AS share
+        FROM (SELECT dt, close, MAX(high) OVER w AS prior_hi, COUNT(high) OVER w AS n
+              FROM candles WHERE symbol NOT LIKE '^%'
+              WINDOW w AS (PARTITION BY symbol ORDER BY dt
+                           ROWS BETWEEN {n} PRECEDING AND 1 PRECEDING))
+        GROUP BY dt ORDER BY dt"""
+    try:
+        con = _db()
+        try:
+            daily = pd.read_sql_query(q, con, parse_dates=["dt"]).set_index("dt")["share"]
+        finally:
+            con.close()
+        series = daily.rolling(S6_BREADTH_WINDOW).sum().rename(S6_BREADTH_COLUMN)
+    except Exception:
+        series = pd.Series(dtype=float, name=S6_BREADTH_COLUMN)
+    with _S6_BREADTH_LOCK:
+        _S6_BREADTH.update(at=now, series=series)
+    return series
+
+
+def attach_market_breadth(x, breadth=None):
+    """Return `x` with the S6 breadth column joined on its dates.
+
+    A bar newer than the stored candles (the live intraday overlay) takes the
+    latest stored reading: breadth is a two-week sum, and one forming bar moves
+    it by at most a few hundredths.
+    """
+    if x is None or x.empty:
+        return x
+    b = market_breakout_breadth() if breadth is None else breadth
+    out = x.copy()
+    if b is None or b.empty:
+        out[S6_BREADTH_COLUMN] = np.nan
+        return out
+    idx = pd.DatetimeIndex(pd.to_datetime(out.index)).normalize()
+    joined = b.reindex(b.index.union(idx)).ffill().reindex(idx)
+    # Never carry a reading backwards: before the first stored session it is unknown.
+    joined[idx < b.index[0]] = np.nan
+    out[S6_BREADTH_COLUMN] = joined.to_numpy()
+    return out
+
+
+def strategy6_features(x):
+    """Every S6 reading as its own Series, aligned to `x`."""
+    close, high, low = x["close"], x["high"], x["low"]
+    prior_hi = high.rolling(S6_BREAKOUT_LOOKBACK, min_periods=S6_BREAKOUT_LOOKBACK).max().shift(1)
+    breakout = (close > prior_hi).fillna(False)
+    # Calendar days, as tested: sessions would drift with every holiday.
+    dates = pd.Series(pd.to_datetime(x.index), index=x.index)
+    prev_breakout = dates.where(breakout).ffill().shift(1)
+    recent = ((dates - prev_breakout) <= pd.Timedelta(days=S6_REARM_DAYS)).fillna(False)
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()],
+                   axis=1).max(axis=1)
+    atr = tr.rolling(14, min_periods=14).mean()
+    hi52 = high.rolling(252, min_periods=200).max()
+    lo52 = low.rolling(252, min_periods=200).min()
+    breadth = (x[S6_BREADTH_COLUMN] if S6_BREADTH_COLUMN in x.columns
+               else pd.Series(np.nan, index=x.index))
+    return pd.DataFrame({
+        "s6_fresh_breakout": breakout & ~recent,
+        "s6_breadth": breadth,
+        "s6_atr": atr,
+        "s6_atr_pct": atr / close * 100,
+        "s6_above_52w_low_pct": (close / lo52 - 1) * 100,
+        "s6_below_52w_high_pct": (1 - close / hi52) * 100,
+    }, index=x.index)
+
+
+def strategy6_condition_matrix(x):
+    f = strategy6_features(x)
+    return {
+        f"Fresh {S6_BREAKOUT_LOOKBACK}-day-high breakout": f.s6_fresh_breakout,
+        f"Market breadth >= {S6_MIN_BREADTH:.2f}": (f.s6_breadth >= S6_MIN_BREADTH).fillna(False),
+        f"ATR >= {S6_MIN_ATR_PCT}% of price": (f.s6_atr_pct >= S6_MIN_ATR_PCT).fillna(False),
+        f">= {S6_MIN_ABOVE_52W_LOW_PCT:.0f}% above 52-week low":
+            (f.s6_above_52w_low_pct >= S6_MIN_ABOVE_52W_LOW_PCT).fillna(False),
+        f"Within {S6_MAX_BELOW_52W_HIGH_PCT:.0f}% of 52-week high":
+            (f.s6_below_52w_high_pct <= S6_MAX_BELOW_52W_HIGH_PCT).fillna(False),
+    }
+
+
+def strategy6_signal(x):
+    out = pd.Series(True, index=x.index)
+    for cond in strategy6_condition_matrix(x).values():
+        out &= cond
+    return out.astype(bool)
+
+
+def s6_initial_stop(x):
+    """Entry-day stop for the latest bar: close - 3 x ATR(14). NaN if unknown."""
+    f = strategy6_features(x)
+    atr = float(f.s6_atr.iloc[-1])
+    close = float(x.close.iloc[-1])
+    return close - S6_INITIAL_STOP_ATR * atr if np.isfinite(atr) else np.nan
+
+
+def s6_exit(bars, entry, initial_stop):
+    """Walk S6's exit over daily bars, the first of which is the entry day.
+
+    Returns (status, exit_price). The initial stop fills intraday at the stop,
+    or at the open if the bar gaps below it. The trail is a close rule: exit
+    at the close once it is S6_TRAIL_PCT below the highest close since entry.
+    Identical to the backtest that chose these parameters.
+    """
+    peak = float(entry)
+    for i in range(1, len(bars)):
+        bar = bars.iloc[i]
+        if np.isfinite(initial_stop) and float(bar.low) <= initial_stop:
+            return "STOP", min(float(bar.open), float(initial_stop))
+        close = float(bar.close)
+        peak = max(peak, close)
+        if close < peak * (1 - S6_TRAIL_PCT / 100.0):
+            return "TRAIL_STOP", close
+    return "ACTIVE", None
+
+
 def strategy_signal(x,s):
     if x.empty:
         return pd.Series(False,index=x.index)
@@ -6384,6 +6563,12 @@ def strategy_signal(x,s):
         # whether the number came from the source or from us.
         return strategy5_signal(x)
 
+    if s==6:
+        # STRATEGY 6 - fresh 50-day-high breakout with market breadth. The
+        # breadth column must be attached by the caller (attach_market_breadth);
+        # without it the gate reads NaN and nothing qualifies.
+        return strategy6_signal(x)
+
     return pd.Series(False,index=x.index)
 
 # ========================= EARLY WARNING RADAR =========================
@@ -6500,6 +6685,9 @@ def strategy_condition_matrix(x, s):
             matrix[f"ATR >= {S5_MIN_ATR_PCT}% of price"] = s5.s5_atr_pct >= S5_MIN_ATR_PCT
             matrix[f"Gap up >= {S5_MIN_GAP_PCT}%"] = s5.s5_gap_pct >= S5_MIN_GAP_PCT
         return matrix
+
+    if s == 6:
+        return strategy6_condition_matrix(x)
 
     return {}
 
@@ -6700,6 +6888,8 @@ def early_warning_radar(data, strategies, regime, max_missing=2, min_readiness=0
             continue
         counts["scanned"] += 1
         f = f.replace([np.inf, -np.inf], np.nan)
+        if 6 in {int(x) for x in strategies}:
+            f = attach_market_breadth(f)
         comp = compression_features(df)
         comp_score = _compression_score(comp)
 
@@ -7181,27 +7371,33 @@ def strategy_quality_score(x, s):
 DEFAULT_MIN_SCORE = 71
 LEGACY_MIN_SCORE = 85
 
-# Which strategy numbers strategy_signal() actually implements, and which of
-# them a caller gets when it does not choose. Two tuples rather than one so the
-# API, the services, the presets and the scheduled job cannot drift apart about
-# what exists; they happen to be equal now that S5 is live, and the split is
-# what let S5 sit implemented-but-off while its evidence run was pending.
-IMPLEMENTED_STRATEGIES = (1, 2, 3, 4, 5)
-# S4 + S5 is the measured best portfolio, not a shortlist of favourites: with
-# the entry evidence filter and Rs 1,00,000 over 3 slots it returned Rs 3.54
-# lakh in 4.29 years (34.2% CAGR, worst of 12 seeds still 24.8%, CAGR/maxDD
-# 1.26) against Rs 2.39 lakh / 22.5% / 0.66 for all five together
-# (research/SECTOR_TIMING_FINDINGS.md, addendum 4). S1-S3 remain implemented
-# and selectable; they are simply not what an unconfigured caller should get.
-DEFAULT_STRATEGIES = (4, 5)
+# Which strategy numbers the scanner offers, and which of them a caller gets
+# when it does not choose. Two tuples rather than one so the API, the services,
+# the presets and the scheduled job cannot drift apart about what exists.
+#
+# The scanner carries at most three strategies, the three with evidence behind
+# them. S4 + S5 is the measured best portfolio: with the entry evidence filter
+# and Rs 1,00,000 over 3 slots it returned Rs 3.54 lakh in 4.29 years (34.2%
+# CAGR, worst of 12 seeds still 24.8%, CAGR/maxDD 1.26) against Rs 2.39 lakh /
+# 22.5% / 0.66 for all five together (research/SECTOR_TIMING_FINDINGS.md,
+# addendum 4). S6 is the breadth breakout above.
+IMPLEMENTED_STRATEGIES = (4, 5, 6)
+DEFAULT_STRATEGIES = (4, 5, 6)
+# S1-S3 are retired from the scanner: flat or negative on every stored backtest
+# run, and removing them is what lifted the portfolio above. strategy_signal()
+# still implements them so research tools, the golden tests and forward tests
+# opened before retirement keep working; nothing new is scanned under them.
+RETIRED_STRATEGIES = (1, 2, 3)
 
 # The labels written into forward_tests.strategy that the forward tracker will
 # accept and then keep updating. S5_POCKETPIVOT joined this list only after its
 # evidence run; before that it was scanned and shown but never auto-tracked.
-FORWARD_TRACKED_STRATEGIES = {"S1", "S2", "S3", "S4_SEPA", "S5_POCKETPIVOT"}
+# S1-S3 stay listed so positions opened before their retirement are still
+# tracked to an exit.
+FORWARD_TRACKED_STRATEGIES = {"S1", "S2", "S3", "S4_SEPA", "S5_POCKETPIVOT", S6_LABEL}
 # Strategies whose exit is a trailing rule rather than a fixed target, so a
 # missing target is correct rather than a malformed row.
-TRAILING_EXIT_STRATEGIES = {"S5_POCKETPIVOT"}
+TRAILING_EXIT_STRATEGIES = {"S5_POCKETPIVOT", S6_LABEL}
 
 SCORE_COMPONENT_WEIGHTS = {
     "Strategy": 33,
@@ -7218,7 +7414,7 @@ SCORE_WEIGHTS_ARE_FITTED = False
 # decision made by omission. final_setup_score() instead rescales the four
 # components it CAN measure onto 100 and reports Strategy as None, so the
 # absence stays visible in the row rather than being read as a bad setup.
-STRATEGIES_WITHOUT_QUALITY_COMPONENT = {5}
+STRATEGIES_WITHOUT_QUALITY_COMPONENT = {5, 6}
 
 
 def final_setup_score(x, s, regime, safety_score):
@@ -10524,7 +10720,7 @@ def _portfolio_returns(data, tickers, lookback=PORTFOLIO_CORRELATION_LOOKBACK):
 #
 # Strategies not listed sort after those that are, and liquidity breaks every
 # remaining tie. Re-measure before reordering: this is one book over one period.
-STRATEGY_SLOT_PRIORITY = {"S4_SEPA": 0, "S4": 0, "S5_POCKETPIVOT": 1}
+STRATEGY_SLOT_PRIORITY = {"S4_SEPA": 0, "S4": 0, "S5_POCKETPIVOT": 1, S6_LABEL: 2}
 STRATEGY_SLOT_PRIORITY_DEFAULT = 2
 
 
@@ -11855,7 +12051,9 @@ ENTRY_SECTOR_LOOKBACK = 21
 
 # Which rule each strategy gets. Not one rule for all: S4 is the only strategy
 # the sector rank works for and the only one ATR does nothing for.
-ENTRY_FILTER_BY_STRATEGY = {1: "atr", 2: "atr", 3: "atr", 4: "sector", 5: "atr"}
+# S6 gets none: it carries its own ATR rule (2.8%, the level it was tested at)
+# and was measured without a turnover floor, so either would change the strategy.
+ENTRY_FILTER_BY_STRATEGY = {1: "atr", 2: "atr", 3: "atr", 4: "sector", 5: "atr", 6: "none"}
 APPLY_ENTRY_EVIDENCE_FILTER = True
 
 
@@ -11920,10 +12118,12 @@ def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
     metrics = {"atr_pct": atr_pct, "turnover_cr": turnover, "sector_rank": rank}
     if not apply_filter:
         return True, "filter off", metrics
+    rule = ENTRY_FILTER_BY_STRATEGY.get(int(strategy), "atr")
+    if rule == "none":
+        return True, "own rules only", metrics
     if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
         got = f"{turnover:.0f}" if np.isfinite(turnover) else "unknown"
         return False, f"turnover Rs {got} cr < {ENTRY_MIN_TURNOVER_CR:.0f} cr", metrics
-    rule = ENTRY_FILTER_BY_STRATEGY.get(int(strategy), "atr")
     if rule == "sector":
         if not np.isfinite(rank):
             return False, "no real sector-index membership", metrics
@@ -11980,6 +12180,13 @@ def release_memory():
     return round(before - after, 1)
 
 
+def strategy_label_for(s):
+    """The label a strategy is persisted and displayed under."""
+    s = int(s)
+    return ("S4_SEPA" if s == 4 else "S5_POCKETPIVOT" if s == 5 else
+            S6_LABEL if s == 6 else f"S{s}")
+
+
 def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     """The scan itself: every stock against every selected strategy.
 
@@ -11994,10 +12201,10 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
     counts.setdefault("too_short", 0)
     # Seed every strategy, not just the selected ones: callers index these
     # by fixed strategy number when rendering the audit table.
-    counts.setdefault("signals", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
-    counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
+    counts.setdefault("signals", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0})
+    counts.setdefault("qualified", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0})
     counts.setdefault("safety_reject", 0)
-    counts.setdefault("entry_filter_reject", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})
+    counts.setdefault("entry_filter_reject", {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0})
     # The signals the filter turned away, kept rather than dropped: they are
     # the only way to keep measuring whether the filter is still the right one.
     rejected = counts.setdefault("rejected_rows", [])
@@ -12024,6 +12231,11 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             sector_ranks, sector_lookup = {}, {}
     counts["sector_ranks"] = sector_ranks
 
+    # S6 gates on market-wide breadth, read once for the whole scan.
+    breadth = market_breakout_breadth() if 6 in {int(x) for x in strategies} else None
+    counts["market_breadth"] = (float(breadth.iloc[-1]) if breadth is not None
+                                and len(breadth) and np.isfinite(breadth.iloc[-1]) else None)
+
     ml_model = train_win_probability_model("INDIA")
     # Exposed so a caller can report on the model without re-training it
     # (train_win_probability_model is memoised, but the caller has no other way
@@ -12049,6 +12261,8 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             continue
 
         counts["usable"] += 1
+        if breadth is not None:
+            f = attach_market_breadth(f, breadth)
         # Do NOT fetch fundamentals for the whole universe. Price/volume safety is
         # computed locally; fundamental/news enrichment is candidate-only.
         info = {}
@@ -12070,8 +12284,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 counts["entry_filter_reject"][s] = counts["entry_filter_reject"].get(s, 0) + 1
                 rejected.append({
                     "Ticker": str(ticker).replace(".NS", ""),
-                    "Strategy": ("S4_SEPA" if s == 4 else
-                                 "S5_POCKETPIVOT" if s == 5 else f"S{s}"),
+                    "Strategy": strategy_label_for(s),
                     "Regime": regime, "Entry": round(float(f.iloc[-1].close), 2),
                     "ATR %": (round(ev["atr_pct"], 2) if np.isfinite(ev["atr_pct"]) else None),
                     "Turnover Cr": (round(ev["turnover_cr"], 1)
@@ -12096,6 +12309,10 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 variant = str(strategy5_entry_variant(f).iloc[-1])
                 stop, _override, _basis = _s5_initial_stop(f, len(f) - 1, len(f) - 1, variant)
                 target = np.nan
+            elif s == 6:
+                # S6 trails 20% below the highest close and has no target.
+                stop = s6_initial_stop(f)
+                target = np.nan
             else:
                 stop = entry * .93
                 target = entry + 3 * (entry - stop)
@@ -12118,8 +12335,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             # spec's checklist. add_forward_candidates() does not accept that
             # label, so an S5 signal is scored, ranked and shown but never
             # auto-enrolled into forward_tests - the backtest comes first.
-            strategy_label = ("S4_SEPA" if s == 4 else
-                              "S5_POCKETPIVOT" if s == 5 else f"S{s}")
+            strategy_label = strategy_label_for(s)
             row = {
                 "Score": score,
                 "Adaptive Score": round(adaptive_score, 2),
@@ -12134,7 +12350,9 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
                 "Entry": round(entry, 2),
                 "SL 7%": round(stop, 2) if np.isfinite(stop) else None,
                 "Target 3R": round(target, 2) if np.isfinite(target) else None,
-                "R:R": "1:3" if np.isfinite(target) else "trailing (10/50 EMA)",
+                "R:R": ("1:3" if np.isfinite(target) else
+                        f"trailing ({S6_TRAIL_PCT:.0f}% from high)" if s == 6 else
+                        "trailing (10/50 EMA)"),
                 "RSI": round(float(z.rsi14), 1),
                 "RelVol": round(float(z.relvol), 2),
                 "HTF Score": parts["HTF Demand"],
@@ -12454,7 +12672,13 @@ def refresh_forward_positions():
             status="ACTIVE";exitp=None;result_r=None;closed_at=None
             trailing = str(r.strategy).upper() in TRAILING_EXIT_STRATEGIES
 
-            if trailing:
+            if trailing and str(r.strategy).upper() == S6_LABEL:
+                # S6: fixed initial stop, then a 20% trail from the highest close.
+                status, exitp = s6_exit(d, entry, stop)
+                if status != "ACTIVE":
+                    result_r = (exitp - entry) / (entry - stop) if entry > stop else None
+                    closed_at = datetime.now().isoformat(timespec="seconds")
+            elif trailing:
                 # S5 has no target and its stop moves: the 10 EMA from entry, the
                 # 50 EMA after an early violation, the 10 EMA permanently after 35
                 # days. Tracking it against the fixed level in forward_tests.sl

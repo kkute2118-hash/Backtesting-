@@ -12,6 +12,12 @@ from __future__ import annotations
 import gzip, json, os, shutil, tempfile
 
 GOLDEN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# The strategies these snapshots were recorded for. Pinned rather than read
+# from IMPLEMENTED_STRATEGIES: S1-S3 left the scanner but are still
+# implemented, and their rules are still worth protecting. S6 has its own tests
+# in test_s6_breakout.py.
+GOLDEN_STRATEGIES = (1, 2, 3, 4, 5)
 FIXTURE_GZ = os.path.join(GOLDEN_DIR, "fixture_market_data.sqlite3.gz")
 
 # The columns that define WHAT a scan selects and scores. Deliberately not the
@@ -58,7 +64,7 @@ def fixture_symbols(core) -> list[str]:
 
 
 def run_reference_scan(core, apply_filter: bool = True) -> list[dict]:
-    """The scan the golden pins: every fixture stock, all five strategies.
+    """The scan the golden pins: every fixture stock, all five GOLDEN_STRATEGIES.
 
     apply_filter=False runs the same scan with the entry evidence filter off.
     That second snapshot is what actually protects the STRATEGY rules: with the
@@ -73,7 +79,7 @@ def run_reference_scan(core, apply_filter: bool = True) -> list[dict]:
     previous = core.APPLY_ENTRY_EVIDENCE_FILTER
     core.APPLY_ENTRY_EVIDENCE_FILTER = bool(apply_filter)
     try:
-        result = core.scan_dataset(data, list(core.IMPLEMENTED_STRATEGIES), regime)
+        result = core.scan_dataset(data, list(GOLDEN_STRATEGIES), regime)
     finally:
         core.APPLY_ENTRY_EVIDENCE_FILTER = previous
     if result is None or result.empty:
@@ -135,7 +141,7 @@ def run_signal_census(core) -> dict:
         if frame is None or len(frame) < 260:
             continue
         feats = core.features_fast(str(ticker), frame).replace([np.inf, -np.inf], np.nan)
-        for s in core.IMPLEMENTED_STRATEGIES:
+        for s in GOLDEN_STRATEGIES:
             hits = feats.index[core.strategy_signal(feats, s).fillna(False).to_numpy()]
             if not len(hits):
                 continue

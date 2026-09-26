@@ -327,7 +327,12 @@ export function ResultsPage({ runId }: { runId: string }) {
           sub={filtered === total ? "No filters applied" : `${int(total - filtered)} filtered out`}
           tone={filtered === 0 && total > 0 ? "warn" : undefined} />
         <Stat label="Market regime" value={String(stats.regime ?? "—")}
-          sub={`Regime score ${int(stats.regime_score as number)}`} />
+          sub={
+            typeof stats.market_breadth === "number"
+              ? `Regime score ${int(stats.regime_score as number)} · S6 breadth ` +
+                `${stats.market_breadth.toFixed(2)} (needs ${Number(stats.s6_min_breadth ?? 0.5).toFixed(2)})`
+              : `Regime score ${int(stats.regime_score as number)}`
+          } />
         <Stat label="Excluded by safety gate" value={int(stats.safety_gate_excluded as number)}
           sub="Illiquid or manipulated-looking names, before any strategy ran"
           icon={<ShieldAlert className="h-3.5 w-3.5" />} />

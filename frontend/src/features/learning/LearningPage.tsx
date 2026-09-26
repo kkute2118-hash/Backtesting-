@@ -193,7 +193,7 @@ export function LearningPage() {
           action={
             <Select value={strategy} onChange={(event) => setStrategy(event.target.value)}
               aria-label="Strategy" className="h-8 w-32">
-              {["S1", "S2", "S3", "S4_SEPA", "S5_POCKETPIVOT"].map((option) => (
+              {["S1", "S2", "S3", "S4_SEPA", "S5_POCKETPIVOT", "S6_BREAKOUT"].map((option) => (
                 <option key={option} value={option}>{option}</option>
               ))}
             </Select>

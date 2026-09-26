@@ -11,12 +11,12 @@ export function str(row: Row, key: string): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
+// The scanner carries three strategies, the three with evidence behind them.
+// S1-S3 were retired; see RETIRED_STRATEGIES in the engine.
 export const STRATEGY_OPTIONS = [
-  { value: 1, label: "S1 · Monthly base", hint: "Monthly base continuation" },
-  { value: 2, label: "S2 · Tight pullback", hint: "Tight pullback in an uptrend" },
-  { value: 3, label: "S3 · EMA50 pullback", hint: "Liquid pullback to EMA50" },
   { value: 4, label: "S4 · SEPA", hint: "Minervini-style stage analysis" },
   { value: 5, label: "S5 · Pocket pivot", hint: "O'Neil pocket pivot, volatility-filtered — no quality score" },
+  { value: 6, label: "S6 · Breadth breakout", hint: "Fresh 50-day high while the market breaks out with it; 3×ATR stop, 20% trail" },
 ];
 
 export interface ScanFormState {
@@ -29,10 +29,8 @@ export interface ScanFormState {
 
 export const DEFAULT_SCAN: ScanFormState = {
   universes: ["Nifty 500"],
-  // S4 + S5 is the measured best portfolio - see the engine's
-  // DEFAULT_STRATEGIES and research/SECTOR_TIMING_FINDINGS.md addendum 4.
-  // The other three stay selectable.
-  strategies: [4, 5],
+  // All three scanner strategies - see the engine's DEFAULT_STRATEGIES.
+  strategies: [4, 5, 6],
   // Kept so saved presets still load; the engine ignores it. Selection is the
   // entry evidence filter now, not the score.
   min_score: 0,
