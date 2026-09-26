@@ -59,12 +59,29 @@ def user_data() -> str:
     return script
 
 
+def pem_from_env(raw: str) -> str:
+    """A PEM key however an environment editor mangled it.
+
+    Settings boxes often take one line per variable, so the key arrives with
+    its line breaks as spaces, as literal "\\n", or dropped. The body is plain
+    base64 either way, so it is rebuilt: markers kept, body rewrapped at 64.
+    """
+    text = raw.replace("\\n", "\n").strip().strip('"').strip("'")
+    match = re.search(r"-----BEGIN ([A-Z ]+)-----(.*?)-----END \1-----", text, re.DOTALL)
+    label, body = (match.group(1), match.group(2)) if match else ("PRIVATE KEY", text)
+    body = re.sub(r"\s+", "", body)
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", body or "-"):
+        sys.exit("OCI_PRIVATE_KEY does not look like the .pem file from Profile → API keys.")
+    lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+    return f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----\n"
+
+
 def oci_config() -> dict:
     missing = [v for v in ("OCI_TENANCY_OCID", "OCI_USER_OCID", "OCI_FINGERPRINT",
                            "OCI_REGION", "OCI_PRIVATE_KEY") if not os.environ.get(v)]
     if missing:
         sys.exit("Missing environment variables: " + ", ".join(missing))
-    key = os.environ["OCI_PRIVATE_KEY"].replace("\\n", "\n").strip() + "\n"
+    key = pem_from_env(os.environ["OCI_PRIVATE_KEY"])
     return {
         "tenancy": os.environ["OCI_TENANCY_OCID"],
         "user": os.environ["OCI_USER_OCID"],
