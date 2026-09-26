@@ -14,9 +14,13 @@ from app.services import forward as forward_service
 from app.services.serialization import clean_value, frame_to_records
 
 
-def market_status() -> dict[str, Any]:
+def market_status(now: datetime | None = None) -> dict[str, Any]:
     """Where the NSE cash session is right now, in the engine's own terms."""
-    now = datetime.now()
+    # IST wall-clock, not datetime.now(): the web host runs UTC, and the core
+    # clock helpers read a naive datetime as IST, so a host-clock `now` put the
+    # dashboard 5h30 behind the exchange — "closed" until 14:45 IST, and every
+    # date on it was a session late until 21:00 IST.
+    now = core.market_now(now)
     is_open = core.nse_market_is_open(now)
     return {
         "exchange": "NSE",

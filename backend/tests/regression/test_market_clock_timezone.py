@@ -170,6 +170,23 @@ check("market time is already the next day after 18:30 UTC",
 check("the host clock would still say Monday there",
       late.replace(tzinfo=None).date() == MON)
 
+# ------------------- 9. the dashboard market status reads market time too
+# market_status() passed datetime.now() — naive UTC on the web host — into
+# helpers that read a naive datetime as IST, so the dashboard ran 5h30 behind
+# the exchange: "closed" at 10:00 IST and a session late every evening.
+from app.services import market as market_service
+
+mid_session = datetime(2026, 9, 8, 4, 30, tzinfo=UTC)          # 10:00 IST Tuesday
+ms = market_service.market_status(mid_session)
+check("dashboard shows the market open at 10:00 IST", ms["is_open"] is True, str(ms))
+check("dashboard session date is today during the session",
+      ms["session_date"] == TUE.isoformat(), str(ms["session_date"]))
+evening = datetime(2026, 9, 7, 13, 30, tzinfo=UTC)             # 19:00 IST Monday
+ms = market_service.market_status(evening)
+check("dashboard last completed session is Monday at 19:00 IST",
+      ms["last_completed_session"] == MON.isoformat(), str(ms["last_completed_session"]))
+check("dashboard as_of is IST wall-clock", ms["as_of"].startswith("2026-09-07T19:00"), ms["as_of"])
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "All checks passed.")
 sys.exit(1 if FAILS else 0)
