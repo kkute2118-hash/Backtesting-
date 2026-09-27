@@ -13,6 +13,25 @@ permissions.** A setup score ranks quality; it is not a probability of profit.
 
 ---
 
+## How it runs now (September 2026)
+
+No web server is needed for daily use. Render is retired: its free plan slept
+after 15 idle minutes and was killed for exceeding 512 MB.
+
+| When (IST, trading days) | What | Where |
+|---|---|---|
+| 09:05 | Start the data job: sync Dhan candles, update paper trades, fetch the NSE results calendar, scan, back up | GitHub Actions `daily-forward-test.yml`, started on time by a Claude routine (GitHub's own cron runs hours late and stays as a fallback) |
+| 15:05 | Rebuild the dashboard: scan S4/S5/S6, the S6 watchlist, paper trades, live-vs-backtest health, your trade journal; phone alert only when there is something to act on | Claude: the `/scan` skill (`.claude/skills/scan/SKILL.md`) publishing the private page at https://claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN |
+| Any time | "/scan", "how are my S6 trades?", "scan S6 on Nifty 50" | Any Claude Code session on this repository |
+
+The database lives on the `db-backup` branch; the GitHub jobs are its only
+writer. Research tools (`scripts/portfolio_backtest.py`,
+`scripts/survivorship_study.py`, `scripts/strategy_expectations.py`) restore it
+read-only. Oracle Cloud (`deploy/oracle/`) is kept for the case a live web app
+is ever needed again; see `CLAUDE.md` for its Always-Free-only rule.
+
+---
+
 ## 🏗️ Architecture
 
 ```text
