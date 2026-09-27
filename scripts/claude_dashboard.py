@@ -205,6 +205,10 @@ def scan(universe: str) -> dict:
             for s in STRATEGIES
         ],
         "signals": signals,
+        # Latest close for every scanned stock, so the page can mark real
+        # trades in the journal even when they have no paper twin.
+        "last_close": {str(t).replace(".NS", ""): [df.index[-1].date().isoformat(), plain(float(df.close.iloc[-1]))]
+                       for t, df in data.items() if df is not None and len(df)},
         "filtered_out": rejected,
         "s6_watchlist": s6_watchlist(data),
     }

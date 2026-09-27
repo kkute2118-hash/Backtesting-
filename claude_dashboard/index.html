@@ -126,6 +126,17 @@ details.panel[open] summary{border-bottom:1px solid hsl(var(--line))}
 footer{font-size:12px;color:hsl(var(--faint));display:grid;gap:4px;border-top:1px solid hsl(var(--line));padding-top:14px}
 footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 5px;border-radius:4px;color:hsl(var(--muted))}
 .err{background:hsl(var(--down-soft));color:hsl(var(--down));border-radius:10px;padding:14px 16px}
+.jform{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:14px 16px}
+.jform .grow{flex:1 1 180px}
+.jform .grow input{width:100%}
+.field select{font:500 14px var(--sans);color:hsl(var(--ink));background:hsl(var(--surface));border:1px solid hsl(var(--strong-line));border-radius:7px;padding:6px 8px}
+.btn{font:600 13px var(--sans);background:hsl(var(--accent));color:hsl(var(--surface));border:0;border-radius:7px;padding:8px 14px;cursor:pointer}
+.btn.ghost{background:transparent;color:hsl(var(--accent));border:1px solid hsl(var(--strong-line))}
+.btn.danger{background:hsl(var(--down))}
+.btn:disabled{opacity:.5;cursor:default}
+.btn:focus-visible{outline:2px solid hsl(var(--accent));outline-offset:2px}
+.rowact{display:flex;gap:6px;align-items:center}
+.rowact input{font:500 12px var(--mono);width:96px;padding:4px 6px;border:1px solid hsl(var(--strong-line));border-radius:6px;background:hsl(var(--surface));color:hsl(var(--ink))}
 .warnbar{background:hsl(var(--warn-soft));color:hsl(var(--ink));border:1px solid hsl(var(--warn)/.5);border-radius:10px;padding:12px 16px;display:grid;gap:4px}
 .warnbar b{color:hsl(var(--warn))}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -167,6 +178,28 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
     <div class="panel tbl" id="openBody"></div>
     <h3>Recently closed</h3>
     <div class="panel tbl" id="closedBody"></div>
+  </section>
+
+  <section id="journal">
+    <div class="sec-head"><h2>My trades</h2>
+      <p>Your real orders, next to the paper trade for the same stock and strategy. Slippage is your fill against the paper entry; the gap between the two results is what execution costs you.</p></div>
+    <div class="tiles" id="jTiles"></div>
+    <details class="panel" id="jFormBox">
+      <summary>Log a real trade</summary>
+      <form id="jForm" class="jform" autocomplete="off">
+        <div class="field"><label for="jSym">Stock</label><input id="jSym" required placeholder="WELCORP"></div>
+        <div class="field"><label for="jStrat">Strategy</label>
+          <select id="jStrat"><option value="S6_BREAKOUT">S6 · Breakout</option><option value="S5_POCKETPIVOT">S5 · Pocket pivot</option><option value="S4_SEPA">S4 · SEPA</option><option value="OTHER">Other</option></select></div>
+        <div class="field"><label for="jDate">Bought on</label><input id="jDate" type="date" required></div>
+        <div class="field"><label for="jPrice">Buy price ₹</label><input id="jPrice" inputmode="decimal" required></div>
+        <div class="field"><label for="jQty">Quantity</label><input id="jQty" inputmode="numeric" required></div>
+        <div class="field"><label for="jStop">Stop ₹</label><input id="jStop" inputmode="decimal"></div>
+        <div class="field grow"><label for="jNote">Note</label><input id="jNote" placeholder="optional"></div>
+        <button class="btn" type="submit" id="jAdd">Save trade</button>
+        <span class="muted" id="jMsg" role="status"></span>
+      </form>
+    </details>
+    <div class="panel tbl" id="jBody"><div class="empty"><b>Loading your trades…</b></div></div>
   </section>
 
   <footer id="foot"></footer>
@@ -383,9 +416,113 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       {key:"holding_bars",label:"Days",right:true,fmt:r=>num(r.holding_bars,0)},
     ], closed, {key:"closed_at",dir:-1});
 
+    journal(d);
+
     $("foot").innerHTML = `<span>Built from the database backup the GitHub job updates at 09:00, 16:50 and 19:00 IST on trading days. ${esc(s.live?.reason||"")}.</span>
       <span>Refresh or change it from any Claude Code session on this repository: <code>/scan</code>, or ask, for example "scan S6 on Nifty 50".</span>
       <span>Position size: capital × risk ÷ (entry − stop), capped at 25% of capital. Backtests, not advice.</span>`;
+  }
+
+  // ---------------------------------------------------------------- journal
+  // Real trades live in this artifact's db (collection "journal"), so they
+  // survive the daily republish and Claude can read them. The page works
+  // without it: the section explains and hides the form.
+  async function journal(d){
+    const f = d.forward || {}, s = d.scan || {};
+    const paper = [...(f.open||[]).map(r => ({...r, sym:r.ticker, state:"open", ret:r.gain_pct})),
+                   ...(f.closed||[]).map(r => ({...r, sym:r.symbol, state:"closed", ret:r.return_pct}))];
+    const last = s.last_close || {};
+    const body = $("jBody");
+    try { $("jDate").value = (d.last_completed_session || "").slice(0,10); } catch(e){}
+    let db = null;
+    try { db = await window.claude?.use?.("db"); } catch(e) { db = null; }
+    if (!db){
+      $("jFormBox").hidden = true;
+      body.innerHTML = `<div class="empty"><b>The trade journal is not available in this view</b><p>Open the page from claude.ai while signed in to log and see your real trades.</p></div>`;
+      return;
+    }
+    const col = db.collection("journal");
+    let rows = [];
+    const num = v => { const n = parseFloat(String(v).replace(/[, ₹]/g,"")); return Number.isFinite(n) ? n : null; };
+    const twin = r => {
+      const d0 = new Date(r.entry_date);
+      return paper.filter(p => p.sym === r.symbol && p.strategy === r.strategy && p.signal_date)
+        .map(p => ({p, gap: Math.abs((new Date(String(p.signal_date).slice(0,10)) - d0) / 864e5)}))
+        .filter(x => x.gap <= 5).sort((a,b) => a.gap - b.gap)[0]?.p || null;
+    };
+    function draw(){
+      const view = rows.map(r => {
+        const tw = twin(r);
+        const px = r.exit != null ? r.exit : (last[r.symbol]?.[1] ?? null);
+        const pnl = px != null ? (px - r.entry) * r.qty : null;
+        return {...r, tw, px, pnl, ret: px != null ? (px / r.entry - 1) * 100 : null,
+                slip: tw ? (r.entry / tw.entry - 1) * 100 : null, paperRet: tw ? tw.ret : null,
+                state: r.exit != null ? "closed" : "open"};
+      });
+      const closed = view.filter(v => v.state === "closed"), open = view.filter(v => v.state === "open");
+      const realised = closed.reduce((a,v)=>a+(v.pnl||0),0), unreal = open.reduce((a,v)=>a+(v.pnl||0),0);
+      const slips = view.filter(v => v.slip != null).map(v => v.slip);
+      const avgSlip = slips.length ? slips.reduce((a,b)=>a+b,0)/slips.length : null;
+      const wins = closed.filter(v => v.pnl > 0).length;
+      $("jTiles").innerHTML = `
+        <div class="tile"><span class="l">Realised P/L</span><span class="v ${cls(realised)}">${inr(realised,0)}</span><span class="l">${closed.length} closed · ${closed.length ? Math.round(100*wins/closed.length)+"% won" : "none yet"}</span></div>
+        <div class="tile"><span class="l">Open P/L (last close)</span><span class="v ${cls(unreal)}">${inr(unreal,0)}</span><span class="l">${open.length} open</span></div>
+        <div class="tile"><span class="l">Average slippage vs paper</span><span class="v ${avgSlip==null?"":avgSlip>0?"dn":"up"}">${avgSlip==null?"–":pct(avgSlip,2)}</span><span class="l">${slips.length} trade${slips.length===1?"":"s"} with a paper twin · positive = you paid more</span></div>`;
+      if (!view.length){ body.innerHTML = `<div class="empty"><b>No real trades logged yet</b><p>Use "Log a real trade" above after you buy. Close it here when you sell.</p></div>`; return; }
+      table(body, [
+        {key:"symbol",label:"Stock",fmt:r=>`<span class="tk">${esc(r.symbol)}</span>${r.note?`<div class="faint" style="font-size:11px">${esc(r.note)}</div>`:""}`},
+        {key:"strategy",label:"Strategy",fmt:r=>stratChip(r.strategy)},
+        {key:"entry_date",label:"Bought",fmt:r=>date(r.entry_date)},
+        {key:"qty",label:"Qty",right:true,fmt:r=>num0(r.qty)},
+        {key:"entry",label:"Buy",right:true,fmt:r=>inr(r.entry)},
+        {key:"slip",label:"vs paper entry",right:true,cls:r=>r.slip==null?"":r.slip>0?"dn":"up",fmt:r=>r.slip==null?`<span class="faint">no twin</span>`:pct(r.slip,2)},
+        {key:"px",label:"Exit / last",right:true,fmt:r=>r.px==null?"–":inr(r.px)},
+        {key:"ret",label:"Your result",right:true,cls:r=>cls(r.ret),fmt:r=>pct(r.ret,2)},
+        {key:"paperRet",label:"Paper result",right:true,cls:r=>cls(r.paperRet),fmt:r=>r.paperRet==null?"–":pct(r.paperRet,2)},
+        {key:"pnl",label:"P/L ₹",right:true,cls:r=>cls(r.pnl),fmt:r=>r.pnl==null?"–":inr(r.pnl,0)},
+        {key:"state",label:"",fmt:r=>r.state==="closed"
+          ? `<span class="pill mut">closed ${date(r.exit_date)}</span> <button class="btn ghost" data-del="${esc(r.id)}">Delete</button>`
+          : `<span class="rowact"><input aria-label="Exit price" placeholder="exit ₹" data-exit="${esc(r.id)}"><input aria-label="Exit date" type="date" data-exitd="${esc(r.id)}" value="${esc((d.last_completed_session||"").slice(0,10))}"><button class="btn ghost" data-close="${esc(r.id)}">Close</button><button class="btn ghost" data-del="${esc(r.id)}">Delete</button></span>`},
+      ], view, {key:"entry_date", dir:-1});
+      body.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => {
+        const id = b.dataset.close, px = num(body.querySelector(`[data-exit="${CSS.escape(id)}"]`).value);
+        const dt = body.querySelector(`[data-exitd="${CSS.escape(id)}"]`).value;
+        if (px == null || !dt){ b.textContent = "Enter price & date"; return; }
+        b.disabled = true;
+        try { await col.doc(id).update({exit: px, exit_date: dt}); } catch(e){ b.disabled = false; b.textContent = "Failed, retry"; }
+      });
+      body.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+        if (b.dataset.armed !== "1"){ b.dataset.armed = "1"; b.textContent = "Confirm delete"; b.classList.add("danger"); return; }
+        b.disabled = true;
+        try { await col.doc(b.dataset.del).delete(); } catch(e){ b.disabled = false; b.textContent = "Failed, retry"; }
+      });
+    }
+    const num0 = v => v==null ? "–" : Number(v).toLocaleString("en-IN");
+    col.orderBy("entry_date","desc").onSnapshot(snap => {
+      rows = snap.docs.map(x => ({id: x.id, ...x.data()}));
+      draw();
+    }, () => { body.innerHTML = `<div class="empty"><b>Could not load your trades</b><p>Reload the page to try again.</p></div>`; });
+    $("jForm").addEventListener("submit", async e => {
+      e.preventDefault();
+      const rec = {
+        symbol: $("jSym").value.trim().toUpperCase().replace(/\.NS$/,""),
+        strategy: $("jStrat").value, entry_date: $("jDate").value,
+        entry: num($("jPrice").value), qty: num($("jQty").value), stop: num($("jStop").value),
+        exit: null, exit_date: null, note: $("jNote").value.trim().slice(0,200),
+        created_at: new Date().toISOString(),
+      };
+      if (!rec.symbol || !rec.entry_date || rec.entry == null || rec.entry <= 0 || !rec.qty || rec.qty <= 0){
+        $("jMsg").textContent = "Stock, date, a positive price and quantity are needed."; return;
+      }
+      $("jAdd").disabled = true; $("jMsg").textContent = "Saving…";
+      try {
+        await col.add(rec);
+        $("jMsg").textContent = `Saved ${rec.symbol}.`;
+        ["jSym","jPrice","jQty","jStop","jNote"].forEach(id => $(id).value = "");
+      } catch(err){
+        $("jMsg").textContent = err?.code === "invalid_argument" ? "Only the page's owner or editors can log trades." : "Could not save. Try again.";
+      } finally { $("jAdd").disabled = false; }
+    });
   }
 
   fetch("dashboard.json", {cache:"no-store"}).then(r => { if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })

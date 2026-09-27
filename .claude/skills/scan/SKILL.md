@@ -78,6 +78,22 @@ GitHub job `.github/workflows/daily-forward-test.yml`. Do not run
 For "how is my S6 trade in X doing" or "what did S5 find today", run step 2
 and answer from the JSON. Republish only when asked or when the data changed.
 
+## Real trades (the journal)
+
+The page's "My trades" section stores real orders in the artifact's own
+database, collection `journal`, one document per trade: `symbol`,
+`strategy`, `entry_date`, `entry`, `qty`, `stop`, `exit`, `exit_date`,
+`note`. Only the owner and Editors can write it. It survives republishes.
+For "how are my real trades doing", read it with the ArtifactData tool
+(`list`, collection `journal`, url of the page) and compare with
+`forward.open` / `forward.closed` from the dashboard JSON: the same stock and
+strategy within 5 days of each other is the paper twin. Never write to it
+unless the user asks you to record or correct a trade.
+
+When republishing, omit `capabilities` so the stored declaration
+(`db` with rule read: interact, write: admin) carries forward. Passing a
+different set would revoke the journal's storage rules.
+
 ## Changing the page
 
 Edit `claude_dashboard/index.html`, rebuild the data (step 2) and republish
