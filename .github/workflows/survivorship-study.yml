@@ -24,7 +24,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: survivorship-study
+  # Not for the database (this job never pushes it) but for the Dhan token:
+  # Dhan keeps one live token per account, and every Dhan job mints a fresh one
+  # at start, so two overlapping jobs invalidate each other (DH-906). Share the
+  # group every other Dhan job uses. Start it in the evening or at a weekend:
+  # a daily run that fires meanwhile waits for it.
+  group: dhan-db
   cancel-in-progress: false
 
 jobs:

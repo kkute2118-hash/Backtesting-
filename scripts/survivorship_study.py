@@ -113,6 +113,11 @@ def main():
             f"{len(errs)} errors (last 100 kept)")
         for e in errs[:15]:
             log(f"  {e}")
+        refused = [e for e in errs if any(c in e for c in ("DH-901", "DH-902", "DH-906"))]
+        if refused:
+            # Dhan refused the account part-way; results over a partial download
+            # would look like a survivorship check but mostly repeat the stored list.
+            raise SystemExit(f"download aborted by Dhan, not reporting: {refused[0]}")
 
     con = core._db()
     try:

@@ -66,7 +66,27 @@ only when started by hand: Actions, then "Survivorship study", then Run
 workflow. Expect a few hours, most of it the download. The results are in the
 run's summary and in the `survivorship-study` artifact.
 
-Two limits remain after that run:
+### First runs, 27 Sep 2026: not yet the full check
+
+Both runs that day overlapped a daily job. Dhan keeps one live token per
+account and each job mints its own, so the daily job's token voided the
+study's part-way (DH-906 on every remaining symbol). The replays therefore
+covered only 528 and 500 stocks, almost all of them today's list:
+
+| Strategy | Trades | Win % | Avg % | In today's list: n / avg % | Not in it: n / avg % |
+|---|---|---|---|---|---|
+| S6 | 624 | 44.7 | 19.65 | 597 / 20.55 | 27 / -0.25 |
+| S5 | 1,222 | 39.4 | 3.17 | 1,218 / 3.18 | 4 / 1.22 |
+| S4 | 327 | 54.4 | 6.70 | 327 / 6.70 | 0 / - |
+
+(First run, 528 stocks, 29 outside today's list.) These confirm the
+point-in-time filtering and the live entry filters reproduce the earlier
+figures, but 27 S6 trades outside today's list is too few to judge the bias.
+The fix: the study now shares the `dhan-db` concurrency group with every other
+Dhan job, DH-906 stops a download at the first refusal, and the study exits
+with an error instead of reporting when Dhan refused the account.
+
+Two limits remain after a full run:
 
 - Companies delisted before today are not in Dhan's current instrument list,
   so they are still missing. They are few in the Nifty 500 over 2022-26, but

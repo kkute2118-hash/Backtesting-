@@ -68,6 +68,23 @@ def test_dh902_raises_an_access_error_at_once(monkeypatch):
     assert isinstance(err.value, RuntimeError)
 
 
+def test_a_replaced_token_dh906_is_an_account_refusal(monkeypatch):
+    """Two overlapping Dhan jobs: the second's fresh token voids the first's.
+    The first used to log DH-906 for every one of 2,000 symbols."""
+    body = b'{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}'
+    calls = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        return _Resp(400, body)
+
+    monkeypatch.setattr(core.requests, "post", post)
+    monkeypatch.setattr(core, "_dhan_headers", lambda: {})
+    with pytest.raises(core.DhanAccessError) as err:
+        core._dhan_post("/charts/historical", {}, label="historical")
+    assert len(calls) == 1 and "one live token" in str(err.value)
+
+
 def test_the_top_up_stops_at_the_first_account_refusal(monkeypatch):
     requested = []
 

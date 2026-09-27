@@ -134,7 +134,7 @@ def sync_full(universes: list[str], period: str = "2 Years") -> dict[str, Any]:
         data = core.sync_missing_backtest_data(tickers, start, end)
         # download_prices() replaces this list per run, so a hit is from this one.
         access = next((e for e in (core._DHAN_LAST_DATA_ERRORS or [])
-                       if "DH-901" in str(e) or "DH-902" in str(e)), None)
+                       if any(c in str(e) for c in ("DH-901", "DH-902", "DH-906"))), None)
         if access:
             raise UpstreamError(str(access).split(": ", 1)[-1])
         handle.progress(0.9, "Recording diagnostics")
