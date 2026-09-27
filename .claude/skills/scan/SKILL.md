@@ -63,6 +63,16 @@ GitHub job `.github/workflows/daily-forward-test.yml`. Do not run
    - whether prices were live or the last close (`scan.live.reason`).
    Then give the page link.
 
+5. Alert, only when there is something to act on. After a scheduled run
+   (the 15:05 routine), call the PushNotification tool with one line if the
+   JSON has any `scan.signals`, or any `forward.closed` row whose `closed_at`
+   is today, or `scan.live.degraded` is true. Examples:
+   "2 setups: WELCORP S6 buy <=2,840 stop 2,391; MCX S5 ... Page: <link>",
+   "Paper exit: ABDL S3 target +21%", "Prices NOT live: allow api.dhan.co".
+   Keep it under 200 characters, lead with the action. Send nothing on a day
+   with no setups, no exits and live prices: an alert every day stops being
+   read.
+
 ## Answering questions without republishing
 
 For "how is my S6 trade in X doing" or "what did S5 find today", run step 2
