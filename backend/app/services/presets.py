@@ -24,7 +24,7 @@ def _validate(config: dict[str, Any]) -> dict[str, Any]:
     if unknown:
         raise ApiError(f"Unsupported preset option(s): {', '.join(sorted(unknown))}")
 
-    universes = config.get("universes") or []
+    universes = [core.canonical_universe(u) for u in (config.get("universes") or [])]
     if not universes:
         raise ApiError("A preset needs at least one universe.")
     bad = [u for u in universes if u not in core.UNIVERSE_CHOICES]
@@ -58,6 +58,11 @@ def _row_to_preset(row) -> dict[str, Any]:
         record["config"] = json.loads(record["config"])
     except (TypeError, ValueError):
         record["config"] = {}
+    # Presets saved before a universe was renamed still carry the old name;
+    # hand the picker the name it can actually select.
+    if isinstance(record["config"].get("universes"), list):
+        record["config"]["universes"] = [core.canonical_universe(u)
+                                         for u in record["config"]["universes"]]
     record["builtin"] = bool(record.get("builtin"))
     return record
 

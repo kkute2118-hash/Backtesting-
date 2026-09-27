@@ -55,10 +55,29 @@ INDEX_URLS = {
     "Nifty Midcap 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
 }
 
-# The full NSE cash list, offered alongside the four index CSVs. It is resolved
-# from Dhan's scrip master rather than niftyindices.com, so it is the only option
-# that reaches beyond an index's membership.
-FULL_NSE_UNIVERSE = "NSE All Cash (~2000)"
+# The broad NSE list, offered alongside the four index CSVs. It is resolved from
+# Dhan's scrip master rather than niftyindices.com, so it is the only option that
+# reaches beyond an index's membership.
+#
+# It was called "NSE All Cash (~2000)" and resolved to every NSE row the master
+# files under the equity segment - 9,917 of them on 2026-09-20, of which only
+# 2,688 are ordinary shares (series EQ). The rest are state-development loans
+# (SG, 4,325 rows), bonds (N0-N9, GS, GB, TB), ETFs and fund units. A "2000"
+# scan was asking for ten thousand instruments; the history build ran out of
+# Dhan rate limit a third of the way through, and most of the list never had a
+# single candle. It is now the NSE_TOP_N most liquid EQ-series shares.
+FULL_NSE_UNIVERSE = "NSE Top 2000"
+NSE_TOP_N = int(os.environ.get("NSE_TOP_N", "2000"))
+# Names this universe used to go by. Saved presets, the SCAN_UNIVERSE variable
+# and past scan requests carry them, and they must keep working.
+LEGACY_UNIVERSE_NAMES = {"NSE All Cash (~2000)": FULL_NSE_UNIVERSE}
+# Series that count as an ordinary listed share. BE (trade-to-trade) and BZ
+# (surveillance) are deliberately left out: delivery-only names are not what a
+# swing scanner should surface, and the liquidity ranking would bury them anyway.
+NSE_EQUITY_SERIES = ("EQ",)
+# Liquidity is ranked on the median daily traded value over this many stored
+# sessions - a median, so one block deal cannot lift a name into the list.
+NSE_TOP_TURNOVER_SESSIONS = 60
 
 # Single source of truth for every universe picker in the UI and for
 # daily_job.py. Before this existed the same four-item list was copy-pasted into
@@ -268,14 +287,25 @@ def index_universe(name, allow_network=True):
     return symbols
 
 
-def resolve_universe(name, allow_network=True):
+def canonical_universe(name):
+    """The current name for a universe, mapping retired names onto it."""
+    name = str(name).strip()
+    return LEGACY_UNIVERSE_NAMES.get(name, name)
+
+
+def resolve_universe(name, allow_network=True, purpose="scan"):
     """Ticker list for any name in UNIVERSE_CHOICES.
 
     Use this, never index_universe(), anywhere a user picks a universe:
     index_universe() only knows the index CSVs and raises KeyError on the
     full-NSE option.
+
+    ``purpose`` only matters for the NSE Top 2000 list. A scan gets the top
+    NSE_TOP_N by stored liquidity; a download ("download") gets every EQ-series
+    candidate, because a name the store has never held cannot be ranked, and
+    downloading only the current top 2000 would freeze the list forever.
     """
-    if str(name).strip() == FULL_NSE_UNIVERSE:
+    if canonical_universe(name) == FULL_NSE_UNIVERSE:
         if not dhan_configured():
             raise RuntimeError(
                 f"'{FULL_NSE_UNIVERSE}' is built from Dhan's instrument master, so it needs "
@@ -283,15 +313,17 @@ def resolve_universe(name, allow_network=True):
                 "DHAN_ACCESS_TOKEN) to the backend environment, or pick one of the Nifty index "
                 "universes instead."
             )
+        if purpose == "download":
+            return nse_equity_universe()
         return nse_liquid_universe()
     return index_universe(name, allow_network=allow_network)
 
 
-def resolve_universes(names, allow_network=True):
+def resolve_universes(names, allow_network=True, purpose="scan"):
     """Union of several universe names, de-duplicated and sorted."""
     out = set()
     for n in names or []:
-        out.update(resolve_universe(n, allow_network=allow_network))
+        out.update(resolve_universe(n, allow_network=allow_network, purpose=purpose))
     return sorted(out)
 
 
@@ -363,6 +395,24 @@ GITHUB_BACKUP_PATH_GZ = GITHUB_BACKUP_PATH + ".gz"
 # Attempts for the upload itself, not for the whole backup: see the retry loop
 # in backup_db_to_github().
 GITHUB_UPLOAD_ATTEMPTS = 3
+
+# The largest compressed backup worth offering to the contents API. GitHub
+# rejected a 48.8 MB one with "422 Sorry, the file is too large to be
+# processed", after the upload had been built and sent in full - and building
+# it in memory is what OOM-killed the 512 MB web instance. Above this the app
+# declines up front and leaves the candle store to the scheduled workflows,
+# which push the same file with git (scripts/push_backup.sh), where the limit
+# does not apply.
+GITHUB_CONTENTS_MAX_BYTES = int(float(os.environ.get("GITHUB_CONTENTS_MAX_MB", "35")) * 1_048_576)
+
+# Compressed/raw size of the last backup this process built. A database that
+# was too big to store last time is too big now unless it shrank, and finding
+# that out again costs a full snapshot and gzip of it - after every sync.
+_LAST_BACKUP_RATIO = None
+
+# Block size for every streamed copy below. A multiple of 3, so base64 of each
+# block concatenates to base64 of the whole.
+_STREAM_BLOCK = 3 * (1 << 20)
 
 
 # GitHub refuses to create any Actions secret or repository variable whose name
@@ -572,6 +622,78 @@ def db_row_count(path=None):
         return -1
 
 
+def _snapshot_db(dest):
+    """A consistent copy of DATA_DB at `dest`, via SQLite's online backup.
+
+    Reading the file directly while a sync writes to it can capture half a
+    transaction; the backup API copies page by page under SQLite's own locking.
+    """
+    src = sqlite3.connect(DATA_DB, timeout=60)
+    try:
+        dst = sqlite3.connect(dest)
+        try:
+            src.backup(dst, pages=4096)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def _drop_derived_cache(path):
+    """Empty the feature snapshot cache in a database COPY and compact it.
+
+    The scheduled job's staging already does this (daily_job.BACKUP_SKIP_TABLES);
+    the API server's whole-database backup did not, so a full-universe scan
+    made its backup too large to store and it was skipped outright. The table
+    is kept, empty, so a restore still has the schema.
+    """
+    con = sqlite3.connect(path)
+    try:
+        has = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='feature_snapshots'").fetchone()
+        if has:
+            con.execute("DELETE FROM feature_snapshots")
+            con.commit()
+            con.execute("VACUUM")
+    finally:
+        con.close()
+
+
+def _gzip_file(src, dest, compresslevel=6):
+    with open(src, "rb") as fin, gzip.open(dest, "wb", compresslevel=compresslevel) as fout:
+        shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+
+
+def _write_contents_body(dest, fields, content_path):
+    """Write a contents-API JSON body whose "content" is base64 of a file.
+
+    The obvious version - read, b64encode, decode, json= - holds the file four
+    or five times over at once. This streams it, so memory stays at one block
+    whatever the file size.
+    """
+    head = json.dumps(fields)[:-1]  # drop the closing brace; content goes last
+    with open(dest, "wb") as out, open(content_path, "rb") as fin:
+        out.write(head.encode())
+        out.write(b', "content": "' if fields else b'"content": "')
+        while True:
+            block = fin.read(_STREAM_BLOCK)
+            if not block:
+                break
+            out.write(base64.b64encode(block))
+        out.write(b'"}')
+
+
+def _download_to(url, dest, headers, params=None, timeout=120):
+    """Stream a GET to `dest`. Returns (status, error_text); text only on failure."""
+    with requests.get(url, headers=headers, params=params, timeout=timeout, stream=True) as r:
+        if r.status_code != 200:
+            return r.status_code, r.text
+        with open(dest, "wb") as f:
+            for block in r.iter_content(chunk_size=1 << 20):
+                f.write(block)
+    return 200, ""
+
+
 def restore_db_from_github(force=False):
     """Pull the last backup from GitHub into the local database.
 
@@ -618,26 +740,38 @@ def restore_db_from_github(force=False):
         # gzipping existed would still be sitting at.
         for path, gzipped in ((GITHUB_BACKUP_PATH_GZ, True), (GITHUB_BACKUP_PATH, False)):
             url = f"https://api.github.com/repos/{repo}/contents/{path}"
-            # Raw bytes, not the JSON wrapper: above 1 MB GitHub returns the
-            # JSON with an empty content field and a 200, which used to write a
-            # zero-byte database over a perfectly good empty one.
-            r = requests.get(url, headers=_github_raw_headers(), timeout=120, params=params)
-            if r.status_code != 200:
-                last_status, last_body = r.status_code, r.text
-                continue
-
-            raw = gzip.decompress(r.content) if gzipped else r.content
-            if not raw:
-                last_status, last_body = 200, f"{path} is empty"
-                continue
-
             # Write beside the target and move into place, so an interrupted
             # download cannot leave a half-written database behind.
             tmp = f"{DATA_DB}.restore-tmp"
-            with open(tmp, "wb") as f:
-                f.write(raw)
-            os.replace(tmp, DATA_DB)
-            return True
+            dl = f"{tmp}.download"
+            try:
+                # Raw bytes, not the JSON wrapper: above 1 MB GitHub returns the
+                # JSON with an empty content field and a 200, which used to write
+                # a zero-byte database over a perfectly good empty one.
+                # Streamed to disk and decompressed from there: holding the 50 MB
+                # download and the 160 MB database in memory together is a third
+                # of the instance, on the cold start where everything else loads.
+                status, body = _download_to(url, dl, _github_raw_headers(), params=params)
+                if status != 200:
+                    last_status, last_body = status, body
+                    continue
+                if gzipped:
+                    with gzip.open(dl, "rb") as fin, open(tmp, "wb") as fout:
+                        shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+                else:
+                    os.replace(dl, tmp)
+                if os.path.getsize(tmp) == 0:
+                    last_status, last_body = 200, f"{path} is empty"
+                    continue
+                os.replace(tmp, DATA_DB)
+                return True
+            finally:
+                for leftover in (dl, tmp):
+                    try:
+                        if os.path.exists(leftover):
+                            os.remove(leftover)
+                    except OSError:
+                        pass
 
         # Nothing to restore. Record why so the Data Manager and the scheduled
         # job can report it instead of silently starting from an empty database.
@@ -655,7 +789,7 @@ def backup_db_to_github(return_reason=False):
     response entirely, so a wrong repo name, an expired token and a missing
     branch were all indistinguishable from each other — and from success.
     """
-    global _GITHUB_LAST_ERROR
+    global _GITHUB_LAST_ERROR, _LAST_BACKUP_RATIO
 
     def done(ok, reason=""):
         global _GITHUB_LAST_ERROR
@@ -683,66 +817,98 @@ def backup_db_to_github(return_reason=False):
                 return done(False, msg)
             note = msg
 
+        live_bytes = os.path.getsize(DATA_DB)
+        if _LAST_BACKUP_RATIO and live_bytes * _LAST_BACKUP_RATIO > GITHUB_CONTENTS_MAX_BYTES * 1.1:
+            est_mb = live_bytes * _LAST_BACKUP_RATIO / 1_048_576
+            return done(False, (
+                f"Skipped: the database would be about {est_mb:.0f} MB compressed, larger "
+                f"than GitHub's contents API will store (limit here "
+                f"{GITHUB_CONTENTS_MAX_BYTES / 1_048_576:.0f} MB). The candle store is backed "
+                "up by the scheduled GitHub Actions jobs instead, which push it with git; "
+                "forward tests and learning are covered by the small learning backup."))
+
         url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH_GZ}"
-        # Compressed, because the raw file is not storable past a certain size:
-        # GitHub answers a large upload with "422 Sorry, the file is too large
-        # to be processed", which is what the first full history build hit. The
-        # candle store compresses several-fold, so this is the difference
-        # between a backup that exists and one that does not.
-        with open(DATA_DB, "rb") as f:
-            packed = gzip.compress(f.read(), compresslevel=6)
-        content_b64 = base64.b64encode(packed).decode()
+        with tempfile.TemporaryDirectory(prefix="db-backup-",
+                                         dir=os.path.dirname(DATA_DB) or None) as work:
+            snap = os.path.join(work, "snapshot.sqlite3")
+            packed_path = os.path.join(work, "snapshot.sqlite3.gz")
+            body_path = os.path.join(work, "body.json")
 
-        # Need the current file's SHA if it already exists, else GitHub
-        # rejects the update as a conflicting create.
-        sha = None
-        r = requests.get(url, headers=_github_headers(), timeout=30,
-                         params={"ref": branch} if branch else None)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-        elif r.status_code in (401, 403):
-            return done(False, _github_error_hint(r.status_code, r.text))
+            # Compressed, because the raw file is not storable past a certain
+            # size: GitHub answers a large upload with "422 Sorry, the file is
+            # too large to be processed". Everything below goes through files,
+            # never whole-file bytes: the in-memory version held the database
+            # about five times over and OOM-killed the 512 MB instance.
+            _snapshot_db(snap)
+            _drop_derived_cache(snap)
+            raw_mb = os.path.getsize(snap) / 1_048_576
+            _gzip_file(snap, packed_path)
+            os.remove(snap)
+            packed_bytes = os.path.getsize(packed_path)
+            packed_mb = packed_bytes / 1_048_576
+            if raw_mb > 0:
+                _LAST_BACKUP_RATIO = packed_bytes / (raw_mb * 1_048_576)
 
-        payload = {
-            "message": f"Auto-backup DB {datetime.now().isoformat(timespec='seconds')}",
-            "content": content_b64,
-        }
-        if sha:
-            payload["sha"] = sha
-        if branch:
-            payload["branch"] = branch
+            if packed_bytes > GITHUB_CONTENTS_MAX_BYTES:
+                return done(False, (
+                    f"Skipped: the database is {packed_mb:.1f} MB compressed "
+                    f"({raw_mb:.0f} MB raw), larger than GitHub's contents API will store "
+                    f"(limit here {GITHUB_CONTENTS_MAX_BYTES / 1_048_576:.0f} MB). The candle "
+                    "store is backed up by the scheduled GitHub Actions jobs instead, which "
+                    "push it with git; forward tests and learning are covered by the small "
+                    "learning backup."))
 
-        # GitHub answers a multi-megabyte upload with a 502 often enough to
-        # matter: one did, and it cost a full scan — the day's forward-test
-        # candidates went into a container that was discarded a second later.
-        # A transient server error is worth retrying; a 4xx never is, because
-        # nothing about waiting makes a bad token or a too-large file valid.
-        put_r = None
-        for attempt in range(1, GITHUB_UPLOAD_ATTEMPTS + 1):
-            put_r = requests.put(url, headers=_github_headers(), json=payload, timeout=300)
-            retryable = put_r.status_code >= 500 or _github_is_throttled(put_r.status_code,
-                                                                        put_r.text)
-            if not retryable or attempt == GITHUB_UPLOAD_ATTEMPTS:
-                break
-            # GitHub says how long to wait when it is throttling; believe it.
-            backoff = min(60, 2 ** attempt)
-            for header in ("Retry-After", "X-RateLimit-Reset"):
-                try:
-                    hinted = float(put_r.headers.get(header, "") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if header == "X-RateLimit-Reset" and hinted > 1_000_000_000:
-                    hinted -= time.time()          # it is an epoch, not a duration
-                if hinted > 0:
-                    backoff = max(backoff, min(120.0, hinted))
+            # Need the current file's SHA if it already exists, else GitHub
+            # rejects the update as a conflicting create.
+            sha = None
+            r = requests.get(url, headers=_github_headers(), timeout=30,
+                             params={"ref": branch} if branch else None)
+            if r.status_code == 200:
+                sha = r.json().get("sha")
+            elif r.status_code in (401, 403):
+                return done(False, _github_error_hint(r.status_code, r.text))
+
+            fields = {"message": f"Auto-backup DB {datetime.now().isoformat(timespec='seconds')}"}
+            if sha:
+                fields["sha"] = sha
+            if branch:
+                fields["branch"] = branch
+            _write_contents_body(body_path, fields, packed_path)
+            os.remove(packed_path)
+
+            headers = dict(_github_headers(), **{"Content-Type": "application/json"})
+            # GitHub answers a multi-megabyte upload with a 502 often enough to
+            # matter: one did, and it cost a full scan — the day's forward-test
+            # candidates went into a container that was discarded a second later.
+            # A transient server error is worth retrying; a 4xx never is, because
+            # nothing about waiting makes a bad token or a too-large file valid.
+            put_r = None
+            for attempt in range(1, GITHUB_UPLOAD_ATTEMPTS + 1):
+                # A file object with a known size: requests streams it with a
+                # Content-Length instead of reading it into memory.
+                with open(body_path, "rb") as body:
+                    put_r = requests.put(url, headers=headers, data=body, timeout=300)
+                retryable = put_r.status_code >= 500 or _github_is_throttled(put_r.status_code,
+                                                                            put_r.text)
+                if not retryable or attempt == GITHUB_UPLOAD_ATTEMPTS:
                     break
-            time.sleep(backoff)
+                # GitHub says how long to wait when it is throttling; believe it.
+                backoff = min(60, 2 ** attempt)
+                for header in ("Retry-After", "X-RateLimit-Reset"):
+                    try:
+                        hinted = float(put_r.headers.get(header, "") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if header == "X-RateLimit-Reset" and hinted > 1_000_000_000:
+                        hinted -= time.time()          # it is an epoch, not a duration
+                    if hinted > 0:
+                        backoff = max(backoff, min(120.0, hinted))
+                        break
+                time.sleep(backoff)
         if put_r.status_code in (200, 201):
-            mb = os.path.getsize(DATA_DB) / 1_048_576
-            packed_mb = len(packed) / 1_048_576
             where = f"{repo}@{branch or 'default branch'}:{GITHUB_BACKUP_PATH_GZ}"
             return done(True, (note + " " if note else "")
-                              + f"Backed up {mb:.1f} MB ({packed_mb:.1f} MB compressed) to {where}.")
+                              + f"Backed up {raw_mb:.1f} MB ({packed_mb:.1f} MB compressed) to {where}.")
         return done(False, _github_error_hint(put_r.status_code, put_r.text))
     except Exception as exc:
         return done(False, f"{type(exc).__name__}: {exc}")
@@ -870,6 +1036,11 @@ REBUILDABLE_TABLES = {
     "live_latest",        # intraday only
     "dhan_token_cache",   # expires in 24h anyway, and is a credential
     "dhan_history_floor", # re-probed automatically
+    # One pickled feature frame per symbol, ~190 KB each: ~380 MB across the
+    # NSE Top 2000, far past what a GitHub backup can hold. Rebuilt from the
+    # candles by the next scan. Left in, it would make the learning backup -
+    # the only copy of the forward tests on the web host - too big to store.
+    "feature_snapshots",
 }
 
 
@@ -1132,6 +1303,36 @@ _DHAN_NO_DATA_LOCK=threading.Lock()
 
 class DhanNoDataError(RuntimeError):
     """Dhan answered DH-907: no candles exist in the requested date range."""
+
+
+class DhanAccessError(RuntimeError):
+    """Dhan refused the ACCOUNT, not the request: every symbol will fail alike.
+
+    DH-901 is an invalid or expired access token; DH-902 is an account without
+    an active Data API subscription. Neither is fixed by retrying, or by asking
+    for a different stock, so a 500-symbol sync that meets one should stop at
+    the first and say so - not spend two minutes collecting 500 copies of it.
+    """
+
+
+# Dhan's words are accurate but not actionable; these say what to do.
+_DHAN_ACCESS_HINTS = {
+    "DH-901": ("The Dhan access token is invalid or expired. Use Data Manager → "
+               "Renew token (needs DHAN_PIN and DHAN_TOTP_SECRET), or paste a fresh "
+               "DHAN_ACCESS_TOKEN into the backend environment."),
+    "DH-902": ("Your Dhan account does not have an active Data API subscription, so "
+               "Dhan refuses every historical and quote request. Renew the Data API "
+               "plan in Dhan (web.dhan.co → My Profile → DhanHQ Trading APIs), then "
+               "retry. The stored candles and the GitHub backup still work meanwhile."),
+}
+
+
+def _dhan_access_error(text):
+    """A DhanAccessError for an account-level refusal in `text`, else None."""
+    for code, hint in _DHAN_ACCESS_HINTS.items():
+        if code in str(text):
+            return DhanAccessError(f"{code}: {hint}")
+    return None
 
 
 def _note_no_data(symbol,start_date,end_date,scope):
@@ -1534,16 +1735,73 @@ def _startup_restore_learning():
 _startup_restore_learning()
 
 
-@st.cache_data(ttl=86400,show_spinner=False)
+# The only scrip-master columns anything reads (dhan_map, dhan_index_map and
+# the stock page's name lookup), lower-cased. The file has ~16 columns and
+# ~250k rows, almost all of them derivatives; loaded whole it cost 100-200 MB
+# of a 512 MB instance, and stayed resident for the day.
+_DHAN_MASTER_COLUMNS = {
+    "sem_trading_symbol", "trading_symbol", "sem_custom_symbol", "custom_symbol",
+    "sem_smst_security_id", "sem_security_id", "security_id",
+    "sem_exm_exch_id", "exchange", "sem_segment", "segment",
+    "sem_instrument_name", "instrument", "sem_exch_instrument_type", "sm_symbol_name",
+    # The series (EQ, BE, SG, N0...) is the only column that tells an ordinary
+    # share from a state loan, a bond or an ETF - all filed as NSE equity.
+    "sem_series", "series",
+}
+# Rows worth keeping: cash equity (dhan_map) and indices (dhan_index_map).
+_DHAN_MASTER_SEGMENTS = {"E", "EQUITY", "NSE_EQ", "I", "INDEX", "IDX_I"}
+_DHAN_MASTER_INSTRUMENTS = {"EQUITY", "INDEX", "IDX", "I"}
+
+
+def _dhan_master_rows(chunk):
+    """Keep equity and index rows; derivatives, currency and commodity go."""
+    cols = {str(c).strip().lower(): c for c in chunk.columns}
+    keep = None
+    seg = cols.get("sem_segment") or cols.get("segment")
+    if seg is not None:
+        keep = chunk[seg].astype(str).str.upper().str.strip().isin(_DHAN_MASTER_SEGMENTS)
+    for name in ("sem_instrument_name", "instrument", "sem_exch_instrument_type"):
+        ins = cols.get(name)
+        if ins is not None:
+            hit = chunk[ins].astype(str).str.upper().str.strip().isin(_DHAN_MASTER_INSTRUMENTS)
+            keep = hit if keep is None else (keep | hit)
+    return chunk if keep is None else chunk[keep]
+
+
+# cache_resource, not cache_data: cache_data hands every caller a fresh copy of
+# the frame, and the stock page asks for it on every view. No caller mutates it.
+@st.cache_resource(ttl=86400,show_spinner=False,max_entries=1)
 def dhan_master():
     urls=["https://images.dhan.co/api-data/api-scrip-master.csv",
           "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"]
     last=""
     for u in urls:
+        tmp=None
         try:
-            r=requests.get(u,timeout=45); r.raise_for_status()
-            if len(r.content)>1000:return pd.read_csv(io.BytesIO(r.content),low_memory=False)
+            # Streamed to disk rather than held as bytes: the raw CSV is tens of
+            # megabytes, and parsing it from memory doubled that at the peak.
+            with requests.get(u,timeout=45,stream=True) as r:
+                r.raise_for_status()
+                with tempfile.NamedTemporaryFile(prefix="dhan-master-",suffix=".csv",
+                                                 delete=False) as f:
+                    tmp=f.name
+                    for block in r.iter_content(chunk_size=1<<20):
+                        f.write(block)
+            if os.path.getsize(tmp)<=1000:
+                last=f"{u} returned an empty file"
+                continue
+            parts=[_dhan_master_rows(c) for c in pd.read_csv(
+                tmp,usecols=lambda c:str(c).strip().lower() in _DHAN_MASTER_COLUMNS,
+                dtype=str,chunksize=50_000)]
+            m=pd.concat(parts,ignore_index=True) if parts else pd.DataFrame()
+            if not m.empty:
+                return m
+            last=f"{u} held no equity or index rows"
         except Exception as e:last=str(e)
+        finally:
+            if tmp:
+                try:os.remove(tmp)
+                except OSError:pass
     raise RuntimeError("Dhan instrument master failed: "+last)
 
 @st.cache_data(ttl=86400,show_spinner=False)
@@ -1567,6 +1825,36 @@ def dhan_map():
         q=sv.isin(["E","EQUITY","NSE_EQ"])
         if q.any():m=m[q]
     return dict(zip(m.symbol,m.security_id.astype(str)))
+
+
+@st.cache_data(ttl=86400,show_spinner=False)
+def dhan_equity_symbols():
+    """NSE symbols whose series is an ordinary share (NSE_EQUITY_SERIES).
+
+    dhan_map() stays unfiltered on purpose: it is the security-id lookup for
+    every symbol the app ever touches, including indices' constituents that a
+    stricter filter could drop. This is only the membership test for the
+    NSE Top 2000 universe.
+
+    Returns None when the master carries no series column, so the caller can
+    say so instead of silently falling back to bonds and ETFs.
+    """
+    m=dhan_master()
+    cols={str(c).strip().lower():c for c in m.columns}
+    sym=next((cols[k] for k in ["sem_trading_symbol","trading_symbol","sem_custom_symbol","custom_symbol"] if k in cols),None)
+    ser=next((cols[k] for k in ["sem_series","series"] if k in cols),None)
+    ex=next((cols[k] for k in ["sem_exm_exch_id","exchange"] if k in cols),None)
+    seg=next((cols[k] for k in ["sem_segment","segment"] if k in cols),None)
+    if not sym or not ser:
+        return None
+    keep=m[ser].astype(str).str.upper().str.strip().isin(NSE_EQUITY_SERIES)
+    if ex:
+        keep&=m[ex].astype(str).str.upper().isin(["NSE","NSE_EQ"])
+    if seg:
+        sv=m[seg].astype(str).str.upper().str.strip()
+        q=sv.isin(["E","EQUITY","NSE_EQ"])
+        if q.any():keep&=q
+    return sorted(set(m.loc[keep,sym].astype(str).str.upper().str.strip()))
 
 # ========================= MARKET CLOCK =========================
 # Every session-date rule below is written against IST wall-clock. They all used
@@ -2264,6 +2552,9 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
         # gets its own type instead of being reported as a build failure.
         if "DH-907" in r.text:
             raise DhanNoDataError(last_error)
+        access = _dhan_access_error(r.text)
+        if access is not None:
+            raise access
         if r.status_code in DHAN_RETRY_STATUSES or "DH-904" in r.text:
             backoff = min(8, 2 ** attempt)
             # Dhan does not always send Retry-After, but when it does it is
@@ -2488,10 +2779,17 @@ def download_prices(tickers,start,end,max_workers=4,refresh_tail_days=0):
     errors=[]
     workers=max(1,min(int(max_workers),5))
 
+    aborted=[]  # first DH-901/DH-902: the rest would fail identically
+
     def worker(symbol):
+        if aborted:
+            return symbol,0,None
         try:
             saved=update_dhan_symbol(symbol,start,end,refresh_tail_days=refresh_tail_days)
             return symbol,saved,None
+        except DhanAccessError as exc:
+            aborted.append(str(exc))
+            return symbol,0,str(exc)
         except Exception as exc:
             return symbol,0,str(exc)
 
@@ -3173,15 +3471,66 @@ def advanced_small_micro_safety(info,d,news_risk=0):
 # manipulated/illiquid name. The SEPA strategy logic itself lives further down,
 # next to s4_base_conditions()/strategy_signal().
 
-def nse_liquid_universe(exclude_sme=True):
-    """The Dhan NSE cash-equity list (~1900-2100 names depending on the day's
-    scrip master). Same universe for S1, S2, S3, and S4 - no BSE, no SME board
-    by default, no derivatives-only names."""
-    symbols = sorted(dhan_map().keys())
+def nse_equity_universe(exclude_sme=True):
+    """Every ordinary NSE share (series EQ): ~2,700 names on the day's master.
+
+    The candidate pool for the NSE Top 2000. No BSE, no SME board, and - unlike
+    the old list - no state loans, bonds, ETFs or fund units.
+    """
+    symbols = dhan_equity_symbols()
+    if symbols is None:
+        raise RuntimeError(
+            "Dhan's instrument master has no series column, so ordinary shares cannot be "
+            "told apart from bonds and ETFs. Pick a Nifty index universe instead.")
     tickers = [f"{s}.NS" for s in symbols]
     if exclude_sme:
         tickers = [t for t in tickers if not t.endswith("SM.NS") and "-SM" not in t]
     return tickers
+
+
+def stored_median_turnover(tickers, sessions=NSE_TOP_TURNOVER_SESSIONS):
+    """{ticker: median daily traded value in Rs} over the newest stored sessions.
+
+    One query over the candle store, no Dhan calls. A ticker with no stored
+    candles is simply absent from the result.
+    """
+    wanted = {str(t).upper().replace(".NS", ""): t for t in tickers}
+    if not wanted:
+        return {}
+    # Calendar days comfortably covering `sessions` trading days.
+    since = (market_today() - timedelta(days=int(sessions * 1.6) + 10)).isoformat()
+    con = _db()
+    try:
+        rows = con.execute(
+            "SELECT symbol, dt, close * volume FROM candles WHERE dt >= ?", (since,)
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows, columns=["symbol", "dt", "value"])
+    df = df[df.symbol.isin(wanted.keys())]
+    if df.empty:
+        return {}
+    df = df.sort_values("dt").groupby("symbol").tail(int(sessions))
+    med = df.groupby("symbol")["value"].median()
+    return {wanted[s]: float(v) for s, v in med.items() if pd.notna(v)}
+
+
+def nse_liquid_universe(exclude_sme=True, top_n=None):
+    """The NSE Top 2000: the `top_n` most liquid ordinary shares.
+
+    Same universe for every strategy. Ranked by stored median traded value; a
+    candidate the store has never downloaded ranks after every one it has, so
+    until the first full history build this is simply the EQ list in order.
+    """
+    top_n = NSE_TOP_N if top_n is None else int(top_n)
+    candidates = nse_equity_universe(exclude_sme=exclude_sme)
+    if len(candidates) <= top_n:
+        return candidates
+    turnover = stored_median_turnover(candidates)
+    ranked = sorted(candidates, key=lambda t: (t not in turnover, -turnover.get(t, 0.0), t))
+    return sorted(ranked[:top_n])
 
 
 def _price_action_quality(d, lookback=60):
@@ -6296,6 +6645,42 @@ def market_breakout_breadth(force=False):
     return series
 
 
+# Point-in-time universe. A backtest over "today's Nifty 500" picks its stocks
+# with knowledge of the future: names that grew into the index are in the
+# list, names that shrank out of it are not, and the early years look better
+# than anyone could have traded. Historical membership lists are not published
+# in a usable form, so membership is approximated the way the index is built
+# in practice - by size - using only data known before each session: a stock
+# is eligible on day d when its median daily traded value over the previous
+# PIT_TURNOVER_WINDOW sessions ranks in the top `top_n` of every stock with a
+# price that day. It cannot bring back stocks that are missing from the store
+# altogether; research/SURVIVORSHIP.md says how that part is handled.
+PIT_TURNOVER_WINDOW = 60
+PIT_MIN_HISTORY = 40
+
+
+def point_in_time_universe(data, top_n=500, window=PIT_TURNOVER_WINDOW,
+                           min_history=PIT_MIN_HISTORY):
+    """DataFrame (dates x symbols) of bools: eligible on that date.
+
+    `data` is {symbol: daily frame with close and volume}. Uses turnover up to
+    the PREVIOUS session only, so a stock's own breakout day cannot vote it
+    into the universe.
+    """
+    if not data:
+        return pd.DataFrame()
+    turn = {}
+    for sym, df in data.items():
+        if df is None or df.empty:
+            continue
+        value = pd.to_numeric(df["close"], errors="coerce") * pd.to_numeric(df["volume"], errors="coerce")
+        turn[str(sym).upper().replace(".NS", "")] = (
+            value.rolling(window, min_periods=min_history).median().shift(1))
+    t = pd.DataFrame(turn).sort_index()
+    ranks = t.rank(axis=1, ascending=False, method="first")
+    return (ranks <= int(top_n)) & t.notna()
+
+
 def attach_market_breadth(x, breadth=None):
     """Return `x` with the S6 breadth column joined on its dates.
 
@@ -6380,16 +6765,77 @@ def s6_exit(bars, entry, initial_stop):
     at the close once it is S6_TRAIL_PCT below the highest close since entry.
     Identical to the backtest that chose these parameters.
     """
+    status, price, _i = s6_exit_walk(bars, entry, initial_stop)
+    return status, price
+
+
+def s6_exit_walk(bars, entry, initial_stop):
+    """s6_exit() plus the position of the exit bar in `bars` (None if open)."""
     peak = float(entry)
     for i in range(1, len(bars)):
         bar = bars.iloc[i]
         if np.isfinite(initial_stop) and float(bar.low) <= initial_stop:
-            return "STOP", min(float(bar.open), float(initial_stop))
+            return "STOP", min(float(bar.open), float(initial_stop)), i
         close = float(bar.close)
         peak = max(peak, close)
         if close < peak * (1 - S6_TRAIL_PCT / 100.0):
-            return "TRAIL_STOP", close
-    return "ACTIVE", None
+            return "TRAIL_STOP", close, i
+    return "ACTIVE", None, None
+
+
+def run_s6_backtest(data, start, end, breadth=None, eligible=None, max_hold_bars=None):
+    """Walk-forward replay of S6 on its own exit, one row per trade.
+
+    Entry at the signal day's close (the playbook's entry: a scan shortly
+    before 15:30 with live prices). Exit by s6_exit(): the 3 x ATR initial stop
+    fills intraday, the 20% trail is a close rule. `breadth` defaults to the
+    stored-universe breadth; `eligible` is an optional point-in-time universe
+    mask (point_in_time_universe()) - a signal on a day the stock was not
+    eligible is skipped. S6 has no time exit, so by default a trade runs until
+    its stop or trail fires; one still running at the end of the data is valued
+    at the last close and marked "OPEN". `max_hold_bars` caps that for studies
+    that need a horizon.
+    """
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    b = market_breakout_breadth() if breadth is None else breadth
+    rows = []
+    for ticker, df in data.items():
+        if df is None or len(df) < 260:
+            continue
+        sym = str(ticker).upper().replace(".NS", "")
+        x = attach_market_breadth(df, b)
+        sig = strategy6_signal(x)
+        feats = strategy6_features(x)
+        idx = np.flatnonzero(sig.to_numpy())
+        for i in idx:
+            d = x.index[i]
+            if d < start or d > end:
+                continue
+            if eligible is not None:
+                try:
+                    if not bool(eligible.at[pd.Timestamp(d), sym]):
+                        continue
+                except KeyError:
+                    continue
+            entry = float(x.close.iloc[i])
+            atr = float(feats.s6_atr.iloc[i])
+            if not np.isfinite(atr) or atr <= 0:
+                continue
+            stop = entry - S6_INITIAL_STOP_ATR * atr
+            bars = x.iloc[i:] if max_hold_bars is None else x.iloc[i:i + int(max_hold_bars) + 1]
+            status, exit_px, exit_i = s6_exit_walk(bars, entry, stop)
+            if status == "ACTIVE":
+                status, exit_px, exit_i = "OPEN", float(bars.close.iloc[-1]), len(bars) - 1
+            rows.append({
+                "Ticker": sym, "Strategy": S6_LABEL, "Signal Date": d.date(),
+                "Entry Date": d.date(), "Exit Date": bars.index[exit_i].date(),
+                "Entry": round(entry, 2), "Initial SL": round(stop, 2), "Exit": round(exit_px, 2),
+                "Exit Reason": status, "Return %": round((exit_px / entry - 1) * 100, 3),
+                "R": round((exit_px - entry) / (entry - stop), 3), "Holding Bars": int(exit_i),
+                "ATR %": round(float(feats.s6_atr_pct.iloc[i]), 3),
+                "Breadth": round(float(feats.s6_breadth.iloc[i]), 3),
+            })
+    return pd.DataFrame(rows)
 
 
 def strategy_signal(x,s):
@@ -8931,6 +9377,32 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
     return result
 
 
+def _sqlite_type_for(series):
+    """SQLite column affinity for a pandas column."""
+    if pd.api.types.is_bool_dtype(series) or pd.api.types.is_integer_dtype(series):
+        return "INTEGER"
+    if pd.api.types.is_numeric_dtype(series):
+        return "REAL"
+    return "TEXT"
+
+
+def _add_missing_columns(con, table, frame):
+    """Add any column of `frame` that `table` lacks, before an insert.
+
+    The fingerprint gained columns over time (score_htf, score_trend, ...) but
+    CREATE TABLE IF NOT EXISTS never touches an existing table, so a database
+    restored from an older backup rejected every insert with "has no column
+    named score_trend" - after the whole backtest had already run. Adding the
+    column is safe: old rows read it as NULL.
+    """
+    have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    for col in frame.columns:
+        if col in have or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(col)):
+            continue
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {_sqlite_type_for(frame[col])}")
+        have.add(col)
+
+
 def _persist_raw_fingerprints(result, start, end, universe_size):
     if result.empty:
         return
@@ -8945,6 +9417,7 @@ def _persist_raw_fingerprints(result, start, end, universe_size):
         run_id = cur.lastrowid
         cols = list(result.columns)
         db_cols = [c for c in cols if c not in ("created_at",)]  # created_at handled per-row already present
+        _add_missing_columns(con, "raw_signal_fingerprints", result[db_cols])
         placeholders = ",".join(["?"] * (len(db_cols) + 1))
         col_list = ",".join(["run_id"] + db_cols)
         rows = [tuple([run_id] + [r.get(c) for c in db_cols]) for _, r in result.iterrows()]
@@ -9493,12 +9966,20 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
     updated = 0
     workers = max(1, min(int(max_workers), 5))
     done = 0
+    # Set on the first account-level refusal (DH-901/DH-902). Every remaining
+    # symbol would fail identically, so the rest are skipped, not requested.
+    aborted = []
 
     def worker(symbol):
+        if aborted:
+            return symbol, 0, None
         try:
             # tail refresh, so a candle stored mid-session is corrected once the
             # real close is published rather than being trusted forever.
             return symbol, update_dhan_symbol(symbol, start, end, refresh_tail_days=int(tail_days)), None
+        except DhanAccessError as exc:
+            aborted.append(str(exc))
+            return symbol, 0, str(exc)
         except Exception as exc:
             return symbol, 0, str(exc)
 
@@ -9540,7 +10021,8 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
 
     return {"symbols": len(symbols), "updated": updated, "latest": newest,
             "errors": errors[:20], "advanced": advanced,
-            "no_data": len(_DHAN_LAST_NO_DATA)}
+            "no_data": len(_DHAN_LAST_NO_DATA),
+            "aborted": aborted[0] if aborted else ""}
 
 
 def dhan_history_floor_table():
@@ -11989,6 +12471,34 @@ def portfolio_from_backtest(bt,capital,risk_pct,slots):
         if equity<=0:equity=0;break
     return {"Starting Capital":round(capital,2),"Final Capital":round(equity,2),"Profit ₹":round(equity-capital,2),"ROI %":round((equity/capital-1)*100,2),"Max DD %":round(maxdd,2),"Trades":taken,"Risk/Trade %":risk_pct,"Slots (display)":slots}
 
+def warm_feature_snapshots(tickers, progress_cb=None, chunk=200):
+    """Compute and store every ticker's scan features ahead of the next scan.
+
+    A scan spends most of its time in features_fast() the first time it sees a
+    session's candles (~140 ms a stock; ~15 ms once the snapshot exists), so
+    doing that work straight after a sync is what makes the user's scan fast.
+    Frames come from load_scan_dataset() exactly as a scan loads them, because
+    a snapshot is only reused when it was computed from the identical frame.
+    Chunked so memory stays at a few hundred frames. Returns how many were warmed.
+    """
+    tickers = list(tickers)
+    total = max(1, len(tickers))
+    warmed = 0
+    for start in range(0, len(tickers), chunk):
+        data = load_scan_dataset(tickers[start:start + chunk])
+        for ticker, df in data.items():
+            try:
+                features_fast(str(ticker), df)
+                warmed += 1
+            except Exception:
+                pass
+        data = None
+        if progress_cb:
+            progress_cb(min(1.0, (start + chunk) / total))
+    release_memory()
+    return warmed
+
+
 def load_scan_dataset(tickers, min_bars=260, lookback_days=1000):
     """Local-only candle load for a scan. Makes zero Dhan calls."""
     data = {}
@@ -12135,6 +12645,200 @@ def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
     if atr_pct < ENTRY_MIN_ATR_PCT:
         return False, f"ATR {atr_pct:.1f}% < {ENTRY_MIN_ATR_PCT:.1f}%", metrics
     return True, f"ATR {atr_pct:.1f}%", metrics
+
+
+# ---- the entry filter, replayed on a past date -----------------------------
+# entry_filter_verdict() reads TODAY's sector ranks and the latest 20 bars, so
+# it cannot judge a signal from 2023. Backtests that claim to measure "what the
+# scanner trades" need the same three rules evaluated with what was known on
+# the signal day.
+
+def sector_rank_history(lookback=ENTRY_SECTOR_LOOKBACK, source="index"):
+    """DataFrame (dates x sectors): rank by `lookback`-day return relative to
+    REGIME_INDEX, 1 = strongest, as current_sector_ranks() computes it for
+    today. Only sectors with a stored index and enough members are ranked."""
+    bench = load_index_history(REGIME_INDEX)
+    if bench is None or bench.empty:
+        return pd.DataFrame()
+    members = {}
+    for sym, secs in sector_map(source=source).items():
+        for sec in secs:
+            members.setdefault(sec, []).append(sym)
+    b = bench.close
+    rel = {}
+    for sector, syms in members.items():
+        if len(syms) < SECTOR_MIN_MEMBERS_TO_RANK:
+            continue
+        px = load_index_history(f"NIFTY {sector.upper()}")
+        if px is None or px.empty:
+            continue
+        rel[sector] = ((px.close / px.close.shift(lookback) - 1)
+                       - (b / b.shift(lookback) - 1).reindex(px.index)) * 100
+    if not rel:
+        return pd.DataFrame()
+    return pd.DataFrame(rel).rank(axis=1, ascending=False)
+
+
+def historical_entry_verdict(strategy, frame, signal_date, sector_ranks=None,
+                             sector_lookup=None, ticker=None):
+    """entry_filter_verdict() for a past signal: (passed, reason, metrics).
+
+    Same rules and thresholds; turnover, ATR and sector rank are read as of
+    `signal_date` (the last 20 bars up to and including it, the sector ranking
+    of that day or the last one before it).
+    """
+    d = pd.Timestamp(signal_date)
+    hist = frame[frame.index <= d]
+    if hist.empty:
+        return False, "no data on the signal date", {}
+    rule = ENTRY_FILTER_BY_STRATEGY.get(int(strategy), "atr")
+    turnover = _entry_turnover_cr(hist)
+    c = hist.close
+    tr = pd.concat([hist.high - hist.low, (hist.high - c.shift()).abs(),
+                    (hist.low - c.shift()).abs()], axis=1).max(axis=1)
+    atr14 = tr.rolling(14).mean().iloc[-1]   # features_fast's atr14: simple mean of TR
+    atr_pct = float(atr14 / c.iloc[-1] * 100) if len(c) >= 15 else np.nan
+    rank = np.nan
+    if sector_ranks is not None and not sector_ranks.empty and sector_lookup is not None and ticker:
+        row = sector_ranks[sector_ranks.index <= d]
+        if len(row):
+            row = row.iloc[-1]
+            secs = sector_lookup.get(str(ticker).replace(".NS", "").upper(), [])
+            vals = [row[s] for s in secs if s in row.index and pd.notna(row[s])]
+            if vals:
+                rank = float(min(vals))
+    metrics = {"atr_pct": atr_pct, "turnover_cr": turnover, "sector_rank": rank}
+    if rule == "none":
+        return True, "own rules only", metrics
+    if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
+        return False, "turnover below floor", metrics
+    if rule == "sector":
+        ok = np.isfinite(rank) and rank <= ENTRY_SECTOR_RANK_MAX
+        return ok, ("sector rank ok" if ok else "sector rank"), metrics
+    ok = np.isfinite(atr_pct) and atr_pct >= ENTRY_MIN_ATR_PCT
+    return ok, ("ATR ok" if ok else "ATR below floor"), metrics
+
+
+# ---- corporate results calendar -------------------------------------------
+# A setup a few days before quarterly results carries event risk the price
+# chart cannot see: several of the 2025-26 winners moved on results, and so
+# do stops that gap. This calendar is a FLAG on setups and positions, not a
+# filter - skipping pre-results setups has not been tested, and the evidence
+# rule for this engine is that an untested rule does not gate anything.
+#
+# Source: NSE's public board-meetings feed, which lists each company's
+# upcoming meeting and its purpose. It needs a browser-like session (NSE sets
+# cookies on its home page and refuses API calls without them) and it is only
+# reachable from an unrestricted network - the GitHub runner, not the Claude
+# cloud environment - so daily_job.py fetches it and the backup carries it.
+NSE_HOME_URL = "https://www.nseindia.com"
+NSE_BOARD_MEETINGS_URL = "https://www.nseindia.com/api/corporate-board-meetings"
+RESULTS_EVENT_WINDOW_DAYS = 7          # "results soon" = within this many calendar days
+RESULTS_PURPOSE_WORDS = ("result",)     # "Financial Results", "Quarterly Results", ...
+
+
+def _ensure_corporate_events_table(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS corporate_events(
+        symbol TEXT NOT NULL, event_date TEXT NOT NULL, purpose TEXT NOT NULL,
+        source TEXT, fetched_at TEXT, PRIMARY KEY(symbol, event_date, purpose))""")
+
+
+def parse_board_meetings(payload):
+    """NSE board-meeting rows -> [{symbol, event_date (ISO), purpose}], results only.
+
+    Accepts the feed's list (or {"data": [...]}) and tolerates the key names NSE
+    has used for it. Rows whose purpose does not mention results, or whose
+    date does not parse, are dropped.
+    """
+    rows = payload.get("data", payload) if isinstance(payload, dict) else payload
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("bm_symbol") or r.get("symbol") or "").strip().upper()
+        purpose = str(r.get("bm_purpose") or r.get("purpose") or r.get("bm_desc") or "").strip()
+        raw = str(r.get("bm_date") or r.get("meetingDate") or r.get("date") or "").strip()
+        if not sym or not raw or not any(w in purpose.lower() for w in RESULTS_PURPOSE_WORDS):
+            continue
+        when = None
+        for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y"):
+            try:
+                when = datetime.strptime(raw.split(" ")[0] if fmt != "%d %b %Y" else raw, fmt).date()
+                break
+            except ValueError:
+                continue
+        if when is None:
+            continue
+        out.append({"symbol": sym, "event_date": when.isoformat(), "purpose": purpose[:200]})
+    return out
+
+
+def fetch_nse_board_meetings(from_date, to_date, timeout=20):
+    """Upcoming results meetings from NSE, parsed. Raises on network failure."""
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-board-meetings",
+    }
+    ses = requests.Session()
+    ses.get(NSE_HOME_URL, headers=headers, timeout=timeout)
+    r = ses.get(NSE_BOARD_MEETINGS_URL, headers=headers, timeout=timeout, params={
+        "index": "equities",
+        "from_date": pd.Timestamp(from_date).strftime("%d-%m-%Y"),
+        "to_date": pd.Timestamp(to_date).strftime("%d-%m-%Y"),
+    })
+    r.raise_for_status()
+    payload = r.json()
+    rows = parse_board_meetings(payload)
+    raw_count = len(payload.get("data", payload)) if isinstance(payload, (dict, list)) else 0
+    return rows, raw_count
+
+
+def store_corporate_events(rows, source="nse-board-meetings"):
+    if not rows:
+        return 0
+    now = datetime.now().isoformat(timespec="seconds")
+    con = _db()
+    try:
+        _ensure_corporate_events_table(con)
+        con.executemany(
+            "INSERT OR REPLACE INTO corporate_events(symbol,event_date,purpose,source,fetched_at) "
+            "VALUES(?,?,?,?,?)",
+            [(r["symbol"], r["event_date"], r["purpose"], source, now) for r in rows])
+        con.commit()
+    finally:
+        con.close()
+    return len(rows)
+
+
+def upcoming_results(symbols=None, on_date=None, days=RESULTS_EVENT_WINDOW_DAYS):
+    """{SYMBOL: first results date within `days` calendar days from on_date}."""
+    start = pd.Timestamp(market_today() if on_date is None else on_date).date()
+    end = start + timedelta(days=int(days))
+    con = _db()
+    try:
+        _ensure_corporate_events_table(con)
+        rows = con.execute(
+            "SELECT symbol, MIN(event_date) FROM corporate_events "
+            "WHERE event_date >= ? AND event_date <= ? GROUP BY symbol",
+            (start.isoformat(), end.isoformat())).fetchall()
+    finally:
+        con.close()
+    wanted = None if symbols is None else {str(s).upper().replace(".NS", "") for s in symbols}
+    return {sym: d for sym, d in rows if wanted is None or sym in wanted}
+
+
+def corporate_events_freshness():
+    """Newest fetched_at in the calendar, or None when it was never filled."""
+    con = _db()
+    try:
+        _ensure_corporate_events_table(con)
+        row = con.execute("SELECT MAX(fetched_at) FROM corporate_events").fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
 
 
 def process_rss_mb():

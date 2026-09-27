@@ -35,7 +35,7 @@ Configuration comes from environment variables (see core._secret):
     optional   DB_BACKUP_BRANCH  dedicated branch for the backup commits
                SCAN_UNIVERSE     default "Nifty 500"; any name in
                                  core.UNIVERSE_CHOICES, including
-                                 "NSE All Cash (~2000)" for the full list
+                                 "NSE Top 2000" for the 2000 most liquid shares
                SCAN_STRATEGIES   default core.DEFAULT_STRATEGIES ("4,5,6");
                                  retired S1-S3 are ignored
                SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
@@ -133,7 +133,7 @@ def _universes():
     """Universe names from SCAN_UNIVERSE, validated against the engine's own list.
 
     This used to check against a hand-copied set of the four index names, which
-    silently dropped "NSE All Cash (~2000)" — the one option this file's own
+    silently dropped the full-NSE option — the one option this file's own
     docstring tells you to use for the full list. Validating against
     core.UNIVERSE_CHOICES is the whole point of that constant existing.
 
@@ -145,6 +145,7 @@ def _universes():
     requested = [u.strip() for u in str(raw).split("|") if u.strip()]
     out, unknown = [], []
     for name in requested:
+        name = core.canonical_universe(name)
         (out if name in core.UNIVERSE_CHOICES else unknown).append(name)
     for name in unknown:
         log("universe", f"ignoring unknown SCAN_UNIVERSE entry {name!r}; "
@@ -279,6 +280,24 @@ def step_resolve():
     core._metric_set("forward_last_resolved_at", datetime.now().isoformat(timespec="seconds"))
     log("resolve", f"{checked} open position(s) checked, {closed} resolved")
     return checked, closed
+
+
+def step_events(days_ahead=30):
+    """Refresh the results calendar from NSE. Never fails the run: a missing
+    calendar only removes the 'results soon' flags, it changes no trade."""
+    today = core.market_today()
+    try:
+        rows, raw = core.fetch_nse_board_meetings(today, today + timedelta(days=days_ahead))
+    except Exception as exc:
+        log("events", f"results calendar not refreshed ({type(exc).__name__}: {str(exc)[:160]})")
+        return None
+    stored = core.store_corporate_events(rows)
+    if raw and not rows:
+        log("events", f"NSE returned {raw} board meetings but none parsed as results; "
+                      "the feed's format may have changed")
+    log("events", f"{stored} results meeting(s) stored for the next {days_ahead} days "
+                  f"({raw} board meetings listed)")
+    return stored
 
 
 def step_scan(tickers, strategies, min_score, session_date=None):
@@ -472,10 +491,16 @@ def run_daily():
                      f"working against {session}")
 
     universes = _universes()
-    tickers = core.resolve_universes(universes)
-    log("universe", f"{', '.join(universes)} — {len(tickers):,} symbols")
+    # Download every candidate, scan the ranked list: for the NSE Top 2000 the
+    # two differ (see core.resolve_universe); for an index they are the same.
+    download = core.resolve_universes(universes, purpose="download")
+    log("universe", f"{', '.join(universes)} — {len(download):,} symbols to sync")
 
-    step_sync(tickers, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
+    step_sync(download, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
+
+    tickers = core.resolve_universes(universes)
+    if len(tickers) != len(download):
+        log("universe", f"scanning the {len(tickers):,} most liquid of them")
 
     freshness = core.data_freshness_status(tickers)
     stored = freshness["latest"]
@@ -492,6 +517,7 @@ def run_daily():
 
     checked, closed = step_resolve()
     summary["resolved"] = closed
+    summary["results_events"] = step_events()
 
     # Scan the newest session the store actually HOLDS, not the newest one the
     # calendar expects.
@@ -634,7 +660,7 @@ def run_bootstrap():
         log("rebuild", f"deleted {removed:,} stored candle(s); every bar will be re-downloaded")
 
     universes = _universes()
-    tickers = core.resolve_universes(universes)
+    tickers = core.resolve_universes(universes, purpose="download")
     summary["universes"] = universes
     summary["symbols"] = len(tickers)
     log("universe", f"{', '.join(universes)} — {len(tickers):,} symbols")

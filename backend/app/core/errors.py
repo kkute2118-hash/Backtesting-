@@ -54,7 +54,7 @@ def _envelope(code: str, message: str, detail: str | None = None) -> dict:
 
 
 def install_error_handlers(app: FastAPI) -> None:
-    from app.engine.core import DatabaseUnavailable, DhanNoDataError
+    from app.engine.core import DatabaseUnavailable, DhanAccessError, DhanNoDataError
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
@@ -73,6 +73,16 @@ def install_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=_envelope("no_data", str(exc)),
+        )
+
+    @app.exception_handler(DhanAccessError)
+    async def _dhan_access(request: Request, exc: DhanAccessError) -> JSONResponse:
+        # A known account state (expired token, lapsed Data API plan), not a
+        # defect: one line in the log, and the fix in the response.
+        log.warning("Dhan refused %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=_envelope("dhan_access", str(exc)),
         )
 
     @app.exception_handler(Exception)

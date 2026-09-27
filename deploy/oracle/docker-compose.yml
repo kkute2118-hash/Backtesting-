@@ -1,0 +1,50 @@
+# The whole app on one Oracle Cloud "Always Free" server.
+#
+# Started by cloud-init.sh; to update by hand later:
+#   cd /opt/ati-lab && git pull && docker compose -f deploy/oracle/docker-compose.yml up -d --build
+#
+# Caddy is the only thing listening publicly (port 80). It sends the API's
+# paths to the API and everything else to the web app, so the browser talks to
+# one origin: no CORS, and no second port to open in Oracle's firewall.
+
+services:
+  api:
+    build: ../../backend
+    env_file: .env
+    environment:
+      DATA_DB: /data/market_data.sqlite3
+      CORS_ORIGINS: ${PUBLIC_URL}
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      # A named volume, never the checkout: `git pull` must not touch the data.
+      - market-data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../../frontend
+      args:
+        # Compiled into the browser bundle, so it is the PUBLIC address.
+        NEXT_PUBLIC_API_URL: ${PUBLIC_URL}
+    environment:
+      # The server-side mutation gateway talks to the API over the internal
+      # network, and attaches the key; the browser never sees either.
+      API_BACKEND_URL: http://api:8000
+      API_ACCESS_KEY: ${API_ACCESS_KEY}
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+volumes:
+  market-data:

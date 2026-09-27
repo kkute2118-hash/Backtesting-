@@ -22,7 +22,7 @@ on:
           - 'Nifty Midcap 150'
           - 'Nifty Smallcap 100'
           - 'Nifty Smallcap 250'
-          - 'NSE All Cash (~2000)'
+          - 'NSE Top 2000'
       period:
         description: 'How far back to replay'
         required: true

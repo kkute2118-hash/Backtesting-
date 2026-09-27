@@ -1,0 +1,21 @@
+# One public origin for both processes. /api/gateway belongs to the web app
+# (it is the Next server's mutation proxy), so it is matched before /api/v1.
+:80 {
+	encode gzip
+
+	handle /api/gateway/* {
+		reverse_proxy web:3000
+	}
+	handle /api/v1/* {
+		reverse_proxy api:8000
+	}
+	handle /docs* {
+		reverse_proxy api:8000
+	}
+	handle /openapi.json {
+		reverse_proxy api:8000
+	}
+	handle {
+		reverse_proxy web:3000
+	}
+}

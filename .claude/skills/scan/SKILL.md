@@ -63,13 +63,50 @@ GitHub job `.github/workflows/daily-forward-test.yml`. Do not run
    - whether prices were live or the last close (`scan.live.reason`).
    Then give the page link.
 
+5. Alert, only when there is something to act on. After a scheduled run
+   (the 15:05 routine), call the PushNotification tool with one line if the
+   JSON has any `scan.signals`, or any `forward.closed` row whose `closed_at`
+   is today, or `scan.live.degraded` is true. Examples:
+   "2 setups: WELCORP S6 buy <=2,840 stop 2,391; MCX S5 ... Page: <link>",
+   "Paper exit: ABDL S3 target +21%", "Prices NOT live: allow api.dhan.co".
+   Keep it under 200 characters, lead with the action. Send nothing on a day
+   with no setups, no exits and live prices: an alert every day stops being
+   read.
+
 ## Answering questions without republishing
 
 For "how is my S6 trade in X doing" or "what did S5 find today", run step 2
 and answer from the JSON. Republish only when asked or when the data changed.
+
+## Real trades (the journal)
+
+The page's "My trades" section stores real orders in the artifact's own
+database, collection `journal`, one document per trade: `symbol`,
+`strategy`, `entry_date`, `entry`, `qty`, `stop`, `exit`, `exit_date`,
+`note`. Only the owner and Editors can write it. It survives republishes.
+For "how are my real trades doing", read it with the ArtifactData tool
+(`list`, collection `journal`, url of the page) and compare with
+`forward.open` / `forward.closed` from the dashboard JSON: the same stock and
+strategy within 5 days of each other is the paper twin. Never write to it
+unless the user asks you to record or correct a trade.
+
+When republishing, omit `capabilities` so the stored declaration
+(`db` with rule read: interact, write: admin) carries forward. Passing a
+different set would revoke the journal's storage rules.
 
 ## Changing the page
 
 Edit `claude_dashboard/index.html`, rebuild the data (step 2) and republish
 (step 3). Keep the page reading everything from `dashboard.json`: the JSON
 shape is produced by `scripts/claude_dashboard.py`, so add fields there first.
+
+## Schedules (Claude routines, not GitHub)
+
+| IST, weekdays | Routine | What it does |
+|---|---|---|
+| 09:05 | ATI Lab morning data job kick | Wakes a small dedicated session that calls `workflow_dispatch` on `daily-forward-test.yml`. GitHub starts its own cron runs 4-5 hours late on this repository; dispatched runs start within seconds. The workflow's crons stay as a fallback. |
+| 15:05 | ATI Lab daily scan | Wakes the session that owns the page and runs this skill. The morning job has finished by then, so the page shows the newest candles, forward-test results and setups before the 15:30 close. |
+
+Manage them in claude.ai under Routines. If the page's "Updated" time is not
+today's afternoon on a trading day, check the 15:05 routine first; if its
+"Data" chip is a day behind, check the morning kick and the workflow's runs.

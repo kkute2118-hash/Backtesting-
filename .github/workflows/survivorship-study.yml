@@ -1,0 +1,61 @@
+# Replays S4/S5/S6 over the WHOLE NSE cash market with a point-in-time
+# universe, to measure how much "today's Nifty 500" flatters every other study.
+# See scripts/survivorship_study.py.
+#
+# Read-only with respect to the database backup: it restores the backup into
+# the runner, downloads the extra ~1,500 stocks into that throwaway copy, and
+# uploads only the results. Nothing is pushed, so it cannot race the daily job
+# for the backup and does not grow it.
+name: Survivorship study
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "Years of history to download and replay"
+        required: true
+        default: "5"
+      top_n:
+        description: "Point-in-time universe size (top N by trailing traded value)"
+        required: true
+        default: "500"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: survivorship-study
+  cancel-in-progress: false
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Run the study
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_PIN: ${{ secrets.DHAN_PIN }}
+          DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # Read the backup only. contents: read above means this token cannot
+          # push even by accident.
+          GH_BACKUP_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DB_BACKUP_BRANCH: ${{ vars.DB_BACKUP_BRANCH || 'db-backup' }}
+          GTF_DATA_DIR: ${{ runner.temp }}/survivorship-db
+        run: |
+          python scripts/survivorship_study.py "$RUNNER_TEMP/survivorship" \
+            --download --years "${{ inputs.years }}" --top-n "${{ inputs.top_n }}"
+          cat "$RUNNER_TEMP/survivorship/survivorship.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: survivorship-study
+          path: ${{ runner.temp }}/survivorship

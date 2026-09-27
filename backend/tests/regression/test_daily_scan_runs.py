@@ -75,7 +75,7 @@ def install_stubs(daily_job):
     core._dhan_pin_totp_configured = lambda: True
     core._dhan_manual_token_configured = lambda: False
     core._read_cached_dhan_token = lambda: STATE["cached_token"]
-    core.resolve_universes = lambda u: [f"S{i}.NS" for i in range(1, 6)]
+    core.resolve_universes = lambda u, **_: [f"S{i}.NS" for i in range(1, 6)]
     core.UNIVERSE_CHOICES = ["Nifty 500"]
     core.latest_completed_nse_session = lambda *a, **k: STATE["expected"]
     core.last_expected_nse_session = lambda *a, **k: STATE["expected"]
