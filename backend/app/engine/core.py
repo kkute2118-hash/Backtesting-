@@ -6296,6 +6296,42 @@ def market_breakout_breadth(force=False):
     return series
 
 
+# Point-in-time universe. A backtest over "today's Nifty 500" picks its stocks
+# with knowledge of the future: names that grew into the index are in the
+# list, names that shrank out of it are not, and the early years look better
+# than anyone could have traded. Historical membership lists are not published
+# in a usable form, so membership is approximated the way the index is built
+# in practice - by size - using only data known before each session: a stock
+# is eligible on day d when its median daily traded value over the previous
+# PIT_TURNOVER_WINDOW sessions ranks in the top `top_n` of every stock with a
+# price that day. It cannot bring back stocks that are missing from the store
+# altogether; research/SURVIVORSHIP.md says how that part is handled.
+PIT_TURNOVER_WINDOW = 60
+PIT_MIN_HISTORY = 40
+
+
+def point_in_time_universe(data, top_n=500, window=PIT_TURNOVER_WINDOW,
+                           min_history=PIT_MIN_HISTORY):
+    """DataFrame (dates x symbols) of bools: eligible on that date.
+
+    `data` is {symbol: daily frame with close and volume}. Uses turnover up to
+    the PREVIOUS session only, so a stock's own breakout day cannot vote it
+    into the universe.
+    """
+    if not data:
+        return pd.DataFrame()
+    turn = {}
+    for sym, df in data.items():
+        if df is None or df.empty:
+            continue
+        value = pd.to_numeric(df["close"], errors="coerce") * pd.to_numeric(df["volume"], errors="coerce")
+        turn[str(sym).upper().replace(".NS", "")] = (
+            value.rolling(window, min_periods=min_history).median().shift(1))
+    t = pd.DataFrame(turn).sort_index()
+    ranks = t.rank(axis=1, ascending=False, method="first")
+    return (ranks <= int(top_n)) & t.notna()
+
+
 def attach_market_breadth(x, breadth=None):
     """Return `x` with the S6 breadth column joined on its dates.
 
@@ -6380,16 +6416,77 @@ def s6_exit(bars, entry, initial_stop):
     at the close once it is S6_TRAIL_PCT below the highest close since entry.
     Identical to the backtest that chose these parameters.
     """
+    status, price, _i = s6_exit_walk(bars, entry, initial_stop)
+    return status, price
+
+
+def s6_exit_walk(bars, entry, initial_stop):
+    """s6_exit() plus the position of the exit bar in `bars` (None if open)."""
     peak = float(entry)
     for i in range(1, len(bars)):
         bar = bars.iloc[i]
         if np.isfinite(initial_stop) and float(bar.low) <= initial_stop:
-            return "STOP", min(float(bar.open), float(initial_stop))
+            return "STOP", min(float(bar.open), float(initial_stop)), i
         close = float(bar.close)
         peak = max(peak, close)
         if close < peak * (1 - S6_TRAIL_PCT / 100.0):
-            return "TRAIL_STOP", close
-    return "ACTIVE", None
+            return "TRAIL_STOP", close, i
+    return "ACTIVE", None, None
+
+
+def run_s6_backtest(data, start, end, breadth=None, eligible=None, max_hold_bars=None):
+    """Walk-forward replay of S6 on its own exit, one row per trade.
+
+    Entry at the signal day's close (the playbook's entry: a scan shortly
+    before 15:30 with live prices). Exit by s6_exit(): the 3 x ATR initial stop
+    fills intraday, the 20% trail is a close rule. `breadth` defaults to the
+    stored-universe breadth; `eligible` is an optional point-in-time universe
+    mask (point_in_time_universe()) - a signal on a day the stock was not
+    eligible is skipped. S6 has no time exit, so by default a trade runs until
+    its stop or trail fires; one still running at the end of the data is valued
+    at the last close and marked "OPEN". `max_hold_bars` caps that for studies
+    that need a horizon.
+    """
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    b = market_breakout_breadth() if breadth is None else breadth
+    rows = []
+    for ticker, df in data.items():
+        if df is None or len(df) < 260:
+            continue
+        sym = str(ticker).upper().replace(".NS", "")
+        x = attach_market_breadth(df, b)
+        sig = strategy6_signal(x)
+        feats = strategy6_features(x)
+        idx = np.flatnonzero(sig.to_numpy())
+        for i in idx:
+            d = x.index[i]
+            if d < start or d > end:
+                continue
+            if eligible is not None:
+                try:
+                    if not bool(eligible.at[pd.Timestamp(d), sym]):
+                        continue
+                except KeyError:
+                    continue
+            entry = float(x.close.iloc[i])
+            atr = float(feats.s6_atr.iloc[i])
+            if not np.isfinite(atr) or atr <= 0:
+                continue
+            stop = entry - S6_INITIAL_STOP_ATR * atr
+            bars = x.iloc[i:] if max_hold_bars is None else x.iloc[i:i + int(max_hold_bars) + 1]
+            status, exit_px, exit_i = s6_exit_walk(bars, entry, stop)
+            if status == "ACTIVE":
+                status, exit_px, exit_i = "OPEN", float(bars.close.iloc[-1]), len(bars) - 1
+            rows.append({
+                "Ticker": sym, "Strategy": S6_LABEL, "Signal Date": d.date(),
+                "Entry Date": d.date(), "Exit Date": bars.index[exit_i].date(),
+                "Entry": round(entry, 2), "Initial SL": round(stop, 2), "Exit": round(exit_px, 2),
+                "Exit Reason": status, "Return %": round((exit_px / entry - 1) * 100, 3),
+                "R": round((exit_px - entry) / (entry - stop), 3), "Holding Bars": int(exit_i),
+                "ATR %": round(float(feats.s6_atr_pct.iloc[i]), 3),
+                "Breadth": round(float(feats.s6_breadth.iloc[i]), 3),
+            })
+    return pd.DataFrame(rows)
 
 
 def strategy_signal(x,s):
@@ -12162,6 +12259,78 @@ def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
     if atr_pct < ENTRY_MIN_ATR_PCT:
         return False, f"ATR {atr_pct:.1f}% < {ENTRY_MIN_ATR_PCT:.1f}%", metrics
     return True, f"ATR {atr_pct:.1f}%", metrics
+
+
+# ---- the entry filter, replayed on a past date -----------------------------
+# entry_filter_verdict() reads TODAY's sector ranks and the latest 20 bars, so
+# it cannot judge a signal from 2023. Backtests that claim to measure "what the
+# scanner trades" need the same three rules evaluated with what was known on
+# the signal day.
+
+def sector_rank_history(lookback=ENTRY_SECTOR_LOOKBACK, source="index"):
+    """DataFrame (dates x sectors): rank by `lookback`-day return relative to
+    REGIME_INDEX, 1 = strongest, as current_sector_ranks() computes it for
+    today. Only sectors with a stored index and enough members are ranked."""
+    bench = load_index_history(REGIME_INDEX)
+    if bench is None or bench.empty:
+        return pd.DataFrame()
+    members = {}
+    for sym, secs in sector_map(source=source).items():
+        for sec in secs:
+            members.setdefault(sec, []).append(sym)
+    b = bench.close
+    rel = {}
+    for sector, syms in members.items():
+        if len(syms) < SECTOR_MIN_MEMBERS_TO_RANK:
+            continue
+        px = load_index_history(f"NIFTY {sector.upper()}")
+        if px is None or px.empty:
+            continue
+        rel[sector] = ((px.close / px.close.shift(lookback) - 1)
+                       - (b / b.shift(lookback) - 1).reindex(px.index)) * 100
+    if not rel:
+        return pd.DataFrame()
+    return pd.DataFrame(rel).rank(axis=1, ascending=False)
+
+
+def historical_entry_verdict(strategy, frame, signal_date, sector_ranks=None,
+                             sector_lookup=None, ticker=None):
+    """entry_filter_verdict() for a past signal: (passed, reason, metrics).
+
+    Same rules and thresholds; turnover, ATR and sector rank are read as of
+    `signal_date` (the last 20 bars up to and including it, the sector ranking
+    of that day or the last one before it).
+    """
+    d = pd.Timestamp(signal_date)
+    hist = frame[frame.index <= d]
+    if hist.empty:
+        return False, "no data on the signal date", {}
+    rule = ENTRY_FILTER_BY_STRATEGY.get(int(strategy), "atr")
+    turnover = _entry_turnover_cr(hist)
+    c = hist.close
+    tr = pd.concat([hist.high - hist.low, (hist.high - c.shift()).abs(),
+                    (hist.low - c.shift()).abs()], axis=1).max(axis=1)
+    atr14 = tr.rolling(14).mean().iloc[-1]   # features_fast's atr14: simple mean of TR
+    atr_pct = float(atr14 / c.iloc[-1] * 100) if len(c) >= 15 else np.nan
+    rank = np.nan
+    if sector_ranks is not None and not sector_ranks.empty and sector_lookup is not None and ticker:
+        row = sector_ranks[sector_ranks.index <= d]
+        if len(row):
+            row = row.iloc[-1]
+            secs = sector_lookup.get(str(ticker).replace(".NS", "").upper(), [])
+            vals = [row[s] for s in secs if s in row.index and pd.notna(row[s])]
+            if vals:
+                rank = float(min(vals))
+    metrics = {"atr_pct": atr_pct, "turnover_cr": turnover, "sector_rank": rank}
+    if rule == "none":
+        return True, "own rules only", metrics
+    if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
+        return False, "turnover below floor", metrics
+    if rule == "sector":
+        ok = np.isfinite(rank) and rank <= ENTRY_SECTOR_RANK_MAX
+        return ok, ("sector rank ok" if ok else "sector rank"), metrics
+    ok = np.isfinite(atr_pct) and atr_pct >= ENTRY_MIN_ATR_PCT
+    return ok, ("ATR ok" if ok else "ATR below floor"), metrics
 
 
 def process_rss_mb():
