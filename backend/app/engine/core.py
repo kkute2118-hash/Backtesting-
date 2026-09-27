@@ -55,10 +55,29 @@ INDEX_URLS = {
     "Nifty Midcap 150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
 }
 
-# The full NSE cash list, offered alongside the four index CSVs. It is resolved
-# from Dhan's scrip master rather than niftyindices.com, so it is the only option
-# that reaches beyond an index's membership.
-FULL_NSE_UNIVERSE = "NSE All Cash (~2000)"
+# The broad NSE list, offered alongside the four index CSVs. It is resolved from
+# Dhan's scrip master rather than niftyindices.com, so it is the only option that
+# reaches beyond an index's membership.
+#
+# It was called "NSE All Cash (~2000)" and resolved to every NSE row the master
+# files under the equity segment - 9,917 of them on 2026-09-20, of which only
+# 2,688 are ordinary shares (series EQ). The rest are state-development loans
+# (SG, 4,325 rows), bonds (N0-N9, GS, GB, TB), ETFs and fund units. A "2000"
+# scan was asking for ten thousand instruments; the history build ran out of
+# Dhan rate limit a third of the way through, and most of the list never had a
+# single candle. It is now the NSE_TOP_N most liquid EQ-series shares.
+FULL_NSE_UNIVERSE = "NSE Top 2000"
+NSE_TOP_N = int(os.environ.get("NSE_TOP_N", "2000"))
+# Names this universe used to go by. Saved presets, the SCAN_UNIVERSE variable
+# and past scan requests carry them, and they must keep working.
+LEGACY_UNIVERSE_NAMES = {"NSE All Cash (~2000)": FULL_NSE_UNIVERSE}
+# Series that count as an ordinary listed share. BE (trade-to-trade) and BZ
+# (surveillance) are deliberately left out: delivery-only names are not what a
+# swing scanner should surface, and the liquidity ranking would bury them anyway.
+NSE_EQUITY_SERIES = ("EQ",)
+# Liquidity is ranked on the median daily traded value over this many stored
+# sessions - a median, so one block deal cannot lift a name into the list.
+NSE_TOP_TURNOVER_SESSIONS = 60
 
 # Single source of truth for every universe picker in the UI and for
 # daily_job.py. Before this existed the same four-item list was copy-pasted into
@@ -268,14 +287,25 @@ def index_universe(name, allow_network=True):
     return symbols
 
 
-def resolve_universe(name, allow_network=True):
+def canonical_universe(name):
+    """The current name for a universe, mapping retired names onto it."""
+    name = str(name).strip()
+    return LEGACY_UNIVERSE_NAMES.get(name, name)
+
+
+def resolve_universe(name, allow_network=True, purpose="scan"):
     """Ticker list for any name in UNIVERSE_CHOICES.
 
     Use this, never index_universe(), anywhere a user picks a universe:
     index_universe() only knows the index CSVs and raises KeyError on the
     full-NSE option.
+
+    ``purpose`` only matters for the NSE Top 2000 list. A scan gets the top
+    NSE_TOP_N by stored liquidity; a download ("download") gets every EQ-series
+    candidate, because a name the store has never held cannot be ranked, and
+    downloading only the current top 2000 would freeze the list forever.
     """
-    if str(name).strip() == FULL_NSE_UNIVERSE:
+    if canonical_universe(name) == FULL_NSE_UNIVERSE:
         if not dhan_configured():
             raise RuntimeError(
                 f"'{FULL_NSE_UNIVERSE}' is built from Dhan's instrument master, so it needs "
@@ -283,15 +313,17 @@ def resolve_universe(name, allow_network=True):
                 "DHAN_ACCESS_TOKEN) to the backend environment, or pick one of the Nifty index "
                 "universes instead."
             )
+        if purpose == "download":
+            return nse_equity_universe()
         return nse_liquid_universe()
     return index_universe(name, allow_network=allow_network)
 
 
-def resolve_universes(names, allow_network=True):
+def resolve_universes(names, allow_network=True, purpose="scan"):
     """Union of several universe names, de-duplicated and sorted."""
     out = set()
     for n in names or []:
-        out.update(resolve_universe(n, allow_network=allow_network))
+        out.update(resolve_universe(n, allow_network=allow_network, purpose=purpose))
     return sorted(out)
 
 
@@ -1686,6 +1718,9 @@ _DHAN_MASTER_COLUMNS = {
     "sem_smst_security_id", "sem_security_id", "security_id",
     "sem_exm_exch_id", "exchange", "sem_segment", "segment",
     "sem_instrument_name", "instrument", "sem_exch_instrument_type", "sm_symbol_name",
+    # The series (EQ, BE, SG, N0...) is the only column that tells an ordinary
+    # share from a state loan, a bond or an ETF - all filed as NSE equity.
+    "sem_series", "series",
 }
 # Rows worth keeping: cash equity (dhan_map) and indices (dhan_index_map).
 _DHAN_MASTER_SEGMENTS = {"E", "EQUITY", "NSE_EQ", "I", "INDEX", "IDX_I"}
@@ -1764,6 +1799,36 @@ def dhan_map():
         q=sv.isin(["E","EQUITY","NSE_EQ"])
         if q.any():m=m[q]
     return dict(zip(m.symbol,m.security_id.astype(str)))
+
+
+@st.cache_data(ttl=86400,show_spinner=False)
+def dhan_equity_symbols():
+    """NSE symbols whose series is an ordinary share (NSE_EQUITY_SERIES).
+
+    dhan_map() stays unfiltered on purpose: it is the security-id lookup for
+    every symbol the app ever touches, including indices' constituents that a
+    stricter filter could drop. This is only the membership test for the
+    NSE Top 2000 universe.
+
+    Returns None when the master carries no series column, so the caller can
+    say so instead of silently falling back to bonds and ETFs.
+    """
+    m=dhan_master()
+    cols={str(c).strip().lower():c for c in m.columns}
+    sym=next((cols[k] for k in ["sem_trading_symbol","trading_symbol","sem_custom_symbol","custom_symbol"] if k in cols),None)
+    ser=next((cols[k] for k in ["sem_series","series"] if k in cols),None)
+    ex=next((cols[k] for k in ["sem_exm_exch_id","exchange"] if k in cols),None)
+    seg=next((cols[k] for k in ["sem_segment","segment"] if k in cols),None)
+    if not sym or not ser:
+        return None
+    keep=m[ser].astype(str).str.upper().str.strip().isin(NSE_EQUITY_SERIES)
+    if ex:
+        keep&=m[ex].astype(str).str.upper().isin(["NSE","NSE_EQ"])
+    if seg:
+        sv=m[seg].astype(str).str.upper().str.strip()
+        q=sv.isin(["E","EQUITY","NSE_EQ"])
+        if q.any():keep&=q
+    return sorted(set(m.loc[keep,sym].astype(str).str.upper().str.strip()))
 
 # ========================= MARKET CLOCK =========================
 # Every session-date rule below is written against IST wall-clock. They all used
@@ -3380,15 +3445,66 @@ def advanced_small_micro_safety(info,d,news_risk=0):
 # manipulated/illiquid name. The SEPA strategy logic itself lives further down,
 # next to s4_base_conditions()/strategy_signal().
 
-def nse_liquid_universe(exclude_sme=True):
-    """The Dhan NSE cash-equity list (~1900-2100 names depending on the day's
-    scrip master). Same universe for S1, S2, S3, and S4 - no BSE, no SME board
-    by default, no derivatives-only names."""
-    symbols = sorted(dhan_map().keys())
+def nse_equity_universe(exclude_sme=True):
+    """Every ordinary NSE share (series EQ): ~2,700 names on the day's master.
+
+    The candidate pool for the NSE Top 2000. No BSE, no SME board, and - unlike
+    the old list - no state loans, bonds, ETFs or fund units.
+    """
+    symbols = dhan_equity_symbols()
+    if symbols is None:
+        raise RuntimeError(
+            "Dhan's instrument master has no series column, so ordinary shares cannot be "
+            "told apart from bonds and ETFs. Pick a Nifty index universe instead.")
     tickers = [f"{s}.NS" for s in symbols]
     if exclude_sme:
         tickers = [t for t in tickers if not t.endswith("SM.NS") and "-SM" not in t]
     return tickers
+
+
+def stored_median_turnover(tickers, sessions=NSE_TOP_TURNOVER_SESSIONS):
+    """{ticker: median daily traded value in Rs} over the newest stored sessions.
+
+    One query over the candle store, no Dhan calls. A ticker with no stored
+    candles is simply absent from the result.
+    """
+    wanted = {str(t).upper().replace(".NS", ""): t for t in tickers}
+    if not wanted:
+        return {}
+    # Calendar days comfortably covering `sessions` trading days.
+    since = (market_today() - timedelta(days=int(sessions * 1.6) + 10)).isoformat()
+    con = _db()
+    try:
+        rows = con.execute(
+            "SELECT symbol, dt, close * volume FROM candles WHERE dt >= ?", (since,)
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows, columns=["symbol", "dt", "value"])
+    df = df[df.symbol.isin(wanted.keys())]
+    if df.empty:
+        return {}
+    df = df.sort_values("dt").groupby("symbol").tail(int(sessions))
+    med = df.groupby("symbol")["value"].median()
+    return {wanted[s]: float(v) for s, v in med.items() if pd.notna(v)}
+
+
+def nse_liquid_universe(exclude_sme=True, top_n=None):
+    """The NSE Top 2000: the `top_n` most liquid ordinary shares.
+
+    Same universe for every strategy. Ranked by stored median traded value; a
+    candidate the store has never downloaded ranks after every one it has, so
+    until the first full history build this is simply the EQ list in order.
+    """
+    top_n = NSE_TOP_N if top_n is None else int(top_n)
+    candidates = nse_equity_universe(exclude_sme=exclude_sme)
+    if len(candidates) <= top_n:
+        return candidates
+    turnover = stored_median_turnover(candidates)
+    ranked = sorted(candidates, key=lambda t: (t not in turnover, -turnover.get(t, 0.0), t))
+    return sorted(ranked[:top_n])
 
 
 def _price_action_quality(d, lookback=60):

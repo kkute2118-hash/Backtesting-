@@ -70,7 +70,7 @@ def sync_latest(universes: list[str], tail_days: int | None = None) -> dict[str,
     while its session was still open gets corrected once it really closes.
     """
     _require_dhan()
-    tickers = resolve(universes)
+    tickers = resolve(universes, purpose="download")
     days = int(tail_days or core.LATEST_SYNC_TAIL_DAYS)
     request = {"universes": universes, "tail_days": days, "universe_size": len(tickers)}
 
@@ -104,7 +104,7 @@ def sync_full(universes: list[str], period: str = "2 Years") -> dict[str, Any]:
     _require_dhan()
     from app.services.backtest import period_window
 
-    tickers = resolve(universes)
+    tickers = resolve(universes, purpose="download")
     start, end = period_window(period)
     request = {"universes": universes, "period": period, "universe_size": len(tickers)}
 
@@ -142,7 +142,7 @@ def sync_full(universes: list[str], period: str = "2 Years") -> dict[str, Any]:
 
 def diagnostics(universes: list[str]) -> dict[str, Any]:
     """Why each thin symbol is thin: not in the master, an API error, or new."""
-    tickers = resolve(universes)
+    tickers = resolve(universes, purpose="download")
     request = {"universes": universes, "universe_size": len(tickers)}
 
     def work(handle: JobHandle) -> dict[str, Any]:

@@ -36,7 +36,8 @@ def run_screens(*, universes: list[str], run_a: bool, run_b: bool) -> dict[str, 
         raise ApiError("Select at least one screen to run.")
     # index_universe() is what the engine's screen walks, so the full-NSE option
     # (which comes from the Dhan master, not an index CSV) is not offered here.
-    index_only = [u for u in universes if u != core.FULL_NSE_UNIVERSE]
+    index_only = [u for u in universes
+                  if core.canonical_universe(u) != core.FULL_NSE_UNIVERSE]
     if not index_only:
         raise ApiError("Fundamental screens run over the Nifty index universes.")
     request = {"universes": index_only, "run_a": run_a, "run_b": run_b}
