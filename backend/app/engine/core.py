@@ -8931,6 +8931,32 @@ def run_raw_signal_backtest(data, strategies, start, end, progress_cb=None):
     return result
 
 
+def _sqlite_type_for(series):
+    """SQLite column affinity for a pandas column."""
+    if pd.api.types.is_bool_dtype(series) or pd.api.types.is_integer_dtype(series):
+        return "INTEGER"
+    if pd.api.types.is_numeric_dtype(series):
+        return "REAL"
+    return "TEXT"
+
+
+def _add_missing_columns(con, table, frame):
+    """Add any column of `frame` that `table` lacks, before an insert.
+
+    The fingerprint gained columns over time (score_htf, score_trend, ...) but
+    CREATE TABLE IF NOT EXISTS never touches an existing table, so a database
+    restored from an older backup rejected every insert with "has no column
+    named score_trend" - after the whole backtest had already run. Adding the
+    column is safe: old rows read it as NULL.
+    """
+    have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    for col in frame.columns:
+        if col in have or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(col)):
+            continue
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {_sqlite_type_for(frame[col])}")
+        have.add(col)
+
+
 def _persist_raw_fingerprints(result, start, end, universe_size):
     if result.empty:
         return
@@ -8945,6 +8971,7 @@ def _persist_raw_fingerprints(result, start, end, universe_size):
         run_id = cur.lastrowid
         cols = list(result.columns)
         db_cols = [c for c in cols if c not in ("created_at",)]  # created_at handled per-row already present
+        _add_missing_columns(con, "raw_signal_fingerprints", result[db_cols])
         placeholders = ",".join(["?"] * (len(db_cols) + 1))
         col_list = ",".join(["run_id"] + db_cols)
         rows = [tuple([run_id] + [r.get(c) for c in db_cols]) for _, r in result.iterrows()]
