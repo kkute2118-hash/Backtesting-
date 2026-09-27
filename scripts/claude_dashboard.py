@@ -117,14 +117,46 @@ def restore() -> int:
     return n
 
 
+DHAN_HOSTS = ("api.dhan.co", "images.dhan.co", "auth.dhan.co")
+
+
+def dhan_blocked_hosts() -> list[str]:
+    """Dhan hosts this machine cannot open a connection to.
+
+    attach_live_bars() swallows every failure and returns no bars, which reads
+    exactly like "Dhan had no quotes". Probing first keeps a blocked network
+    (the cloud environment's allowlist) from hiding behind that message.
+    """
+    import requests
+    blocked = []
+    for host in DHAN_HOSTS:
+        try:
+            requests.head(f"https://{host}/", timeout=6, allow_redirects=False)
+        except requests.exceptions.RequestException:
+            blocked.append(host)
+    return blocked
+
+
 def live_overlay(data: dict) -> tuple[dict, dict]:
-    """Today's forming candle, if the market is open and Dhan answers."""
-    status = {"used": False, "symbols": 0, "reason": ""}
+    """Today's forming candle, if the market is open and Dhan answers.
+
+    `degraded` is True when the market is open but prices are NOT live, which
+    is the case the page must shout about: every entry and stop shown is then
+    a day old.
+    """
+    status = {"used": False, "symbols": 0, "reason": "", "degraded": False, "blocked_hosts": []}
     if not core.nse_market_is_open():
         status["reason"] = "market closed: using the last completed close"
         return data, status
+    status["degraded"] = True
     if not core.dhan_configured():
         status["reason"] = "no Dhan credentials: using the last stored close"
+        return data, status
+    blocked = dhan_blocked_hosts()
+    if blocked:
+        status["blocked_hosts"] = blocked
+        status["reason"] = ("the network settings block " + ", ".join(blocked)
+                            + ": using the last stored close")
         return data, status
     try:
         merged, bars = core.attach_live_bars(data)
@@ -134,7 +166,7 @@ def live_overlay(data: dict) -> tuple[dict, dict]:
     if not bars:
         status["reason"] = "Dhan returned no live quotes: using the last stored close"
         return data, status
-    status.update(used=True, symbols=len(bars), reason="live Dhan prices overlaid")
+    status.update(used=True, degraded=False, symbols=len(bars), reason="live Dhan prices overlaid")
     return merged, status
 
 

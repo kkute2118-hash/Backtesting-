@@ -126,6 +126,8 @@ details.panel[open] summary{border-bottom:1px solid hsl(var(--line))}
 footer{font-size:12px;color:hsl(var(--faint));display:grid;gap:4px;border-top:1px solid hsl(var(--line));padding-top:14px}
 footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 5px;border-radius:4px;color:hsl(var(--muted))}
 .err{background:hsl(var(--down-soft));color:hsl(var(--down));border-radius:10px;padding:14px 16px}
+.warnbar{background:hsl(var(--warn-soft));color:hsl(var(--ink));border:1px solid hsl(var(--warn)/.5);border-radius:10px;padding:12px 16px;display:grid;gap:4px}
+.warnbar b{color:hsl(var(--warn))}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
@@ -137,6 +139,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
     </div>
     <div class="chips" id="chips"><span class="chip"><span class="dot"></span>Loading the latest run…</span></div>
   </header>
+  <div class="warnbar" id="degraded" hidden></div>
   <div class="tiles" id="tiles"></div>
 
   <section id="setups">
@@ -238,6 +241,11 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       `<span class="chip">${esc(s.universe)} · ${s.stocks_scanned} stocks</span>`,
     ].join("");
 
+    if (s.live?.degraded){
+      const el = $("degraded"); el.hidden = false;
+      el.innerHTML = `<b>Market is open, but these are not live prices.</b><span>Entries, stops and sizes below use the close of ${date(fr.latest)}: ${esc(s.live.reason)}.` +
+        (s.live.blocked_hosts?.length ? ` Allow ${esc(s.live.blocked_hosts.join(", "))} in the Claude environment's network settings.` : "") + `</span>`;
+    }
     const gateOpen = (b.latest ?? 0) >= thr;
     const open = f.open || [];
     const openActive = open.filter(r => !RETIRED.has(r.strategy));
