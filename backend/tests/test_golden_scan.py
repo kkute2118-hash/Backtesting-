@@ -12,6 +12,7 @@ about whether the code or the universe moved.
 from __future__ import annotations
 
 import math
+from datetime import datetime
 import os
 
 import pytest
@@ -21,6 +22,9 @@ from tests.golden.conftest_helpers import (
     run_signal_census)
 
 TOLERANCE = 1e-9
+
+# When the snapshots were recorded (the commit that added them, IST evening).
+GOLDEN_RECORDED_AT = datetime(2026, 9, 19, 20, 0)
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +38,15 @@ def fixture_engine():
     from app.engine import core
     before_env = os.environ.get("DATA_DB")
     before_attr = core.DATA_DB
+    before_clock = core.market_now
+    # The scan loads the last N calendar days counted from TODAY. Against a
+    # fixed fixture that window slides forward every day the suite runs, cuts
+    # the oldest bars out, and moves every long-period indicator with them:
+    # by 27 Sep 2026 that alone produced 172 scan and 597 census differences
+    # with no rule changed. Freeze market time at the moment the snapshots were
+    # recorded so the harness measures code, not the calendar.
+    frozen = core.market_now(GOLDEN_RECORDED_AT)
+    core.market_now = lambda now=None: before_clock(now) if now is not None else frozen
     # Inside the try: install_fixture_db repoints DATA_DB before it can fail,
     # so a failure outside would leave every later test module reading the
     # golden fixture instead of its own database.
@@ -41,6 +54,7 @@ def fixture_engine():
         install_fixture_db()
         yield core
     finally:
+        core.market_now = before_clock
         core.DATA_DB = before_attr
         if before_env is None:
             os.environ.pop("DATA_DB", None)
