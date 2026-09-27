@@ -14,20 +14,26 @@ name: Daily forward test
 
 on:
   schedule:
-    # NSE closes 15:30 IST (10:00 UTC). Dhan publishes the finished daily
-    # candle some time after that, so the first attempt allows ~1h20m.
-    # Dhan's historical API does not publish a session's daily candle the same
-    # evening — 9 Sep's candle was still absent at 22:07 IST that night and only
-    # appeared the next morning. This run is the one that actually catches it,
-    # about 90 minutes before the next open, so a session is scanned and its
-    # forward tests recorded before the market it will be traded in starts.
-    - cron: "30 3 * * 2-6"      # 09:00 IST, Tue-Sat = Mon-Fri sessions
-    - cron: "20 11 * * 1-5"     # 16:50 IST
+    # GitHub starts scheduled runs late under load, and this repository has
+    # been hit hard: in the week of 21 Sep 2026 the 03:30 UTC run started at
+    # 08:41-09:02 UTC, five hours late, so "09:00 IST" data landed after 14:00.
+    # The punctual trigger is therefore NOT this schedule: a Claude routine
+    # calls workflow_dispatch at 09:05 IST on weekdays (see
+    # .claude/skills/scan/SKILL.md), and dispatched runs start within seconds.
+    # These crons are the fallback if that trigger ever fails. They sit on odd
+    # minutes because :00 and :30 are the most congested; a late or duplicate
+    # run is harmless (the job is idempotent, see below).
+    #
+    # Dhan's historical API publishes a session's daily candle the next
+    # morning (9 Sep's candle was still absent at 22:07 IST that night), so
+    # the morning run is the one that catches it.
+    - cron: "37 3 * * 2-6"      # 09:07 IST, Tue-Sat = Mon-Fri sessions
+    - cron: "23 11 * * 1-5"     # 16:53 IST
     # Second attempt in case Dhan was still late. The job is idempotent, and
     # add_forward_candidates() refuses a duplicate for the same
     # symbol/strategy/date — so if the first run already succeeded, this one
     # simply finds nothing new to add.
-    - cron: "30 13 * * 1-5"     # 19:00 IST
+    - cron: "41 13 * * 1-5"     # 19:11 IST
   workflow_dispatch:
     # Run it by hand from the Actions tab whenever you want.
 

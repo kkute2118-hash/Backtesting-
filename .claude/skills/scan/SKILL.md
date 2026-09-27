@@ -73,3 +73,14 @@ and answer from the JSON. Republish only when asked or when the data changed.
 Edit `claude_dashboard/index.html`, rebuild the data (step 2) and republish
 (step 3). Keep the page reading everything from `dashboard.json`: the JSON
 shape is produced by `scripts/claude_dashboard.py`, so add fields there first.
+
+## Schedules (Claude routines, not GitHub)
+
+| IST, weekdays | Routine | What it does |
+|---|---|---|
+| 09:05 | ATI Lab morning data job kick | Wakes a small dedicated session that calls `workflow_dispatch` on `daily-forward-test.yml`. GitHub starts its own cron runs 4-5 hours late on this repository; dispatched runs start within seconds. The workflow's crons stay as a fallback. |
+| 15:05 | ATI Lab daily scan | Wakes the session that owns the page and runs this skill. The morning job has finished by then, so the page shows the newest candles, forward-test results and setups before the 15:30 close. |
+
+Manage them in claude.ai under Routines. If the page's "Updated" time is not
+today's afternoon on a trading day, check the 15:05 routine first; if its
+"Data" chip is a day behind, check the morning kick and the workflow's runs.
