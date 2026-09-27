@@ -12749,6 +12749,13 @@ def _ensure_corporate_events_table(con):
         source TEXT, fetched_at TEXT, PRIMARY KEY(symbol, event_date, purpose))""")
 
 
+def _board_meeting_rows(payload):
+    """The list of meeting rows, whether NSE sent a bare list (it does, as of
+    Sep 2026) or wrapped it as {"data": [...]}."""
+    rows = payload.get("data", []) if isinstance(payload, dict) else payload
+    return rows if isinstance(rows, list) else []
+
+
 def parse_board_meetings(payload):
     """NSE board-meeting rows -> [{symbol, event_date (ISO), purpose}], results only.
 
@@ -12756,9 +12763,9 @@ def parse_board_meetings(payload):
     has used for it. Rows whose purpose does not mention results, or whose
     date does not parse, are dropped.
     """
-    rows = payload.get("data", payload) if isinstance(payload, dict) else payload
+    rows = _board_meeting_rows(payload)
     out = []
-    for r in rows if isinstance(rows, list) else []:
+    for r in rows:
         if not isinstance(r, dict):
             continue
         sym = str(r.get("bm_symbol") or r.get("symbol") or "").strip().upper()
@@ -12798,8 +12805,7 @@ def fetch_nse_board_meetings(from_date, to_date, timeout=20):
     r.raise_for_status()
     payload = r.json()
     rows = parse_board_meetings(payload)
-    raw_count = len(payload.get("data", payload)) if isinstance(payload, (dict, list)) else 0
-    return rows, raw_count
+    return rows, len(_board_meeting_rows(payload))
 
 
 def store_corporate_events(rows, source="nse-board-meetings"):
