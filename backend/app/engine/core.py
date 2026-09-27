@@ -639,6 +639,26 @@ def _snapshot_db(dest):
         src.close()
 
 
+def _drop_derived_cache(path):
+    """Empty the feature snapshot cache in a database COPY and compact it.
+
+    The scheduled job's staging already does this (daily_job.BACKUP_SKIP_TABLES);
+    the API server's whole-database backup did not, so a full-universe scan
+    made its backup too large to store and it was skipped outright. The table
+    is kept, empty, so a restore still has the schema.
+    """
+    con = sqlite3.connect(path)
+    try:
+        has = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='feature_snapshots'").fetchone()
+        if has:
+            con.execute("DELETE FROM feature_snapshots")
+            con.commit()
+            con.execute("VACUUM")
+    finally:
+        con.close()
+
+
 def _gzip_file(src, dest, compresslevel=6):
     with open(src, "rb") as fin, gzip.open(dest, "wb", compresslevel=compresslevel) as fout:
         shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
@@ -820,6 +840,7 @@ def backup_db_to_github(return_reason=False):
             # never whole-file bytes: the in-memory version held the database
             # about five times over and OOM-killed the 512 MB instance.
             _snapshot_db(snap)
+            _drop_derived_cache(snap)
             raw_mb = os.path.getsize(snap) / 1_048_576
             _gzip_file(snap, packed_path)
             os.remove(snap)
@@ -1015,6 +1036,11 @@ REBUILDABLE_TABLES = {
     "live_latest",        # intraday only
     "dhan_token_cache",   # expires in 24h anyway, and is a credential
     "dhan_history_floor", # re-probed automatically
+    # One pickled feature frame per symbol, ~190 KB each: ~380 MB across the
+    # NSE Top 2000, far past what a GitHub backup can hold. Rebuilt from the
+    # candles by the next scan. Left in, it would make the learning backup -
+    # the only copy of the forward tests on the web host - too big to store.
+    "feature_snapshots",
 }
 
 
@@ -12124,6 +12150,34 @@ def portfolio_from_backtest(bt,capital,risk_pct,slots):
         taken+=1; peak=max(peak,equity); maxdd=max(maxdd,(peak-equity)/peak*100 if peak else 0)
         if equity<=0:equity=0;break
     return {"Starting Capital":round(capital,2),"Final Capital":round(equity,2),"Profit ₹":round(equity-capital,2),"ROI %":round((equity/capital-1)*100,2),"Max DD %":round(maxdd,2),"Trades":taken,"Risk/Trade %":risk_pct,"Slots (display)":slots}
+
+def warm_feature_snapshots(tickers, progress_cb=None, chunk=200):
+    """Compute and store every ticker's scan features ahead of the next scan.
+
+    A scan spends most of its time in features_fast() the first time it sees a
+    session's candles (~140 ms a stock; ~15 ms once the snapshot exists), so
+    doing that work straight after a sync is what makes the user's scan fast.
+    Frames come from load_scan_dataset() exactly as a scan loads them, because
+    a snapshot is only reused when it was computed from the identical frame.
+    Chunked so memory stays at a few hundred frames. Returns how many were warmed.
+    """
+    tickers = list(tickers)
+    total = max(1, len(tickers))
+    warmed = 0
+    for start in range(0, len(tickers), chunk):
+        data = load_scan_dataset(tickers[start:start + chunk])
+        for ticker, df in data.items():
+            try:
+                features_fast(str(ticker), df)
+                warmed += 1
+            except Exception:
+                pass
+        data = None
+        if progress_cb:
+            progress_cb(min(1.0, (start + chunk) / total))
+    release_memory()
+    return warmed
+
 
 def load_scan_dataset(tickers, min_bars=260, lookback_days=1000):
     """Local-only candle load for a scan. Makes zero Dhan calls."""
