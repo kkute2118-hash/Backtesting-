@@ -59,3 +59,25 @@ def test_s6_replay_exits_on_its_own_rules():
     row = t.iloc[0]
     assert row["Exit Reason"] == "OPEN"          # signal on the last bar: nothing to exit on yet
     assert row["Initial SL"] < row["Entry"]
+
+
+def test_price_gap_guard_finds_split_like_moves_only_inside_the_lookback():
+    idx = pd.bdate_range(end="2026-06-30", periods=300)
+    c = np.full(300, 100.0)
+    c[100:] = 50.0                                   # a 1:1 bonus, 200 bars ago
+    df = pd.DataFrame({"open": c, "high": c, "low": c, "close": c, "volume": 1e6}, index=idx)
+    gap = core.recent_price_gap(df)
+    assert gap is not None and gap[0] == idx[100].date() and gap[1] == -50.0
+    assert core.recent_price_gap(df, lookback=150) is None          # older than the window
+    calm = df.assign(close=np.linspace(100, 130, 300), open=np.linspace(100, 130, 300))
+    assert core.recent_price_gap(calm) is None
+
+
+def test_replayed_filter_withholds_signals_after_a_gap():
+    idx = pd.bdate_range(end="2026-06-30", periods=120)
+    c = 100 + np.sin(np.arange(120)) * 5
+    c[60:] = c[60:] / 2                              # unadjusted split
+    df = pd.DataFrame({"open": c, "high": c * 1.04, "low": c * 0.96, "close": c,
+                       "volume": 5_000_000.0}, index=idx)
+    ok, why, _ = core.historical_entry_verdict(5, df, idx[-1])
+    assert not ok and "price gap" in why

@@ -45,3 +45,15 @@ def test_daily_job_survives_an_unreachable_nse(monkeypatch):
         raise ConnectionError("blocked")
     monkeypatch.setattr(core, "fetch_nse_board_meetings", boom)
     assert daily_job.step_events() is None
+
+
+def test_fetch_handles_the_bare_list_nse_actually_returns(monkeypatch):
+    """The first live run failed here: NSE answers with a plain list."""
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return SAMPLE
+    class Session:
+        def get(self, *a, **k): return Resp()
+    monkeypatch.setattr(core.requests, "Session", Session)
+    rows, raw = core.fetch_nse_board_meetings("2026-10-01", "2026-10-31")
+    assert raw == 4 and [r["symbol"] for r in rows] == ["WELCORP", "MCX"]

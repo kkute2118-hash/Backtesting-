@@ -1,5 +1,10 @@
 # Deployment
 
+> **Retired for daily use (Sep 2026).** The system now runs without a web server:
+> GitHub Actions does the data work and a Claude artifact is the dashboard. See
+> "How it runs now" in the README. What follows is kept for the day a live web
+> app is needed again; prefer `deploy/oracle/` (Always Free only) over Render.
+
 The application is two processes, so it needs two hosts (or one machine running
 both). Streamlit Cloud cannot serve it — it only runs `streamlit run`.
 

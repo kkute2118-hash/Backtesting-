@@ -6783,7 +6783,8 @@ def s6_exit_walk(bars, entry, initial_stop):
     return "ACTIVE", None, None
 
 
-def run_s6_backtest(data, start, end, breadth=None, eligible=None, max_hold_bars=None):
+def run_s6_backtest(data, start, end, breadth=None, eligible=None, max_hold_bars=None,
+                    data_guard=True):
     """Walk-forward replay of S6 on its own exit, one row per trade.
 
     Entry at the signal day's close (the playbook's entry: a scan shortly
@@ -6817,6 +6818,8 @@ def run_s6_backtest(data, start, end, breadth=None, eligible=None, max_hold_bars
                         continue
                 except KeyError:
                     continue
+            if data_guard and recent_price_gap(x.iloc[:i + 1]) is not None:
+                continue            # the live scan withholds these too
             entry = float(x.close.iloc[i])
             atr = float(feats.s6_atr.iloc[i])
             if not np.isfinite(atr) or atr <= 0:
@@ -12708,6 +12711,9 @@ def historical_entry_verdict(strategy, frame, signal_date, sector_ranks=None,
             if vals:
                 rank = float(min(vals))
     metrics = {"atr_pct": atr_pct, "turnover_cr": turnover, "sector_rank": rank}
+    gap = recent_price_gap(hist)
+    if gap is not None:
+        return False, f"price gap {gap[1]:+.0f}% on {gap[0]}", metrics
     if rule == "none":
         return True, "own rules only", metrics
     if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
@@ -12743,6 +12749,13 @@ def _ensure_corporate_events_table(con):
         source TEXT, fetched_at TEXT, PRIMARY KEY(symbol, event_date, purpose))""")
 
 
+def _board_meeting_rows(payload):
+    """The list of meeting rows, whether NSE sent a bare list (it does, as of
+    Sep 2026) or wrapped it as {"data": [...]}."""
+    rows = payload.get("data", []) if isinstance(payload, dict) else payload
+    return rows if isinstance(rows, list) else []
+
+
 def parse_board_meetings(payload):
     """NSE board-meeting rows -> [{symbol, event_date (ISO), purpose}], results only.
 
@@ -12750,9 +12763,9 @@ def parse_board_meetings(payload):
     has used for it. Rows whose purpose does not mention results, or whose
     date does not parse, are dropped.
     """
-    rows = payload.get("data", payload) if isinstance(payload, dict) else payload
+    rows = _board_meeting_rows(payload)
     out = []
-    for r in rows if isinstance(rows, list) else []:
+    for r in rows:
         if not isinstance(r, dict):
             continue
         sym = str(r.get("bm_symbol") or r.get("symbol") or "").strip().upper()
@@ -12792,8 +12805,7 @@ def fetch_nse_board_meetings(from_date, to_date, timeout=20):
     r.raise_for_status()
     payload = r.json()
     rows = parse_board_meetings(payload)
-    raw_count = len(payload.get("data", payload)) if isinstance(payload, (dict, list)) else 0
-    return rows, raw_count
+    return rows, len(_board_meeting_rows(payload))
 
 
 def store_corporate_events(rows, source="nse-board-meetings"):
@@ -12884,6 +12896,39 @@ def release_memory():
     return round(before - after, 1)
 
 
+# ---- data-quality guard: price gaps a circuit limit cannot produce ---------
+# NSE circuit bands top out at 20%, and Dhan's daily history is not
+# consistently adjusted for bonuses and splits: MOTHERSON's 1:2 bonuses
+# (2023-05-12, 2024-04-30) and HEG's split (2026-08-25) sit in the store as
+# one-day drops of 33% and 64%, and on 2023-05-16 MOTHERSON jumps straight back
+# to the unadjusted price. Every indicator that spans such a bar is wrong - the
+# 52-week high S6 measures against, ATR, the moving averages, the breakout
+# level - and a stop placed off them is wrong too. Genuine crashes (ADANIENT
+# Feb 2023, IEX Jul 2025) look the same in price alone, so the guard does not
+# guess: a stock with such a gap inside the lookback gets no new signal, and
+# the reason is recorded with the signal that was withheld. About a dozen
+# names over five years; the cost is small and the corrupted setups are gone.
+DATA_GAP_THRESHOLD = 0.25          # |close/prev - 1| or |open/prev - 1|
+DATA_GAP_LOOKBACK = 260            # sessions, about a year: the longest window a rule reads
+
+
+def recent_price_gap(df, lookback=DATA_GAP_LOOKBACK, threshold=DATA_GAP_THRESHOLD):
+    """(date, pct) of the largest one-day gap beyond `threshold` in the last
+    `lookback` sessions, or None. pct is signed, in percent."""
+    if df is None or len(df) < 2:
+        return None
+    tail = df.iloc[-(lookback + 1):]
+    prev = tail["close"].shift()
+    move = pd.concat([(tail["close"] / prev - 1), (tail["open"] / prev - 1)], axis=1)
+    worst = move.abs().max(axis=1)
+    hits = worst[worst > threshold]
+    if hits.empty:
+        return None
+    d = hits.idxmax()
+    signed = move.loc[d].iloc[int(np.nanargmax(move.loc[d].abs().to_numpy()))]
+    return pd.Timestamp(d).date(), round(float(signed) * 100, 1)
+
+
 def strategy_label_for(s):
     """The label a strategy is persisted and displayed under."""
     s = int(s)
@@ -12965,6 +13010,7 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             continue
 
         counts["usable"] += 1
+        gap = recent_price_gap(df)
         if breadth is not None:
             f = attach_market_breadth(f, breadth)
         # Do NOT fetch fundamentals for the whole universe. Price/volume safety is
@@ -12979,6 +13025,16 @@ def scan_dataset(data, strategies, regime, progress_cb=None, stats=None):
             if signal:
                 counts["signals"][s] = counts["signals"].get(s, 0) + 1
             if not signal:
+                continue
+            if gap is not None:
+                counts["data_gap_reject"] = counts.get("data_gap_reject", 0) + 1
+                rejected.append({
+                    "Ticker": str(ticker).replace(".NS", ""), "Strategy": strategy_label_for(s),
+                    "Regime": regime, "Entry": round(float(f.iloc[-1].close), 2),
+                    "ATR %": None, "Turnover Cr": None, "Sector Rank": None,
+                    "Entry Filter": (f"price gap {gap[1]:+.0f}% on {gap[0]} (possible unadjusted "
+                                     "split/bonus); indicators unreliable for a year"),
+                })
                 continue
 
             passed, why, ev = entry_filter_verdict(

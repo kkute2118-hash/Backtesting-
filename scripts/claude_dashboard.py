@@ -313,6 +313,54 @@ def forward() -> dict:
             "open": open_rows, "closed": closed_rows, "scorecard": scorecard}
 
 
+EXPECTATIONS = ROOT / "research" / "strategy_expectations.json"
+HEALTH_MIN_TRADES = 10
+
+
+def health() -> list[dict]:
+    """Live paper results per scanner strategy against the backtest's.
+
+    The band is the 90% range of win rates a strategy with the backtest's win
+    rate would show over the same number of closed trades (normal
+    approximation to the binomial). Outside it on the low side means live
+    trading is not behaving like the backtest - worth stopping to look before
+    risking more money.
+    """
+    try:
+        exp = json.loads(EXPECTATIONS.read_text())["strategies"]
+    except Exception:
+        return []
+    con = core._db()
+    try:
+        live = pd.read_sql_query(
+            "SELECT strategy, return_pct, result_r FROM forward_results", con)
+    finally:
+        con.close()
+    out = []
+    for s in STRATEGIES:
+        label = core.strategy_label_for(s)
+        e = exp.get(label)
+        if not e:
+            continue
+        g = live[live.strategy.astype(str).str.upper() == label]
+        n = int(len(g))
+        p = e["win_pct"] / 100
+        row = {"strategy": label, "expected_win_pct": e["win_pct"], "expected_avg_pct": e["avg_return_pct"],
+               "expected_trades": e["trades"], "live_trades": n,
+               "live_win_pct": plain((g.return_pct > 0).mean() * 100) if n else None,
+               "live_avg_pct": plain(g.return_pct.mean()) if n else None}
+        if n < HEALTH_MIN_TRADES:
+            row["verdict"], row["band"] = "too few", None
+        else:
+            half = 1.645 * math.sqrt(p * (1 - p) / n) * 100
+            lo, hi = e["win_pct"] - half, e["win_pct"] + half
+            row["band"] = [round(lo, 1), round(hi, 1)]
+            w = row["live_win_pct"]
+            row["verdict"] = "below" if w < lo else "above" if w > hi else "in line"
+        out.append(row)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("out", help="where to write the dashboard JSON")
@@ -332,6 +380,7 @@ def main() -> None:
         "scan": scan(args.universe),
         "breadth": breadth(),
         "forward": forward(),
+        "health": health(),
     }
     # Results within the next RESULTS_EVENT_WINDOW_DAYS for every name the page
     # shows. A flag, not a filter: see core's corporate results calendar.
