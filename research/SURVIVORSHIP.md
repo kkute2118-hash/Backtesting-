@@ -66,7 +66,38 @@ only when started by hand: Actions, then "Survivorship study", then Run
 workflow. Expect a few hours, most of it the download. The results are in the
 run's summary and in the `survivorship-study` artifact.
 
-### First runs, 27 Sep 2026: not yet the full check
+### Full result, 27 Sep 2026 (run 36340068330)
+
+2,678 of 2,700 NSE symbols downloaded with no errors; 2,479 had enough
+history, 1,980 of them outside today's Nifty 500. Point-in-time top 500 by
+trailing traded value, live entry filters replayed on each signal day,
+signals 2022-10-31 to 2026-09-25, gross returns per closed trade:
+
+| Strategy | Trades | Win % | Avg % | In today's list: n / avg % | Not in it: n / avg % |
+|---|---|---|---|---|---|
+| S6 | 657 | 44.7 | 15.32 | 458 / 18.43 | 199 / 8.16 |
+| S5 | 1,566 | 36.7 | 2.39 | 1,188 / 3.21 | 378 / -0.20 |
+| S4 | 292 | 52.7 | 6.37 | 292 / 6.37 | 0 / - |
+
+- **S6 is real but smaller than the backtests say.** Across everything a
+  trader could have seen at the time it averages about 15% per trade, not
+  about 20%. Trades in stocks that later dropped out of the Nifty 500 still
+  made about 8% on average. Read S6's earlier figures as roughly a quarter too
+  high.
+- **S5's edge lives in the survivors.** Outside today's list it made nothing
+  (-0.2% over 378 trades), and overall it is 2.4% gross, about 2% after costs,
+  with a 37% win rate. It is the weakest of the three; size it smaller than
+  S6 and do not add capital to it on the strength of the older backtests.
+- **S4 cannot be judged by this study.** Its top-3 sector filter uses the
+  index sector map, which only knows index members, so no stock outside
+  today's list ever passes. Live, it scans today's list only, so this matches
+  what it does, but its survivorship bias is unmeasured.
+- The dashboard's health check still compares live trades with the
+  today's-list figures in `strategy_expectations.json`. That is the right
+  comparison because the live scan runs on today's list, but it means a live
+  shortfall of a few points per S6 trade is expected, not a warning sign.
+
+### First runs, 27 Sep 2026: not the full check
 
 Both runs that day overlapped a daily job. Dhan keeps one live token per
 account and each job mints its own, so the daily job's token voided the
