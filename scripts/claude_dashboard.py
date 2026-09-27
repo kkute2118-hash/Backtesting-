@@ -333,6 +333,14 @@ def main() -> None:
         "breadth": breadth(),
         "forward": forward(),
     }
+    # Results within the next RESULTS_EVENT_WINDOW_DAYS for every name the page
+    # shows. A flag, not a filter: see core's corporate results calendar.
+    shown = ({r["ticker"] for r in payload["scan"]["signals"]}
+             | {r["ticker"] for r in payload["scan"]["s6_watchlist"]}
+             | {r["ticker"] for r in payload["forward"]["open"]})
+    payload["results_soon"] = core.upcoming_results(shown)
+    payload["results_calendar"] = {"fetched_at": core.corporate_events_freshness(),
+                                   "window_days": core.RESULTS_EVENT_WINDOW_DAYS}
     Path(args.out).write_text(json.dumps(payload, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     log(f"wrote {args.out}")
 

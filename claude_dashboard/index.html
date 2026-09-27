@@ -216,6 +216,8 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
   const date = s => { if(!s) return "–"; const d = new Date(String(s).slice(0,10)+"T00:00:00"); return isNaN(d) ? esc(s) : d.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"2-digit"}); };
   const short = s => ({S4_SEPA:"S4 · SEPA",S5_POCKETPIVOT:"S5 · Pocket pivot",S6_BREAKOUT:"S6 · Breakout"}[s] || s);
   const RETIRED = new Set(["S1","S2","S3"]);
+  let RESULTS = {};
+  const resChip = sym => RESULTS[sym] ? ` <span class="pill warn" title="Board meeting for results on ${esc(RESULTS[sym])}">results ${esc(date(RESULTS[sym]))}</span>` : "";
   const stratChip = s => `<span class="strat${RETIRED.has(s)?" retired":""}">${esc(short(s))}</span>`;
   const store = { get(k,d){ try{ const v = localStorage.getItem(k); return v==null ? d : v; }catch(e){ return d; } },
                   set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} } };
@@ -264,6 +266,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
 
   function render(d){
     const s = d.scan, b = d.breadth, f = d.forward, thr = b.threshold ?? 0.5;
+    RESULTS = d.results_soon || {};
     $("thr").textContent = thr.toFixed(2);
     const live = s.live?.used, fr = s.freshness || {};
     const fresh = fr.current ? ["up","Data current"] : fr.awaiting_publication ? ["warn","Waiting on today's candle"] : ["dn","Data behind"];
@@ -314,7 +317,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       const rows = s.signals.map(r => ({...r, ...size(r.entry, r.stop)}));
       $("setupsBody").classList.add("tbl");
       table($("setupsBody"), [
-        {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>`},
+        {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>${resChip(r.ticker)}`},
         {key:"strategy",label:"Strategy",fmt:r=>stratChip(r.strategy)},
         {key:"entry",label:"Entry",right:true,fmt:r=>inr(r.entry)},
         {key:"stop",label:"Stop",right:true,fmt:r=>inr(r.stop)},
@@ -350,7 +353,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       if (!w.length){ $("watchBody").innerHTML = `<div class="empty"><b>Nothing within reach</b><p>No stock passing S6's stock rules is within 8% of its trigger.</p></div>`; return; }
       const today = (d.generated_at||"").slice(0,10);
       table($("watchBody"), [
-        {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>`},
+        {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>${resChip(r.ticker)}`},
         {key:"close",label:"Close",right:true,fmt:r=>inr(r.close)},
         {key:"trigger",label:"Trigger",right:true,fmt:r=>inr(r.trigger)},
         {key:"to_trigger_pct",label:"To trigger",right:true,fmt:r=>r.to_trigger_pct<=0?`<span class="pill up">above</span>`:pct(r.to_trigger_pct,1,false)},
@@ -388,7 +391,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
 
     if (!open.length) $("openBody").innerHTML = `<div class="empty"><b>No open paper trades</b></div>`;
     else table($("openBody"), [
-      {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>`},
+      {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>${resChip(r.ticker)}`},
       {key:"strategy",label:"Strategy",fmt:r=>stratChip(r.strategy)},
       {key:"signal_date",label:"Entered",fmt:r=>date(r.signal_date)},
       {key:"entry",label:"Entry",right:true,fmt:r=>inr(r.entry)},
@@ -420,6 +423,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
 
     $("foot").innerHTML = `<span>Built from the database backup the GitHub job updates at 09:00, 16:50 and 19:00 IST on trading days. ${esc(s.live?.reason||"")}.</span>
       <span>Refresh or change it from any Claude Code session on this repository: <code>/scan</code>, or ask, for example "scan S6 on Nifty 50".</span>
+      <span>${d.results_calendar?.fetched_at ? `Results dates from NSE board meetings, fetched ${esc(date(d.results_calendar.fetched_at))}; a "results" tag means a meeting within ${d.results_calendar.window_days} days. It flags event risk and filters nothing.` : "Results calendar not fetched yet: the GitHub job fills it on its next run."}</span>
       <span>Position size: capital × risk ÷ (entry − stop), capped at 25% of capital. Backtests, not advice.</span>`;
   }
 

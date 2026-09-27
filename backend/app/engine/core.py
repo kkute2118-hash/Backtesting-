@@ -12333,6 +12333,128 @@ def historical_entry_verdict(strategy, frame, signal_date, sector_ranks=None,
     return ok, ("ATR ok" if ok else "ATR below floor"), metrics
 
 
+# ---- corporate results calendar -------------------------------------------
+# A setup a few days before quarterly results carries event risk the price
+# chart cannot see: several of the 2025-26 winners moved on results, and so
+# do stops that gap. This calendar is a FLAG on setups and positions, not a
+# filter - skipping pre-results setups has not been tested, and the evidence
+# rule for this engine is that an untested rule does not gate anything.
+#
+# Source: NSE's public board-meetings feed, which lists each company's
+# upcoming meeting and its purpose. It needs a browser-like session (NSE sets
+# cookies on its home page and refuses API calls without them) and it is only
+# reachable from an unrestricted network - the GitHub runner, not the Claude
+# cloud environment - so daily_job.py fetches it and the backup carries it.
+NSE_HOME_URL = "https://www.nseindia.com"
+NSE_BOARD_MEETINGS_URL = "https://www.nseindia.com/api/corporate-board-meetings"
+RESULTS_EVENT_WINDOW_DAYS = 7          # "results soon" = within this many calendar days
+RESULTS_PURPOSE_WORDS = ("result",)     # "Financial Results", "Quarterly Results", ...
+
+
+def _ensure_corporate_events_table(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS corporate_events(
+        symbol TEXT NOT NULL, event_date TEXT NOT NULL, purpose TEXT NOT NULL,
+        source TEXT, fetched_at TEXT, PRIMARY KEY(symbol, event_date, purpose))""")
+
+
+def parse_board_meetings(payload):
+    """NSE board-meeting rows -> [{symbol, event_date (ISO), purpose}], results only.
+
+    Accepts the feed's list (or {"data": [...]}) and tolerates the key names NSE
+    has used for it. Rows whose purpose does not mention results, or whose
+    date does not parse, are dropped.
+    """
+    rows = payload.get("data", payload) if isinstance(payload, dict) else payload
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("bm_symbol") or r.get("symbol") or "").strip().upper()
+        purpose = str(r.get("bm_purpose") or r.get("purpose") or r.get("bm_desc") or "").strip()
+        raw = str(r.get("bm_date") or r.get("meetingDate") or r.get("date") or "").strip()
+        if not sym or not raw or not any(w in purpose.lower() for w in RESULTS_PURPOSE_WORDS):
+            continue
+        when = None
+        for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d %b %Y"):
+            try:
+                when = datetime.strptime(raw.split(" ")[0] if fmt != "%d %b %Y" else raw, fmt).date()
+                break
+            except ValueError:
+                continue
+        if when is None:
+            continue
+        out.append({"symbol": sym, "event_date": when.isoformat(), "purpose": purpose[:200]})
+    return out
+
+
+def fetch_nse_board_meetings(from_date, to_date, timeout=20):
+    """Upcoming results meetings from NSE, parsed. Raises on network failure."""
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-board-meetings",
+    }
+    ses = requests.Session()
+    ses.get(NSE_HOME_URL, headers=headers, timeout=timeout)
+    r = ses.get(NSE_BOARD_MEETINGS_URL, headers=headers, timeout=timeout, params={
+        "index": "equities",
+        "from_date": pd.Timestamp(from_date).strftime("%d-%m-%Y"),
+        "to_date": pd.Timestamp(to_date).strftime("%d-%m-%Y"),
+    })
+    r.raise_for_status()
+    payload = r.json()
+    rows = parse_board_meetings(payload)
+    raw_count = len(payload.get("data", payload)) if isinstance(payload, (dict, list)) else 0
+    return rows, raw_count
+
+
+def store_corporate_events(rows, source="nse-board-meetings"):
+    if not rows:
+        return 0
+    now = datetime.now().isoformat(timespec="seconds")
+    con = _db()
+    try:
+        _ensure_corporate_events_table(con)
+        con.executemany(
+            "INSERT OR REPLACE INTO corporate_events(symbol,event_date,purpose,source,fetched_at) "
+            "VALUES(?,?,?,?,?)",
+            [(r["symbol"], r["event_date"], r["purpose"], source, now) for r in rows])
+        con.commit()
+    finally:
+        con.close()
+    return len(rows)
+
+
+def upcoming_results(symbols=None, on_date=None, days=RESULTS_EVENT_WINDOW_DAYS):
+    """{SYMBOL: first results date within `days` calendar days from on_date}."""
+    start = pd.Timestamp(market_today() if on_date is None else on_date).date()
+    end = start + timedelta(days=int(days))
+    con = _db()
+    try:
+        _ensure_corporate_events_table(con)
+        rows = con.execute(
+            "SELECT symbol, MIN(event_date) FROM corporate_events "
+            "WHERE event_date >= ? AND event_date <= ? GROUP BY symbol",
+            (start.isoformat(), end.isoformat())).fetchall()
+    finally:
+        con.close()
+    wanted = None if symbols is None else {str(s).upper().replace(".NS", "") for s in symbols}
+    return {sym: d for sym, d in rows if wanted is None or sym in wanted}
+
+
+def corporate_events_freshness():
+    """Newest fetched_at in the calendar, or None when it was never filled."""
+    con = _db()
+    try:
+        _ensure_corporate_events_table(con)
+        row = con.execute("SELECT MAX(fetched_at) FROM corporate_events").fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
 def process_rss_mb():
     """Resident memory of this process, in MB. None where /proc is absent.
 

@@ -281,6 +281,24 @@ def step_resolve():
     return checked, closed
 
 
+def step_events(days_ahead=30):
+    """Refresh the results calendar from NSE. Never fails the run: a missing
+    calendar only removes the 'results soon' flags, it changes no trade."""
+    today = core.market_today()
+    try:
+        rows, raw = core.fetch_nse_board_meetings(today, today + timedelta(days=days_ahead))
+    except Exception as exc:
+        log("events", f"results calendar not refreshed ({type(exc).__name__}: {str(exc)[:160]})")
+        return None
+    stored = core.store_corporate_events(rows)
+    if raw and not rows:
+        log("events", f"NSE returned {raw} board meetings but none parsed as results; "
+                      "the feed's format may have changed")
+    log("events", f"{stored} results meeting(s) stored for the next {days_ahead} days "
+                  f"({raw} board meetings listed)")
+    return stored
+
+
 def step_scan(tickers, strategies, min_score, session_date=None):
     data = core.load_scan_dataset(tickers)
     if not data:
@@ -492,6 +510,7 @@ def run_daily():
 
     checked, closed = step_resolve()
     summary["resolved"] = closed
+    summary["results_events"] = step_events()
 
     # Scan the newest session the store actually HOLDS, not the newest one the
     # calendar expects.
