@@ -147,7 +147,7 @@ accumulated.
 - **First request after a sleep takes ~50 seconds**, plus the restore.
 - **A very large candle store gets slow to move.** The whole-database backup
   goes through GitHub's Contents API, which caps a file at 100 MB. Nifty 500
-  over a few years is comfortably inside that; the full ~2000-name NSE universe
+  over a few years is comfortably inside that; the NSE Top 2000 universe
   over many years eventually is not. If you get there, switch to a disk.
 - **Nothing runs while the service sleeps.** Scheduled work is unaffected —
   the GitHub Actions jobs run on GitHub's runners against `daily_job.py` and

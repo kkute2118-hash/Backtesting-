@@ -1,4 +1,4 @@
-"""Every universe picker must reach the full ~2000-name NSE list.
+"""Every universe picker must reach the NSE Top 2000 list, and that list must be shares.
 
 Run directly:  python3 backend/tests/regression/test_universe.py
 No network: index_universe and dhan_map are stubbed.
@@ -44,16 +44,68 @@ check("it is offered first", core.UNIVERSE_CHOICES[0] == core.FULL_NSE_UNIVERSE)
 check("the four index lists are still offered",
       all(n in core.UNIVERSE_CHOICES for n in core.INDEX_URLS), str(core.UNIVERSE_CHOICES))
 
+# ---------------------------------------- 2a. only ordinary shares qualify
+# The old list was every NSE row filed under the equity segment: 9,917 names,
+# two thirds of them state loans (SG), bonds (N0-N9, GS, TB) and ETFs. Feed the
+# real filter a master shaped like Dhan's and make sure only EQ survives.
+import pandas as pd  # noqa: E402
+
+_real_master = core.dhan_master
+core.dhan_master = lambda: pd.DataFrame({
+    "SEM_TRADING_SYMBOL": ["RELIANCE", "TCS", "MHSDL2031", "GOI2035", "NIFTYBEES",
+                           "TRADEBE", "BSEONLY"],
+    "SEM_EXM_EXCH_ID": ["NSE", "NSE", "NSE", "NSE", "NSE", "NSE", "BSE"],
+    "SEM_SEGMENT": ["E"] * 7,
+    "SEM_SERIES": ["EQ", "EQ", "SG", "GS", "EQ ", "BE", "EQ"],
+})
+core.dhan_equity_symbols.clear() if hasattr(core.dhan_equity_symbols, "clear") else None
+_eq = core.dhan_equity_symbols()
+check("state loans, bonds and trade-to-trade names are not shares",
+      set(_eq) == {"RELIANCE", "TCS", "NIFTYBEES"}, str(_eq))
+core.dhan_master = lambda: pd.DataFrame({"SEM_TRADING_SYMBOL": ["X"], "SEM_EXM_EXCH_ID": ["NSE"],
+                                         "SEM_SEGMENT": ["E"]})
+core.dhan_equity_symbols.clear() if hasattr(core.dhan_equity_symbols, "clear") else None
+check("a master without a series column is reported, not guessed at",
+      core.dhan_equity_symbols() is None)
+core.dhan_master = _real_master
+
 # ------------------------------------------------------------- 2. resolution
-core.dhan_map = lambda: {f"SYM{i}": str(i) for i in range(2000)} | {"TINYSM": "9"}
+# 2,600 candidate shares: more than the top 2000, as on the real master.
+core.dhan_equity_symbols = lambda: [f"SYM{i:04d}" for i in range(2600)] + ["TINYSM"]
 # **_ so the stub keeps matching after index_universe gained allow_network:
 # resolve_universe passes it through, and a stub with a narrower signature
 # fails as a TypeError that looks like a product bug.
 core.index_universe = lambda name, **_: [f"IDX{i}.NS" for i in range(500)]
 
 full = core.resolve_universe(core.FULL_NSE_UNIVERSE)
-check("full NSE resolves to ~2000 names", len(full) >= 1900, str(len(full)))
+check("NSE Top 2000 resolves to exactly 2000 names", len(full) == core.NSE_TOP_N, str(len(full)))
 check("SME scrips are excluded", "TINYSM.NS" not in full)
+download = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="download")
+check("a download covers every candidate share, so all of them can be ranked",
+      len(download) == 2600 and "TINYSM.NS" not in download, str(len(download)))
+check("the old universe name still resolves",
+      core.resolve_universe("NSE All Cash (~2000)") == full)
+
+# The ranking: store candles for a handful of names at the end of the alphabet
+# and check the most liquid are in, whatever their name.
+_con = core._db()
+_day = core.market_today()
+for _i, _sym in enumerate(["SYM2599", "SYM2598", "SYM2597"]):
+    for _k in range(5):
+        _dt = (_day - core.timedelta(days=_k + 1)).isoformat()
+        _con.execute("INSERT OR REPLACE INTO candles(symbol, dt, open, high, low, close, volume) "
+                     "VALUES(?,?,?,?,?,?,?)", (_sym, _dt, 100, 100, 100, 100, 1_000_000 * (3 - _i)))
+_con.commit()
+_con.close()
+_turn = core.stored_median_turnover(download)
+check("turnover is read from the stored candles",
+      _turn.get("SYM2599.NS") == 100 * 3_000_000, str(_turn)[:120])
+ranked = core.resolve_universe(core.FULL_NSE_UNIVERSE)
+check("the most liquid names make the top 2000 even at the end of the alphabet",
+      {"SYM2599.NS", "SYM2598.NS", "SYM2597.NS"} <= set(ranked))
+check("it is still exactly 2000 names", len(ranked) == core.NSE_TOP_N, str(len(ranked)))
+check("the name never downloaded that ranks last drops out",
+      "SYM2596.NS" not in ranked)
 check("index name still resolves to its CSV",
       len(core.resolve_universe("Nifty 500")) == 500)
 check("union de-duplicates across names",
@@ -88,6 +140,10 @@ _saved_scan_universe = os.environ.get("SCAN_UNIVERSE")
 try:
     os.environ["SCAN_UNIVERSE"] = core.FULL_NSE_UNIVERSE
     check("SCAN_UNIVERSE accepts the full-NSE option",
+          daily_job._universes() == [core.FULL_NSE_UNIVERSE], str(daily_job._universes()))
+
+    os.environ["SCAN_UNIVERSE"] = "NSE All Cash (~2000)"
+    check("SCAN_UNIVERSE still accepts the old full-NSE name",
           daily_job._universes() == [core.FULL_NSE_UNIVERSE], str(daily_job._universes()))
 
     os.environ["SCAN_UNIVERSE"] = "Nifty 500|Nifty Midcap 150"

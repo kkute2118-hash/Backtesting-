@@ -193,9 +193,9 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
     },
     {
         "name": "Full NSE — research sweep",
-        "description": "The whole ~2000-name NSE cash list at a lower gate, for "
+        "description": "The 2000 most liquid NSE shares at a lower gate, for "
                        "research rather than execution. Slowest scan.",
-        "config": {"universes": ["NSE All Cash (~2000)"], "strategies": [1, 2, 3, 4],
+        "config": {"universes": ["NSE Top 2000"], "strategies": [1, 2, 3, 4],
                    "min_score": 60, "use_live_prices": False, "limit": None},
     },
     {

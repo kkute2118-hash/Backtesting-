@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from app.core.errors import ApiError, NotConfigured
+from app.core.errors import ApiError, NotConfigured, UpstreamError
 from app.engine import core
 from app.services import bootstrap, jobs
 from app.services.jobs import JobHandle
@@ -23,6 +23,24 @@ from app.services.universe import resolve
 SYNC_LATEST_KIND = "sync_latest"
 SYNC_FULL_KIND = "sync_full"
 DIAGNOSTIC_KIND = "sync_diagnostics"
+
+
+def _warm_scan_features(handle: JobHandle, universes: list[str],
+                        start: float, end: float) -> int:
+    """Precompute the next scan's features so it runs on the fast path.
+
+    Never fails the sync: the candles are what the job was for, and a scan
+    computes anything missing itself - just slower.
+    """
+    try:
+        tickers = resolve(universes)
+        handle.progress(start, f"Preparing scan features for {len(tickers):,} stocks")
+        return core.warm_feature_snapshots(
+            tickers,
+            progress_cb=lambda f: handle.progress(start + (end - start) * float(f),
+                                                  "Preparing scan features"))
+    except Exception:
+        return 0
 
 
 def _require_dhan() -> None:
@@ -70,7 +88,7 @@ def sync_latest(universes: list[str], tail_days: int | None = None) -> dict[str,
     while its session was still open gets corrected once it really closes.
     """
     _require_dhan()
-    tickers = resolve(universes)
+    tickers = resolve(universes, purpose="download")
     days = int(tail_days or core.LATEST_SYNC_TAIL_DAYS)
     request = {"universes": universes, "tail_days": days, "universe_size": len(tickers)}
 
@@ -78,7 +96,13 @@ def sync_latest(universes: list[str], tail_days: int | None = None) -> dict[str,
         handle.progress(0.02, f"Requesting the last {days} days for {len(tickers):,} stocks")
         summary = core.sync_latest_sessions(
             tickers, tail_days=days,
-            progress_cb=lambda f: handle.progress(min(0.99, float(f)), "Downloading"))
+            progress_cb=lambda f: handle.progress(min(0.85, 0.85 * float(f)), "Downloading"))
+        if (summary or {}).get("aborted"):
+            # Dhan refused the account itself; nothing was downloaded, so there
+            # is nothing to back up and "succeeded" would be a lie.
+            raise UpstreamError(summary["aborted"])
+
+        warmed = _warm_scan_features(handle, universes, 0.85, 0.98)
 
         # Candles just cost real Dhan rate limit to fetch. On a host with no
         # persistent disk they are gone at the next restart unless pushed now.
@@ -86,6 +110,7 @@ def sync_latest(universes: list[str], tail_days: int | None = None) -> dict[str,
         backed_up, reason = bootstrap.protect_full_database()
 
         stats = {str(k): clean_value(v) for k, v in (summary or {}).items()}
+        stats["scan_features_ready"] = warmed
         stats["backed_up"] = backed_up
         stats["backup_note"] = reason
         return {"stats": stats, "rows": [], "request": request}
@@ -100,24 +125,31 @@ def sync_full(universes: list[str], period: str = "2 Years") -> dict[str, Any]:
     _require_dhan()
     from app.services.backtest import period_window
 
-    tickers = resolve(universes)
+    tickers = resolve(universes, purpose="download")
     start, end = period_window(period)
     request = {"universes": universes, "period": period, "universe_size": len(tickers)}
 
     def work(handle: JobHandle) -> dict[str, Any]:
         handle.progress(0.02, f"Filling missing history for {len(tickers):,} stocks")
         data = core.sync_missing_backtest_data(tickers, start, end)
+        # download_prices() replaces this list per run, so a hit is from this one.
+        access = next((e for e in (core._DHAN_LAST_DATA_ERRORS or [])
+                       if "DH-901" in str(e) or "DH-902" in str(e)), None)
+        if access:
+            raise UpstreamError(str(access).split(": ", 1)[-1])
         handle.progress(0.9, "Recording diagnostics")
         try:
             core.compute_and_store_sync_diagnostics(tickers)
         except Exception:
             pass
-        handle.progress(0.95, "Backing up the candle store")
+        warmed = _warm_scan_features(handle, universes, 0.92, 0.98)
+        handle.progress(0.98, "Backing up the candle store")
         backed_up, backup_note = bootstrap.protect_full_database()
         return {
             "stats": {
                 "symbols_requested": len(tickers),
                 "symbols_with_data": len(data or {}),
+                "scan_features_ready": warmed,
                 "errors": [str(e) for e in (core._DHAN_LAST_DATA_ERRORS or [])][:20],
                 "no_data": [str(e) for e in (core._DHAN_LAST_NO_DATA or [])][:20],
                 "backed_up": backed_up,
@@ -133,7 +165,7 @@ def sync_full(universes: list[str], period: str = "2 Years") -> dict[str, Any]:
 
 def diagnostics(universes: list[str]) -> dict[str, Any]:
     """Why each thin symbol is thin: not in the master, an API error, or new."""
-    tickers = resolve(universes)
+    tickers = resolve(universes, purpose="download")
     request = {"universes": universes, "universe_size": len(tickers)}
 
     def work(handle: JobHandle) -> dict[str, Any]:

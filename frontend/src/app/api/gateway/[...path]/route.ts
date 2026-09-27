@@ -14,6 +14,12 @@ import { NextRequest, NextResponse } from "next/server";
 
 const ALLOWED = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+// In the backend's error envelope, so the UI shows this sentence rather than a
+// bare "Request failed (502)".
+const UNAVAILABLE_MESSAGE =
+  "Cannot reach the analysis server. If it was asleep or restarting it can take " +
+  "up to a minute to come back - try again shortly.";
+
 /**
  * Where the backend is, resolved PER REQUEST.
  *
@@ -34,7 +40,7 @@ function backendBase(): string {
 async function forward(request: NextRequest, path: string[]) {
   if (!ALLOWED.has(request.method)) {
     return NextResponse.json(
-      { code: "method_not_allowed", message: "This proxy forwards mutations only." },
+      { error: { code: "method_not_allowed", message: "This proxy forwards mutations only." } },
       { status: 405 },
     );
   }
@@ -61,9 +67,19 @@ async function forward(request: NextRequest, path: string[]) {
       cache: "no-store",
     });
     const text = await response.text();
+    const type = response.headers.get("Content-Type") ?? "application/json";
+    // A 5xx that is not JSON came from Render's edge, not the API: the
+    // instance is waking or restarting. Say that, instead of forwarding an
+    // HTML error page the UI can only report as "Request failed (502)".
+    if (response.status >= 500 && !type.includes("json")) {
+      return NextResponse.json(
+        { error: { code: "server_unavailable", message: UNAVAILABLE_MESSAGE } },
+        { status: 503 },
+      );
+    }
     return new NextResponse(text, {
       status: response.status,
-      headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json" },
+      headers: { "Content-Type": type },
     });
   } catch (cause) {
     // Never echo the upstream URL or the key to the client - but do log the
@@ -71,7 +87,7 @@ async function forward(request: NextRequest, path: string[]) {
     // the build-time inlining above take so long to spot.
     console.error("gateway: upstream request failed", cause);
     return NextResponse.json(
-      { code: "network_error", message: "Cannot reach the analysis server." },
+      { error: { code: "network_error", message: UNAVAILABLE_MESSAGE } },
       { status: 502 },
     );
   }

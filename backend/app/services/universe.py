@@ -9,7 +9,7 @@ from app.engine import core
 def choices() -> list[dict]:
     """Every universe the scanner accepts, with the cost of choosing it.
 
-    Size is what the user actually needs to know here: the full NSE list is
+    Size is what the user actually needs to know here: the NSE Top 2000 is
     ~4x Nifty 500 and takes proportionally longer to scan, and it is the only
     option that needs Dhan credentials (it is built from the scrip master, not
     from a public index CSV).
@@ -22,20 +22,25 @@ def choices() -> list[dict]:
             "source": "Dhan instrument master" if needs_dhan else "niftyindices.com",
             "requires_dhan": needs_dhan,
             "available": (not needs_dhan) or core.dhan_configured(),
-            "approx_size": 2000 if needs_dhan else None,
+            "approx_size": core.NSE_TOP_N if needs_dhan else None,
         })
     return out
 
 
-def resolve(names: list[str], allow_network: bool = True) -> list[str]:
-    """Ticker list for the selected universes, with a usable error on failure."""
+def resolve(names: list[str], allow_network: bool = True, purpose: str = "scan") -> list[str]:
+    """Ticker list for the selected universes, with a usable error on failure.
+
+    ``purpose="download"`` is for the data jobs: for the NSE Top 2000 it returns
+    every candidate share, so the store can rank them (see core.resolve_universe).
+    """
     if not names:
         raise ApiError("Select at least one universe to scan.")
+    names = [core.canonical_universe(n) for n in names]
     unknown = [n for n in names if n not in core.UNIVERSE_CHOICES]
     if unknown:
         raise ApiError(f"Unknown universe: {', '.join(unknown)}")
     try:
-        tickers = core.resolve_universes(names, allow_network=allow_network)
+        tickers = core.resolve_universes(names, allow_network=allow_network, purpose=purpose)
     except RuntimeError as exc:
         # resolve_universe() raises this when the full-NSE option is picked
         # without Dhan credentials; the message already names the fix.

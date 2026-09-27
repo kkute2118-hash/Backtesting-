@@ -11,7 +11,7 @@ universe instead: on each day, the `top_n` stocks by trailing traded value
 among EVERY stock with data (engine: point_in_time_universe()).
 
 With --download it first fetches history for the whole NSE cash market
-(FULL_NSE_UNIVERSE, about 2,000 names) into a throwaway database, so stocks
+(every ordinary NSE share in Dhan's instrument list) into a throwaway database, so stocks
 that have since left the index are included. Without it, it runs on the
 stored universe only, which bounds the bias but cannot remove it.
 
@@ -103,7 +103,9 @@ def main():
     data_start = end - timedelta(days=365 * args.years)
     start = pd.Timestamp(args.start) if args.start else pd.Timestamp(data_start + timedelta(days=400))
     if args.download:
-        tickers = core.resolve_universe(core.FULL_NSE_UNIVERSE)
+        # purpose="download": every ordinary NSE share Dhan lists, not today's
+        # 2000 most liquid, which would itself be a list chosen with hindsight.
+        tickers = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="download")
         log(f"downloading {len(tickers)} symbols {data_start} .. {end}")
         core.sync_missing_backtest_data(tickers, data_start, end)
 
