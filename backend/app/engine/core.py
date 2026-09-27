@@ -1309,7 +1309,9 @@ class DhanAccessError(RuntimeError):
     """Dhan refused the ACCOUNT, not the request: every symbol will fail alike.
 
     DH-901 is an invalid or expired access token; DH-902 is an account without
-    an active Data API subscription. Neither is fixed by retrying, or by asking
+    an active Data API subscription; DH-906 is a token Dhan has replaced (it
+    keeps one live token per account, so a job that generates a new one
+    invalidates every other job's). Neither is fixed by retrying, or by asking
     for a different stock, so a 500-symbol sync that meets one should stop at
     the first and say so - not spend two minutes collecting 500 copies of it.
     """
@@ -1324,6 +1326,10 @@ _DHAN_ACCESS_HINTS = {
                "Dhan refuses every historical and quote request. Renew the Data API "
                "plan in Dhan (web.dhan.co → My Profile → DhanHQ Trading APIs), then "
                "retry. The stored candles and the GitHub backup still work meanwhile."),
+    "DH-906": ("Dhan rejected the token as invalid. Dhan keeps one live token per "
+               "account, so another job that generated a fresh token (PIN+TOTP) has "
+               "replaced this one. Run Dhan jobs one at a time (the dhan-db "
+               "concurrency group) and retry."),
 }
 
 
@@ -2779,7 +2785,7 @@ def download_prices(tickers,start,end,max_workers=4,refresh_tail_days=0):
     errors=[]
     workers=max(1,min(int(max_workers),5))
 
-    aborted=[]  # first DH-901/DH-902: the rest would fail identically
+    aborted=[]  # first DH-901/902/906: the rest would fail identically
 
     def worker(symbol):
         if aborted:
@@ -9969,7 +9975,7 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
     updated = 0
     workers = max(1, min(int(max_workers), 5))
     done = 0
-    # Set on the first account-level refusal (DH-901/DH-902). Every remaining
+    # Set on the first account-level refusal (DH-901/902/906). Every remaining
     # symbol would fail identically, so the rest are skipped, not requested.
     aborted = []
 

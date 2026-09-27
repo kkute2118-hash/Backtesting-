@@ -107,7 +107,17 @@ def main():
         # 2000 most liquid, which would itself be a list chosen with hindsight.
         tickers = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="download")
         log(f"downloading {len(tickers)} symbols {data_start} .. {end}")
-        core.sync_missing_backtest_data(tickers, data_start, end)
+        got = core.sync_missing_backtest_data(tickers, data_start, end)
+        errs = list(core._DHAN_LAST_DATA_ERRORS)
+        log(f"download: {len(got)} of {len(tickers)} symbols returned candles; "
+            f"{len(errs)} errors (last 100 kept)")
+        for e in errs[:15]:
+            log(f"  {e}")
+        refused = [e for e in errs if any(c in e for c in ("DH-901", "DH-902", "DH-906"))]
+        if refused:
+            # Dhan refused the account part-way; results over a partial download
+            # would look like a survivorship check but mostly repeat the stored list.
+            raise SystemExit(f"download aborted by Dhan, not reporting: {refused[0]}")
 
     con = core._db()
     try:
