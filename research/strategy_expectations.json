@@ -1,0 +1,29 @@
+{
+ "generated_from": "engine replay 2022-01-01 to 2026-09-25, closed trades only",
+ "strategies": {
+  "S4_SEPA": {
+   "trades": 304,
+   "win_pct": 52.3,
+   "avg_return_pct": 6.47,
+   "median_return_pct": 4.09,
+   "avg_r": 0.924,
+   "avg_holding_days": 34.9
+  },
+  "S5_POCKETPIVOT": {
+   "trades": 1338,
+   "win_pct": 40.1,
+   "avg_return_pct": 2.88,
+   "median_return_pct": -0.88,
+   "avg_r": 0.673,
+   "avg_holding_days": 27.6
+  },
+  "S6_BREAKOUT": {
+   "trades": 628,
+   "win_pct": 43.0,
+   "avg_return_pct": 19.47,
+   "median_return_pct": -4.51,
+   "avg_r": 1.76,
+   "avg_holding_days": 137.6
+  }
+ }
+}
