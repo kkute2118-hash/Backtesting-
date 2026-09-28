@@ -286,7 +286,6 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
     }
     const gateOpen = (b.latest ?? 0) >= thr;
     const open = f.open || [];
-    const openActive = open.filter(r => !RETIRED.has(r.strategy));
     const avgOpen = open.length ? open.reduce((a,r)=>a+(r.gain_pct||0),0)/open.length : null;
     $("tiles").innerHTML = `
       <div class="tile"><span class="l">Market breadth (10-day)</span>
@@ -297,7 +296,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       <div class="tile"><span class="l">Market regime</span><span class="v" style="font-size:17px;font-family:var(--sans)">${esc(s.regime)}</span>
         <span class="l">Score ${esc(s.regime_score)} · from ${esc(s.regime_source)}</span></div>
       <div class="tile"><span class="l">Open paper trades</span><span class="v">${open.length}</span>
-        <span class="l">${openActive.length} on S4–S6 · average ${pct(avgOpen)}</span></div>`;
+        <span class="l">S4–S6 · average ${pct(avgOpen)}</span></div>`;
     sparkline($("spark"), b.history || [], thr);
 
     // sizing
@@ -369,15 +368,11 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
     }
     drawWatch();
 
-    // forward: one card per scanner strategy, then S1-S3 folded into one card
+    // forward: one card per scanner strategy
     const order = ["S4_SEPA","S5_POCKETPIVOT","S6_BREAKOUT"];
     const byName = Object.fromEntries((f.scorecard||[]).map(r => [r.strategy, r]));
     const blank = k => ({strategy:k,open:0,closed:0,wins:0,losses:0,win_pct:null,avg_r:null,total_r:null});
     const active = order.map(k => byName[k] || blank(k));
-    const old = (f.scorecard||[]).filter(r => r.retired);
-    const sum = (k) => old.reduce((a,r)=>a+(r[k]||0),0);
-    const oldWins = sum("wins"), oldLosses = sum("losses"), oldClosed = sum("closed");
-    const oldAvgR = oldClosed ? sum("total_r")/oldClosed : null;
     const H = Object.fromEntries((d.health||[]).map(h => [h.strategy, h]));
     const healthLine = k => {
       const h = H[k]; if (!h) return "";
@@ -396,9 +391,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
           <div><span class="k">Avg R</span><span class="val ${cls(r.avg_r)}">${r.avg_r==null?"–":num(r.avg_r,2)}</span></div>
         </div>${healthLine(r.strategy)}</div>`;
     $("score").innerHTML = active.map(r => card(stratChip(r.strategy),
-        `<span class="pill ${r.closed>=30?"acc":"mut"}">${r.closed>=30?`${r.closed} closed`:`${r.closed} closed · need 30`}</span>`, r)).join("")
-      + (old.length ? card(`<span class="strat retired">S1–S3</span>`, `<span class="pill mut">retired · tracking to exit</span>`,
-          {open:sum("open"), win_pct:(oldWins+oldLosses)?100*oldWins/(oldWins+oldLosses):null, avg_r:oldAvgR}, " retired") : "");
+        `<span class="pill ${r.closed>=30?"acc":"mut"}">${r.closed>=30?`${r.closed} closed`:`${r.closed} closed · need 30`}</span>`, r)).join("");
 
     if (!open.length) $("openBody").innerHTML = `<div class="empty"><b>No open paper trades</b></div>`;
     else table($("openBody"), [

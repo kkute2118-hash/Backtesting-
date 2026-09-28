@@ -285,18 +285,23 @@ def forward() -> dict:
     except Exception as exc:
         log(f"live positions failed ({exc}); falling back to stored closes")
         df, meta = core.forward_positions_view(use_live=False)
-    open_rows = records(df[df["Status"] == "ACTIVE"] if len(df) else df, POSITION_COLUMNS)
+    # The page shows the scanner's strategies only. S1-S3 are retired; their
+    # remaining paper trades are still resolved by the GitHub job, just not shown.
+    active = {core.strategy_label_for(s) for s in core.IMPLEMENTED_STRATEGIES}
+    open_all = records(df[df["Status"] == "ACTIVE"] if len(df) else df, POSITION_COLUMNS)
+    open_rows = [r for r in open_all if str(r.get("strategy")) in active]
     open_rows.sort(key=lambda r: r.get("signal_date") or "", reverse=True)
 
     summary = core.forward_summary_table()
     scorecard = []
     for _, r in summary.iterrows():
+        if str(r["Strategy"]) not in active:
+            continue
         scorecard.append({
             "strategy": str(r["Strategy"]), "records": plain(r["Records"]), "open": plain(r["Open"]),
             "closed": plain(r["Closed"]), "wins": plain(r["Wins"]), "losses": plain(r["Losses"]),
             "win_pct": plain(r["Win %"]), "avg_r": plain(r["AvgR"]), "total_r": plain(r["TotalR"]),
             "status": plain(r["Status"]),
-            "retired": str(r["Strategy"]).upper() in {f"S{s}" for s in core.RETIRED_STRATEGIES},
         })
 
     con = core._db()
@@ -308,9 +313,11 @@ def forward() -> dict:
             con, params=(CLOSED_RESULTS_LIMIT,))
     finally:
         con.close()
-    closed_rows = [{k: plain(v) for k, v in r.items()} for r in closed.to_dict("records")]
+    closed_rows = [{k: plain(v) for k, v in r.items()} for r in closed.to_dict("records")
+                   if str(r["strategy"]) in active]
     return {"price_meta": {k: plain(v) for k, v in (meta or {}).items()},
-            "open": open_rows, "closed": closed_rows, "scorecard": scorecard}
+            "open": open_rows, "closed": closed_rows, "scorecard": scorecard,
+            "retired_open_hidden": len(open_all) - len(open_rows)}
 
 
 EXPECTATIONS = ROOT / "research" / "strategy_expectations.json"
