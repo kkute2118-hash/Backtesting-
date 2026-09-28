@@ -1536,6 +1536,31 @@ def _dhan_ensure_fresh_token():
                 return token
             raise
 
+def _dhan_renew_rejected_token(rejected):
+    """After Dhan rejects the token, mint one fresh token and say whether to retry.
+
+    The cached token can be dead while still "fresh" by age: the database
+    backup carries the token the GitHub job minted, and any later PIN+TOTP
+    login elsewhere (Dhan keeps one live token per account) voids it. Only
+    PIN+TOTP setups can renew; a pasted DHAN_ACCESS_TOKEN cannot. Under the
+    token lock, a worker that finds the cache already holding a different
+    token retries with that one instead of minting again, so parallel
+    downloads renew once, not once per thread (Dhan allows one mint per two
+    minutes).
+    """
+    if not _dhan_pin_totp_configured():
+        return False
+    with _DHAN_TOKEN_LOCK:
+        current, _ = _read_cached_dhan_token()
+        if current and current != rejected:
+            return True
+        try:
+            _dhan_generate_fresh_token()
+        except Exception:
+            return False
+    return True
+
+
 def _dhan_headers():
     return {
         "access-token":_dhan_ensure_fresh_token(),
@@ -2541,13 +2566,15 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
     """
     global _DHAN_LAST_REQUEST
     last_error = None
+    renewed = False
     for attempt in range(attempts):
         with _DHAN_RATE_LOCK:
             wait = DHAN_MIN_INTERVAL - (time.monotonic() - _DHAN_LAST_REQUEST)
             if wait > 0:
                 time.sleep(wait)
             _DHAN_LAST_REQUEST = time.monotonic()
-        r = requests.post(f"{DHAN_BASE_URL}{path}", headers=_dhan_headers(),
+        headers = _dhan_headers()
+        r = requests.post(f"{DHAN_BASE_URL}{path}", headers=headers,
                           json=payload, timeout=timeout)
         if r.ok:
             return r
@@ -2558,6 +2585,14 @@ def _dhan_post(path, payload, timeout=45, label="request", attempts=5):
         # gets its own type instead of being reported as a build failure.
         if "DH-907" in r.text:
             raise DhanNoDataError(last_error)
+        # The market-feed endpoints say the same thing as DH-901/906 in their
+        # own words: HTTP 401, code 808 "Authentication Failed - Client ID or
+        # Token invalid".
+        token_rejected = (any(c in r.text for c in ("DH-901", "DH-906"))
+                          or (r.status_code == 401 and "Authentication Failed" in r.text))
+        if token_rejected and not renewed and _dhan_renew_rejected_token(headers.get("access-token")):
+            renewed = True
+            continue
         access = _dhan_access_error(r.text)
         if access is not None:
             raise access
