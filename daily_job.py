@@ -36,10 +36,10 @@ Configuration comes from environment variables (see core._secret):
                SCAN_UNIVERSE     default "Nifty 500"; any name in
                                  core.UNIVERSE_CHOICES, including
                                  "NSE Top 2000" for the 2000 most liquid shares
-               SCAN_STRATEGIES   default core.DEFAULT_STRATEGIES ("4,5,6");
-                                 retired S1-S3 are ignored here: they are
-                                 forward-tested in a separate background
-                                 book (step_shadow) that the page never shows
+               SCAN_STRATEGIES   default core.DEFAULT_STRATEGIES ("1,2,3,4,5,6");
+                                 a strategy in core.RETIRED_STRATEGIES is
+                                 ignored here and forward-tested in a separate
+                                 background book instead (step_shadow)
                SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
                                  gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
@@ -345,6 +345,8 @@ def step_shadow(tickers, min_score, session_date=None):
     block an S4-S6 position, and the page and alerts ignore them. The point is
     live data in case they are ever reconsidered. Never fails the run.
     """
+    if not core.SHADOW_STRATEGIES:
+        return 0
     try:
         result, _ = step_scan(tickers, list(core.SHADOW_STRATEGIES), min_score,
                               session_date=session_date, data=getattr(step_scan, "data", None))

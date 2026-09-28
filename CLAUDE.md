@@ -33,13 +33,13 @@ stay inside Oracle's **Always Free** allowance, always:
   scripts and the Oracle mirror (`BACKUP_READONLY=1`) only read it. Dhan keeps
   one live token per account, so Dhan jobs share the `dhan-db` concurrency
   group and the mirror yields to them (`DHAN_YIELD_TO_JOBS=1`).
-- **Scanner strategies: S4, S5, S6 only.** S1-S3 are retired
-  (`core.RETIRED_STRATEGIES`) from the scanner and the page, but the daily job
-  still forward-tests them in a separate background book
-  (`core.SHADOW_STRATEGIES`, `daily_job.step_shadow`), so there is live data
-  if they are ever reconsidered. That book never blocks an S4-S6 position in
-  the same stock, and the page and alerts show S4-S6 only. The owner reviewed S1-S6 on 28 Sep 2026
-  (`research/STRATEGY_SHORTLIST.md`) and chose to keep S4, S5 and S6.
+- **Scanner strategies: S1-S6.** S4, S5 and S6 as tested. S1-S3 came back on
+  29 Sep 2026 at the owner's request, each gated by S6's market traits
+  (breadth >= 0.50, >= 60% above the 52-week low, within 15% of the 52-week
+  high: entry rule `s6traits`, research/S123_IMPROVED.md). They take slots
+  after S4-S6. `core.RETIRED_STRATEGIES` is empty; if a strategy is retired
+  again, the daily job forward-tests it in the separate background book
+  (`core.SHADOW_STRATEGIES`, `daily_job.step_shadow`).
 - **Evidence rule.** A new filter or rule gates trades only if it was chosen on
   2022-24 data and holds on 2025-26 data. Otherwise it is a flag (like the
   results calendar) or it is not adopted (like the S5 market filter). Findings

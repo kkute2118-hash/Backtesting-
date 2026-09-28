@@ -6815,7 +6815,9 @@ def market_breakout_breadth(force=False):
     now = time.monotonic()
     with _S6_BREADTH_LOCK:
         cached = _S6_BREADTH["series"]
-        if (not force and cached is not None
+        # Keyed to the database it was read from: a process that switches
+        # DATA_DB (a mirror refresh, a test fixture) must not reuse it.
+        if (not force and cached is not None and _S6_BREADTH.get("db") == DATA_DB
                 and now - _S6_BREADTH["at"] < S6_BREADTH_TTL_SECONDS):
             return cached
     n = int(S6_BREAKOUT_LOOKBACK)
@@ -6836,7 +6838,7 @@ def market_breakout_breadth(force=False):
     except Exception:
         series = pd.Series(dtype=float, name=S6_BREADTH_COLUMN)
     with _S6_BREADTH_LOCK:
-        _S6_BREADTH.update(at=now, series=series)
+        _S6_BREADTH.update(at=now, series=series, db=DATA_DB)
     return series
 
 
@@ -8025,19 +8027,23 @@ LEGACY_MIN_SCORE = 85
 # CAGR, worst of 12 seeds still 24.8%, CAGR/maxDD 1.26) against Rs 2.39 lakh /
 # 22.5% / 0.66 for all five together (research/SECTOR_TIMING_FINDINGS.md,
 # addendum 4). S6 is the breadth breakout above.
-IMPLEMENTED_STRATEGIES = (4, 5, 6)
-DEFAULT_STRATEGIES = (4, 5, 6)
+IMPLEMENTED_STRATEGIES = (1, 2, 3, 4, 5, 6)
+DEFAULT_STRATEGIES = (1, 2, 3, 4, 5, 6)
 # S1-S3 are retired from the scanner: flat or negative on every stored backtest
 # run, and removing them is what lifted the portfolio above. strategy_signal()
 # still implements them so research tools, the golden tests and forward tests
 # opened before retirement keep working; nothing new is scanned under them.
-RETIRED_STRATEGIES = (1, 2, 3)
+# 29 Sep 2026: S1-S3 are back, each gated by S6's market traits (entry rule
+# "s6traits" below). The gate was the best extra rule a blind search over
+# 2022-24 found for all three, and it held on 2025-26
+# (research/S123_IMPROVED.md). The owner asked for them to be scanned again.
+RETIRED_STRATEGIES = ()
 # ...but still forward-tested in the background, so there is live data on them
 # if they are ever reconsidered. They form a SHADOW book: their paper trades
 # never block an S4-S6 position in the same stock (and vice versa), are never
 # shown on the page, and never trigger an alert. The daily job scans them in a
 # second pass after the scanner's own strategies.
-SHADOW_STRATEGIES = RETIRED_STRATEGIES
+SHADOW_STRATEGIES = RETIRED_STRATEGIES            # empty while nothing is retired
 SHADOW_LABELS = frozenset(f"S{s}" for s in SHADOW_STRATEGIES)
 
 
@@ -11412,8 +11418,9 @@ def _portfolio_returns(data, tickers, lookback=PORTFOLIO_CORRELATION_LOOKBACK):
 #
 # Strategies not listed sort after those that are, and liquidity breaks every
 # remaining tie. Re-measure before reordering: this is one book over one period.
-STRATEGY_SLOT_PRIORITY = {"S4_SEPA": 0, "S4": 0, "S5_POCKETPIVOT": 1, S6_LABEL: 2}
-STRATEGY_SLOT_PRIORITY_DEFAULT = 2
+STRATEGY_SLOT_PRIORITY = {"S4_SEPA": 0, "S4": 0, "S5_POCKETPIVOT": 1, S6_LABEL: 2,
+                          "S1": 3, "S2": 3, "S3": 3}
+STRATEGY_SLOT_PRIORITY_DEFAULT = 3
 
 
 def _slot_priority(label):
@@ -12773,7 +12780,8 @@ ENTRY_SECTOR_LOOKBACK = 21
 # the sector rank works for and the only one ATR does nothing for.
 # S6 gets none: it carries its own ATR rule (2.8%, the level it was tested at)
 # and was measured without a turnover floor, so either would change the strategy.
-ENTRY_FILTER_BY_STRATEGY = {1: "atr", 2: "atr", 3: "atr", 4: "sector", 5: "atr", 6: "none"}
+ENTRY_FILTER_BY_STRATEGY = {1: "s6traits", 2: "s6traits", 3: "s6traits",
+                            4: "sector", 5: "atr", 6: "none"}
 APPLY_ENTRY_EVIDENCE_FILTER = True
 
 
@@ -12814,6 +12822,33 @@ def _entry_turnover_cr(frame, bars=20):
         return float("nan")
 
 
+def s6_traits_verdict(frame, breadth=None):
+    """S1-S3's entry rule: S6's market traits on the frame's last bar.
+    Market breadth >= S6_MIN_BREADTH (the latest stored session on or before
+    the bar), >= S6_MIN_ABOVE_52W_LOW_PCT above the 52-week low and within
+    S6_MAX_BELOW_52W_HIGH_PCT of the 52-week high. -> (passed, reason, readings)."""
+    tail = frame.tail(252)
+    close = float(frame.close.iloc[-1])
+    hi52 = float(tail.high.max()) if len(tail) >= 200 else np.nan
+    lo52 = float(tail.low.min()) if len(tail) >= 200 else np.nan
+    b = market_breakout_breadth() if breadth is None else breadth
+    try:
+        bv = float(b.dropna().asof(pd.Timestamp(frame.index[-1]))) if len(b) else np.nan
+    except Exception:
+        bv = np.nan
+    above = (close / lo52 - 1) * 100 if np.isfinite(lo52) and lo52 > 0 else np.nan
+    below = (1 - close / hi52) * 100 if np.isfinite(hi52) and hi52 > 0 else np.nan
+    readings = {"breadth": bv, "above_52w_low_pct": above, "below_52w_high_pct": below}
+    if not np.isfinite(bv) or bv < S6_MIN_BREADTH:
+        return False, (f"market breadth {bv:.2f} < {S6_MIN_BREADTH:.2f}" if np.isfinite(bv)
+                       else "market breadth unknown"), readings
+    if not np.isfinite(above) or above < S6_MIN_ABOVE_52W_LOW_PCT:
+        return False, f"only {above:.0f}% above the 52-week low", readings
+    if not np.isfinite(below) or below > S6_MAX_BELOW_52W_HIGH_PCT:
+        return False, f"{below:.0f}% below the 52-week high", readings
+    return True, f"breadth {bv:.2f}, {above:.0f}% above low, {below:.0f}% below high", readings
+
+
 def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
                          sector_lookup=None, ticker=None, apply_filter=None):
     """Does this signal pass the evidence filter? -> (passed, reason, metrics).
@@ -12841,6 +12876,10 @@ def entry_filter_verdict(frame, features, strategy, sector_ranks=None,
     rule = ENTRY_FILTER_BY_STRATEGY.get(int(strategy), "atr")
     if rule == "none":
         return True, "own rules only", metrics
+    if rule == "s6traits":
+        ok, why, readings = s6_traits_verdict(frame)
+        metrics.update(readings)
+        return ok, why, metrics
     if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
         got = f"{turnover:.0f}" if np.isfinite(turnover) else "unknown"
         return False, f"turnover Rs {got} cr < {ENTRY_MIN_TURNOVER_CR:.0f} cr", metrics
@@ -12923,6 +12962,10 @@ def historical_entry_verdict(strategy, frame, signal_date, sector_ranks=None,
         return False, f"price gap {gap[1]:+.0f}% on {gap[0]}", metrics
     if rule == "none":
         return True, "own rules only", metrics
+    if rule == "s6traits":
+        ok, why, readings = s6_traits_verdict(hist)
+        metrics.update(readings)
+        return ok, why, metrics
     if not np.isfinite(turnover) or turnover < ENTRY_MIN_TURNOVER_CR:
         return False, "turnover below floor", metrics
     if rule == "sector":

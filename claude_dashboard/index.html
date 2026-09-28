@@ -216,8 +216,9 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
   const pct = (v,d=1,sign=true) => v==null ? "–" : (sign && v>0 ? "+" : "") + Number(v).toFixed(d).replace("-","−") + "%";
   const cls = v => v==null ? "" : v>0 ? "up" : v<0 ? "dn" : "";
   const date = s => { if(!s) return "–"; const d = new Date(String(s).slice(0,10)+"T00:00:00"); return isNaN(d) ? esc(s) : d.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"2-digit"}); };
-  const short = s => ({S4_SEPA:"S4 · SEPA",S5_POCKETPIVOT:"S5 · Pocket pivot",S6_BREAKOUT:"S6 · Breakout"}[s] || s);
-  const RETIRED = new Set(["S1","S2","S3"]);
+  const short = s => ({S1:"S1 · Monthly trend",S2:"S2 · EMA momentum",S3:"S3 · 50-EMA pullback",
+                        S4_SEPA:"S4 · SEPA",S5_POCKETPIVOT:"S5 · Pocket pivot",S6_BREAKOUT:"S6 · Breakout"}[s] || s);
+  const RETIRED = new Set([]);
   let RESULTS = {};
   const resChip = sym => RESULTS[sym] ? ` <span class="pill warn" title="Board meeting for results on ${esc(RESULTS[sym])}">results ${esc(date(RESULTS[sym]))}</span>` : "";
   const stratChip = s => `<span class="strat${RETIRED.has(s)?" retired":""}">${esc(short(s))}</span>`;
@@ -369,7 +370,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
     drawWatch();
 
     // forward: one card per scanner strategy
-    const order = ["S4_SEPA","S5_POCKETPIVOT","S6_BREAKOUT"];
+    const order = ["S1","S2","S3","S4_SEPA","S5_POCKETPIVOT","S6_BREAKOUT"];
     const byName = Object.fromEntries((f.scorecard||[]).map(r => [r.strategy, r]));
     const blank = k => ({strategy:k,open:0,closed:0,wins:0,losses:0,win_pct:null,avg_r:null,total_r:null});
     const active = order.map(k => byName[k] || blank(k));

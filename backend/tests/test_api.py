@@ -57,10 +57,14 @@ def test_unknown_strategy_is_rejected(client):
     assert response.status_code == 422
 
 
-def test_retired_strategies_are_dropped_not_rejected():
-    """A preset saved before S1-S3 were retired must still scan."""
+def test_retired_strategies_are_dropped_not_rejected(monkeypatch):
+    """A preset that names a retired strategy must still scan (S1-S3 were
+    retired until 29 Sep 2026; nothing is retired now, so set it up)."""
     from pydantic import ValidationError
+    from app.engine import core
     from app.schemas.scanner import ScanRequest
+    monkeypatch.setattr(core, "IMPLEMENTED_STRATEGIES", (4, 5, 6))
+    monkeypatch.setattr(core, "RETIRED_STRATEGIES", (1, 2, 3))
     assert ScanRequest(strategies=[1, 2, 4, 6]).strategies == [4, 6]
     with pytest.raises(ValidationError):
         ScanRequest(strategies=[1, 3])
