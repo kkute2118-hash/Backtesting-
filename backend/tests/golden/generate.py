@@ -20,6 +20,14 @@ def main() -> None:
     install_fixture_db()
     from app.engine import core
     from app.services import forward
+    from tests.test_golden_scan import GOLDEN_RECORDED_AT
+
+    # Record at the same frozen clock the golden test replays at. The scan
+    # loads the last N calendar days counted from "today", so recording
+    # against the real clock produced snapshots the test could never match.
+    real_clock = core.market_now
+    frozen = real_clock(GOLDEN_RECORDED_AT)
+    core.market_now = lambda now=None: real_clock(now) if now is not None else frozen
 
     scan = run_reference_scan(core)
     save_golden("scan_nifty500_all.json", scan)

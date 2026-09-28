@@ -110,9 +110,13 @@ def test_the_scan_selects_and_scores_exactly_what_it_did_before(fixture_engine):
 def test_the_golden_scan_is_not_accidentally_empty():
     """A harness that passes on zero rows protects nothing, and an empty result
     is exactly what a broken fixture path produces."""
+    # The ungated scan shows whether the fixture scans at all. The gated one
+    # can legitimately be small: since 29 Sep 2026 S1-S3 need market breadth
+    # >= 0.50, and on the recorded day it was far below that.
+    ungated = load_golden("scan_nifty500_ungated.json")
+    assert len(ungated) >= 5, f"only {len(ungated)} ungated rows - the fixture is not scanning"
     want = load_golden("scan_nifty500_all.json")
-    assert len(want) >= 5, f"only {len(want)} golden rows - the fixture is not scanning"
-    assert {r["Strategy"] for r in want}, "no strategies represented"
+    assert want and {r["Strategy"] for r in want}, "no strategies represented"
     for row in want:
         assert set(row) == set(FROZEN_COLUMNS), "golden columns drifted from FROZEN_COLUMNS"
 

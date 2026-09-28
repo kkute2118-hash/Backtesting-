@@ -1,6 +1,6 @@
 ---
 name: scan
-description: Rebuild the ATI Lab Daily page (claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN) - run the S4/S5/S6 scan and read the forward-test book from the latest GitHub database backup, then republish the page. Use for /scan, "run the scan", "update the dashboard", "how are my forward tests", or a scan on another universe.
+description: Rebuild the ATI Lab Daily page (claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN) - run the S1-S6 scan and read the forward-test book from the latest GitHub database backup, then republish the page. Use for /scan, "run the scan", "update the dashboard", "how are my forward tests", or a scan on another universe.
 ---
 
 # /scan - rebuild the ATI Lab Daily page
@@ -59,7 +59,7 @@ GitHub job `.github/workflows/daily-forward-test.yml`. Do not run
    - the closest S6 watchlist names (`scan.s6_watchlist`, first 3-5, with
      `eligible_from`);
    - forward tests: open count, anything closed since the previous run
-     (`forward.closed`, newest first), and the S4/S5/S6 scorecard;
+     (`forward.closed`, newest first), and the S1-S6 scorecard;
    - whether prices were live or the last close (`scan.live.reason`).
    Then give the page link.
 

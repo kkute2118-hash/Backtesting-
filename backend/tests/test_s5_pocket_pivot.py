@@ -833,13 +833,13 @@ def _filter_features(close=100.0, atr=5.0):
 
 def test_a_quiet_stock_fails_the_atr_rule():
     frame = _filter_frame()
-    ok, why, m = core.entry_filter_verdict(frame, _filter_features(atr=2.0), 1)
+    ok, why, m = core.entry_filter_verdict(frame, _filter_features(atr=2.0), 5)
     assert not ok and "ATR" in why
     assert m["atr_pct"] == pytest.approx(2.0)
 
 
 def test_a_volatile_liquid_stock_passes():
-    ok, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=5.0), 1)
+    ok, why, _ = core.entry_filter_verdict(_filter_frame(), _filter_features(atr=5.0), 5)
     assert ok and "ATR 5.0%" in why
 
 
@@ -847,7 +847,7 @@ def test_the_turnover_floor_rejects_an_illiquid_name_however_volatile():
     """Below the floor the ATR edge inverts (PF 1.11 against 1.23), so a high
     ATR there is a reason to skip, not a reason to take."""
     frame = _filter_frame(close=100.0, volume=100_000)          # Rs 1 cr/day
-    ok, why, _ = core.entry_filter_verdict(frame, _filter_features(atr=9.0), 1)
+    ok, why, _ = core.entry_filter_verdict(frame, _filter_features(atr=9.0), 5)
     assert not ok and "turnover" in why
 
 
@@ -892,9 +892,10 @@ def test_each_strategy_has_a_rule_and_only_s4_uses_the_sector_one():
     assert sector_rules == {4}
 
 
-def test_the_default_portfolio_is_the_measured_best_one():
-    # S4 + S5 is the measured best pair; S6 joined as the breadth breakout.
-    assert tuple(core.DEFAULT_STRATEGIES) == (4, 5, 6)
+def test_the_default_portfolio_is_the_owners_choice():
+    # S4 + S5 was the measured best pair and S6 joined as the breadth breakout;
+    # on 29 Sep 2026 the owner brought S1-S3 back behind S6's traits.
+    assert tuple(core.DEFAULT_STRATEGIES) == (1, 2, 3, 4, 5, 6)
     for s in core.DEFAULT_STRATEGIES:
         assert s in core.IMPLEMENTED_STRATEGIES
 
@@ -959,10 +960,12 @@ def test_a_stock_firing_under_two_strategies_opens_one_position(seeded_db):
     assert dict(rows) == {"LTF": 1, "OTHER": 1}
 
 
-def test_the_higher_priority_strategy_takes_the_slot(seeded_db):
+def test_the_higher_priority_strategy_takes_the_slot(seeded_db, monkeypatch):
     """Same rule build_portfolio uses to fill a slot: S4 before S5 before the
-    rest. Picking by row order would make it depend on scan order. S1 is in
-    the separate background book, so it gets its own position."""
+    rest. Picking by row order would make it depend on scan order. With S1 in
+    the separate background book (as when S1-S3 were retired) it gets its own
+    position."""
+    monkeypatch.setattr(core, "SHADOW_LABELS", frozenset({"S1", "S2", "S3"}))
     _clear_signals()
     cands = pd.DataFrame([_fwd_cand("X", "S1"), _fwd_cand("X", "S5_POCKETPIVOT"),
                           _fwd_cand("X", "S4_SEPA")])
@@ -975,9 +978,10 @@ def test_the_higher_priority_strategy_takes_the_slot(seeded_db):
     assert got == [("S1",), ("S4_SEPA",)]
 
 
-def test_a_background_s1_s3_trade_never_blocks_s4_s6(seeded_db):
-    """S1-S3 are forward-tested only for the record. A stock they hold must
-    stay open to the scanner's strategies, and the other way round."""
+def test_a_background_s1_s3_trade_never_blocks_s4_s6(seeded_db, monkeypatch):
+    """A retired strategy is forward-tested only for the record. A stock it
+    holds must stay open to the scanner's strategies, and the other way round."""
+    monkeypatch.setattr(core, "SHADOW_LABELS", frozenset({"S1", "S2", "S3"}))
     _clear_signals()
     assert core.forward_book("S2") == "shadow" and core.forward_book("S6_BREAKOUT") == "main"
     core.add_forward_candidates(pd.DataFrame([_fwd_cand("SHARED", "S2")]), signal_date="2024-05-01")
@@ -1200,3 +1204,22 @@ def test_every_s5_position_is_checked_on_the_resolving_connection(seeded_db, fra
     core.refresh_forward_positions()
     assert time.monotonic() - t < 30
     assert sorted(seen) == [("CHOPPY", True), ("TRENDUP", True)]
+
+
+def test_s1_s3_are_judged_on_s6s_market_traits(monkeypatch):
+    """S1-S3's entry rule since 29 Sep 2026: breadth >= 0.50, >= 60% above the
+    52-week low, within 15% of the 52-week high. ATR and turnover do not decide it."""
+    import pandas as pd
+    idx = pd.bdate_range(end="2026-06-30", periods=260)
+    close = pd.Series(range(100, 360), index=idx, dtype=float)        # a steady climb
+    frame = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                          "close": close, "volume": 1_000.0}, index=idx)   # illiquid, low ATR
+    monkeypatch.setattr(core, "market_breakout_breadth", lambda force=False: pd.Series(0.8, index=idx))
+    ok, why, m = core.entry_filter_verdict(frame, _filter_features(atr=0.5), 1)
+    assert ok and "breadth 0.80" in why
+    monkeypatch.setattr(core, "market_breakout_breadth", lambda force=False: pd.Series(0.3, index=idx))
+    ok, why, _ = core.entry_filter_verdict(frame, _filter_features(atr=0.5), 2)
+    assert not ok and "breadth" in why
+    # the replay on a past date agrees with the live verdict
+    ok_hist, _, _ = core.historical_entry_verdict(3, frame, idx[-1])
+    assert ok_hist is False

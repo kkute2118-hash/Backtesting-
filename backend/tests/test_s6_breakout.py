@@ -132,9 +132,9 @@ def test_attach_market_breadth_joins_by_date_and_carries_forward_only():
     assert col.iloc[4] == 0.6                        # a live bar takes the latest reading
 
 
-def test_scanner_offers_exactly_three_strategies():
-    assert len(core.IMPLEMENTED_STRATEGIES) <= 3
-    assert 6 in core.IMPLEMENTED_STRATEGIES
+def test_scanner_offers_the_six_strategies():
+    # Three until 29 Sep 2026, when the owner brought S1-S3 back behind S6's traits.
+    assert tuple(core.IMPLEMENTED_STRATEGIES) == (1, 2, 3, 4, 5, 6)
     assert not set(core.IMPLEMENTED_STRATEGIES) & set(core.RETIRED_STRATEGIES)
     assert core.S6_LABEL in core.FORWARD_TRACKED_STRATEGIES
     assert core.S6_LABEL in core.TRAILING_EXIT_STRATEGIES
