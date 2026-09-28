@@ -7878,6 +7878,18 @@ DEFAULT_STRATEGIES = (4, 5, 6)
 # still implements them so research tools, the golden tests and forward tests
 # opened before retirement keep working; nothing new is scanned under them.
 RETIRED_STRATEGIES = (1, 2, 3)
+# ...but still forward-tested in the background, so there is live data on them
+# if they are ever reconsidered. They form a SHADOW book: their paper trades
+# never block an S4-S6 position in the same stock (and vice versa), are never
+# shown on the page, and never trigger an alert. The daily job scans them in a
+# second pass after the scanner's own strategies.
+SHADOW_STRATEGIES = RETIRED_STRATEGIES
+SHADOW_LABELS = frozenset(f"S{s}" for s in SHADOW_STRATEGIES)
+
+
+def forward_book(label):
+    """'shadow' for a background-only strategy label, else 'main'."""
+    return "shadow" if str(label).upper().strip() in SHADOW_LABELS else "main"
 
 # The labels written into forward_tests.strategy that the forward tracker will
 # accept and then keep updating. S5_POCKETPIVOT joined this list only after its
@@ -13314,6 +13326,10 @@ def add_forward_candidates(candidates, signal_date=None):
     scanner_signals, and the ones skipped here get a skip_reason there. The log
     is the record; this table is the book.
 
+    Two books, kept apart: the scanner's strategies (S4-S6) and the shadow
+    strategies (S1-S3, forward_book()). "One position per stock" holds inside
+    each book, so a background S1 trade can never keep S4-S6 out of a stock.
+
     `signal_date` is the SESSION the setups were read from, which is not always
     the day the job runs: when the data provider publishes a daily candle late,
     the scan happens the following day against the previous session's close.
@@ -13329,14 +13345,17 @@ def add_forward_candidates(candidates, signal_date=None):
         today=str(signal_date or market_today())
         # Already-open symbols, read once: a stock held under any strategy is
         # not a candidate under another.
-        held = {str(r[0]).upper() for r in con.execute(
-            "SELECT DISTINCT symbol FROM forward_tests WHERE status='ACTIVE'")}
-        # One row per symbol from this batch, best strategy first.
+        held = {"main": set(), "shadow": set()}
+        for sym, strat in con.execute(
+                "SELECT DISTINCT symbol, strategy FROM forward_tests WHERE status='ACTIVE'"):
+            held[forward_book(strat)].add(str(sym).upper())
+        # One row per symbol and book from this batch, best strategy first.
         ranked = candidates.assign(
             _pri=[_slot_priority(x) for x in candidates.get("Strategy", "")],
             _sym=[str(x).upper().replace(".NS", "") for x in candidates.get("Ticker", "")],
+            _book=[forward_book(x) for x in candidates.get("Strategy", "")],
         ).sort_values("_pri", kind="stable")
-        best = ranked.drop_duplicates("_sym", keep="first")
+        best = ranked.drop_duplicates(["_book", "_sym"], keep="first")
         for _, d in ranked.iterrows():
             if d.name not in best.index:
                 skipped.append((d["_sym"], str(d.get("Strategy", "")).upper(),
@@ -13356,7 +13375,8 @@ def add_forward_candidates(candidates, signal_date=None):
             # other strategy still needs one.
             if not np.isfinite(target) and strategy not in TRAILING_EXIT_STRATEGIES:
                 continue
-            if symbol in held:
+            book = held[forward_book(strategy)]
+            if symbol in book:
                 skipped.append((symbol, strategy, "already held"))
                 continue
             now=datetime.now().isoformat(timespec="seconds")
@@ -13369,7 +13389,7 @@ def add_forward_candidates(candidates, signal_date=None):
                 entry,sl,target,"ACTIVE",entry,0.0,0.0,None,None,now,
                 today,json.dumps(snapshot,default=str,allow_nan=True)
             ))
-            fid=int(cur.lastrowid); added+=1; held.add(symbol)
+            fid=int(cur.lastrowid); added+=1; book.add(symbol)
             con.execute("""UPDATE scanner_signals SET selected_for_forward=1
                            WHERE signal_key=?""", (f"{today}|{symbol}|{strategy}",))
             con.execute("""INSERT OR IGNORE INTO forward_observations(

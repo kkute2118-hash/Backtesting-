@@ -961,17 +961,33 @@ def test_a_stock_firing_under_two_strategies_opens_one_position(seeded_db):
 
 def test_the_higher_priority_strategy_takes_the_slot(seeded_db):
     """Same rule build_portfolio uses to fill a slot: S4 before S5 before the
-    rest. Picking by row order would make it depend on scan order."""
+    rest. Picking by row order would make it depend on scan order. S1 is in
+    the separate background book, so it gets its own position."""
     _clear_signals()
     cands = pd.DataFrame([_fwd_cand("X", "S1"), _fwd_cand("X", "S5_POCKETPIVOT"),
                           _fwd_cand("X", "S4_SEPA")])
     core.add_forward_candidates(cands, signal_date="2024-05-01")
     con = core._db()
     try:
-        got = con.execute("SELECT strategy FROM forward_tests").fetchall()
+        got = con.execute("SELECT strategy FROM forward_tests ORDER BY strategy").fetchall()
     finally:
         con.close()
-    assert got == [("S4_SEPA",)]
+    assert got == [("S1",), ("S4_SEPA",)]
+
+
+def test_a_background_s1_s3_trade_never_blocks_s4_s6(seeded_db):
+    """S1-S3 are forward-tested only for the record. A stock they hold must
+    stay open to the scanner's strategies, and the other way round."""
+    _clear_signals()
+    assert core.forward_book("S2") == "shadow" and core.forward_book("S6_BREAKOUT") == "main"
+    core.add_forward_candidates(pd.DataFrame([_fwd_cand("SHARED", "S2")]), signal_date="2024-05-01")
+    assert core.add_forward_candidates(pd.DataFrame([_fwd_cand("SHARED", "S4_SEPA")]),
+                                       signal_date="2024-05-02") == 1
+    # ... while each book still holds one position per stock.
+    assert core.add_forward_candidates(pd.DataFrame([_fwd_cand("SHARED", "S3")]),
+                                       signal_date="2024-05-03") == 0
+    assert core.add_forward_candidates(pd.DataFrame([_fwd_cand("SHARED", "S5_POCKETPIVOT")]),
+                                       signal_date="2024-05-03") == 0
 
 
 def test_a_stock_already_held_is_not_enrolled_again_on_a_later_day(seeded_db):
