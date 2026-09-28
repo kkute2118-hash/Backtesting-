@@ -216,21 +216,45 @@ def scan(universe: str) -> dict:
         "last_close": {str(t).replace(".NS", ""): [df.index[-1].date().isoformat(), plain(float(df.close.iloc[-1]))]
                        for t, df in data.items() if df is not None and len(df)},
         "filtered_out": rejected,
-        "s6_watchlist": s6_watchlist(data),
+        "s6_watchlist": s6_watchlist(data, forming_bar=bool(live.get("used"))),
     }
 
 
 S6_WATCH_WITHIN_PCT = 8.0
 
 
-def s6_watchlist(data: dict) -> list[dict]:
-    """Stocks one good day away from an S6 signal.
+def s6_next_decision(x: pd.DataFrame, forming_bar: bool = False):
+    """(trigger, last completed breakout, eligible_from or None) for the next
+    S6 decision close; see s6_watchlist. Mirrors core.strategy6_features."""
+    n = core.S6_BREAKOUT_LOOKBACK
+    done = x.iloc[:-1] if forming_bar else x              # completed bars only
+    if len(done) < n + 1:
+        return float("nan"), None, None
+    trigger = float(done.high.tail(n).max())
+    breakouts = done.close > done.high.rolling(n).max().shift(1)
+    last_bo = breakouts[breakouts].index.max() if breakouts.any() else None
+    rearm = last_bo + pd.Timedelta(days=core.S6_REARM_DAYS + 1) if last_bo is not None else None
+    next_session = x.index[-1] if forming_bar else x.index[-1] + pd.offsets.BDay(1)
+    eligible = rearm if rearm is not None and rearm > next_session else None
+    return trigger, last_bo, eligible
 
-    Every stock-level S6 rule passes (ATR, 52-week location), the close is
-    within S6_WATCH_WITHIN_PCT of the prior 50-day high. A stock that broke out
-    inside the re-arm window is kept, with the first date a new breakout would
-    count as fresh. Any signal still needs market breadth >= the threshold on
-    that day.
+
+def s6_watchlist(data: dict, forming_bar: bool = False) -> list[dict]:
+    """Stocks one good close away from an S6 signal.
+
+    `trigger` is the price the NEXT S6 decision close must beat: the highest
+    high of the 50 sessions before it. After the close that decision is the
+    next session, so the latest completed bar counts toward the 50. During
+    market hours (`forming_bar`, the live candle overlaid) the decision is
+    today's close, so today's still-forming bar does not.
+
+    `eligible_from` is the first date a breakout counts as fresh: S6 ignores a
+    breakout within S6_REARM_DAYS calendar days of the previous one, and every
+    completed breakout, including the latest bar's, restarts that wait.
+
+    Every stock-level S6 rule must pass (ATR, 52-week location) and the price
+    must be within S6_WATCH_WITHIN_PCT of the trigger. A signal still needs
+    market breadth >= the threshold on the day.
     """
     b = core.market_breakout_breadth()
     out = []
@@ -240,17 +264,11 @@ def s6_watchlist(data: dict) -> list[dict]:
         x = core.attach_market_breadth(df, b)
         feats = core.strategy6_features(x)
         z = feats.iloc[-1]
-        prior_hi = float(x.high.rolling(core.S6_BREAKOUT_LOOKBACK).max().shift(1).iloc[-1])
-        close = float(x.close.iloc[-1])
-        if not np.isfinite(prior_hi) or prior_hi <= 0:
+        trigger, last_bo, eligible = s6_next_decision(x, forming_bar)
+        close = float(x.close.iloc[-1])                    # live price, or the last close
+        if not np.isfinite(trigger) or trigger <= 0:
             continue
-        gap_pct = (prior_hi / close - 1) * 100            # <= 0: already above it today
-        breakouts = x.close > x.high.rolling(core.S6_BREAKOUT_LOOKBACK).max().shift(1)
-        past = breakouts.iloc[:-1]
-        last_bo = past[past].index.max() if past.any() else None
-        rearm = (last_bo + pd.Timedelta(days=core.S6_REARM_DAYS + 1)
-                 if last_bo is not None and last_bo >= x.index[-1] - pd.Timedelta(days=core.S6_REARM_DAYS)
-                 else None)
+        gap_pct = (trigger / close - 1) * 100              # < 0 only intraday, already above
         ok = (gap_pct <= S6_WATCH_WITHIN_PCT
               and z.s6_atr_pct >= core.S6_MIN_ATR_PCT
               and z.s6_above_52w_low_pct >= core.S6_MIN_ABOVE_52W_LOW_PCT
@@ -261,15 +279,16 @@ def s6_watchlist(data: dict) -> list[dict]:
             "ticker": str(ticker).replace(".NS", ""),
             "date": x.index[-1].date().isoformat(),
             "close": plain(close),
-            "trigger": plain(prior_hi),
+            "trigger": plain(trigger),
             "to_trigger_pct": plain(max(gap_pct, 0.0)),
-            "eligible_from": rearm.date().isoformat() if rearm is not None else None,
-            "stop_if_triggered": plain(prior_hi - core.S6_INITIAL_STOP_ATR * float(z.s6_atr)),
+            "eligible_from": eligible.date().isoformat() if eligible is not None else None,
+            "last_breakout": last_bo.date().isoformat() if last_bo is not None else None,
+            "stop_if_triggered": plain(trigger - core.S6_INITIAL_STOP_ATR * float(z.s6_atr)),
             "atr_pct": plain(z.s6_atr_pct),
             "above_52w_low_pct": plain(z.s6_above_52w_low_pct),
             "below_52w_high_pct": plain(z.s6_below_52w_high_pct),
         })
-    out.sort(key=lambda r: (r.get("to_trigger_pct") or 0))
+    out.sort(key=lambda r: (r.get("eligible_from") or "", r.get("to_trigger_pct") or 0))
     return out
 
 

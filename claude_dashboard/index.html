@@ -169,7 +169,7 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
 
   <section id="watch">
     <div class="sec-head"><h2>S6 watchlist</h2>
-      <p>Stocks passing every S6 stock rule, within 8% of their 50-day-high trigger. A close above the trigger becomes an S6 signal only when market breadth is at least <span id="thr">0.50</span> that day, and only from the date shown.</p></div>
+      <p>Stocks that already pass S6's stock rules and are close to a breakout. <b>Buy-above close</b> is the highest price of the last 50 trading days: an S6 buy happens only when a day <b>closes</b> above it (not just touches it), on or after the <b>Can signal from</b> date (S6 ignores a stock for 28 days after its last breakout), and only while market breadth is at least <span id="thr">0.50</span>. Then it appears under Today's setups with its exact entry and stop.</p></div>
     <div class="panel tbl" id="watchBody"></div>
   </section>
 
@@ -355,16 +355,16 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       const today = (d.generated_at||"").slice(0,10);
       table($("watchBody"), [
         {key:"ticker",label:"Stock",fmt:r=>`<span class="tk">${esc(r.ticker)}</span>${resChip(r.ticker)}`},
-        {key:"close",label:"Close",right:true,fmt:r=>inr(r.close)},
-        {key:"trigger",label:"Trigger",right:true,fmt:r=>inr(r.trigger)},
-        {key:"to_trigger_pct",label:"To trigger",right:true,fmt:r=>r.to_trigger_pct<=0?`<span class="pill up">above</span>`:pct(r.to_trigger_pct,1,false)},
-        {key:"eligible_from",label:"Eligible from",sort:r=>r.eligible_from||"0",fmt:r=>!r.eligible_from||r.eligible_from<=today?`<span class="pill up">now</span>`:`<span class="pill mut">${date(r.eligible_from)}</span>`},
-        {key:"stop_if_triggered",label:"Stop if triggered",right:true,fmt:r=>inr(r.stop_if_triggered)},
+        {key:"close",label:s.live?.used?"Price now":"Last close",right:true,fmt:r=>inr(r.close)},
+        {key:"trigger",label:"Buy-above close",right:true,fmt:r=>inr(r.trigger)},
+        {key:"to_trigger_pct",label:"Needs to rise",right:true,fmt:r=>r.to_trigger_pct<=0?`<span class="pill up">above now</span>`:pct(r.to_trigger_pct,1,false)},
+        {key:"eligible_from",label:"Can signal from",sort:r=>r.eligible_from||"0",fmt:r=>!r.eligible_from||r.eligible_from<=today?`<span class="pill up">now</span>`:`<span class="pill mut" title="${r.last_breakout?`Last breakout ${esc(r.last_breakout)}; S6 waits 28 days`:""}">${date(r.eligible_from)}</span>`},
+        {key:"stop_if_triggered",label:"Stop (about)",right:true,fmt:r=>inr(r.stop_if_triggered)},
         {key:"qty",label:"Qty",right:true,fmt:r=>r.qty==null?"–":num(r.qty,0)},
         {key:"atr_pct",label:"ATR %",right:true,fmt:r=>num(r.atr_pct,1)},
         {key:"below_52w_high_pct",label:"Below 52w high",right:true,fmt:r=>pct(-r.below_52w_high_pct,1)},
         {key:"above_52w_low_pct",label:"Above 52w low",right:true,fmt:r=>pct(r.above_52w_low_pct,0)},
-      ], w, {key:"to_trigger_pct",dir:1});
+      ], w, {key:"eligible_from",dir:1});
     }
     drawWatch();
 
