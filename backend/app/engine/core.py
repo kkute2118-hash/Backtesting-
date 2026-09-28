@@ -694,6 +694,101 @@ def _download_to(url, dest, headers, params=None, timeout=120):
     return 200, ""
 
 
+# Where the whole-database backup lives now: an asset on a prerelease. It was a
+# file committed to the backup branch, and git hard-rejects any file over
+# 100 MB - the NSE Top 2000 store compresses past that, so a finished history
+# build would save nothing. An asset takes up to 2 GB, and replacing it does not
+# add another multi-megabyte blob to a branch's history on every sync.
+# (Ported from the 20 Sep work on claude/new-session-9a03f1, with one change:
+# restore takes whichever copy is NEWER rather than always the asset - see
+# _github_release_asset_is_newer.)
+DB_BACKUP_RELEASE_TAG = os.environ.get("DB_BACKUP_RELEASE_TAG", "db-backup-latest")
+DB_BACKUP_ASSET = os.environ.get("DB_BACKUP_ASSET", "market_data.sqlite3.gz")
+
+
+def _github_release_backup_asset(repo):
+    """(release, asset) for the backup asset. Either may be None; never raises."""
+    try:
+        r = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/"
+                         f"{DB_BACKUP_RELEASE_TAG}", headers=_github_headers(), timeout=30)
+        if r.status_code != 200:
+            return None, None
+        release = r.json()
+        asset = next((a for a in (release.get("assets") or [])
+                      if a.get("name") == DB_BACKUP_ASSET), None)
+        return release, asset
+    except Exception:
+        return None, None
+
+
+def _github_branch_backup_time(repo, branch):
+    """When the branch copy of the backup was last committed (ISO UTC), or None."""
+    try:
+        params = {"path": GITHUB_BACKUP_PATH_GZ, "per_page": 1}
+        if branch:
+            params["sha"] = branch
+        r = requests.get(f"https://api.github.com/repos/{repo}/commits",
+                         headers=_github_headers(), params=params, timeout=30)
+        if r.status_code == 200 and r.json():
+            return r.json()[0]["commit"]["committer"]["date"]
+    except Exception:
+        pass
+    return None
+
+
+def _github_release_asset_is_newer(repo, branch, asset):
+    """Whether the release asset is the more recent backup of the two.
+
+    Not simply "the asset wins". The first asset was uploaded on 20 Sep by a
+    history build on a side branch, and the scheduled jobs kept committing to
+    the branch for a week afterwards - forward tests included. Preferring the
+    asset outright would have restored every host to 20 Sep.
+    """
+    asset_time = (asset or {}).get("updated_at")
+    if not asset_time:
+        return False
+    branch_time = _github_branch_backup_time(repo, branch)
+    # Both are GitHub's "YYYY-MM-DDTHH:MM:SSZ", so they order as strings.
+    return branch_time is None or asset_time > branch_time
+
+
+def _github_upload_release_asset(repo, packed_path):
+    """Replace the backup asset with the gzip at `packed_path`. Returns (ok, reason)."""
+    try:
+        release, old = _github_release_backup_asset(repo)
+        if release is None:
+            r = requests.post(
+                f"https://api.github.com/repos/{repo}/releases",
+                headers=_github_headers(), timeout=30,
+                json={"tag_name": DB_BACKUP_RELEASE_TAG, "name": "Database backup",
+                      "prerelease": True,
+                      "body": "Automated candle-store backup. The asset on this release is the "
+                              "live database, replaced in place by the app and by the sync "
+                              "workflows. Deleting it loses every stored candle and forward "
+                              "test that is not also on the backup branch."})
+            if r.status_code not in (200, 201):
+                return False, _github_error_hint(r.status_code, r.text)
+            release = r.json()
+        if old:
+            requests.delete(f"https://api.github.com/repos/{repo}/releases/assets/{old['id']}",
+                            headers=_github_headers(), timeout=60)
+        # A file object: requests streams it with a Content-Length.
+        with open(packed_path, "rb") as body:
+            up = requests.post(
+                f"https://uploads.github.com/repos/{repo}/releases/{release['id']}/assets",
+                headers={**_github_headers(), "Content-Type": "application/gzip"},
+                params={"name": DB_BACKUP_ASSET}, data=body, timeout=900)
+        if up.status_code not in (200, 201):
+            return False, _github_error_hint(up.status_code, up.text)
+        stored = int(up.json().get("size") or 0)
+        sent = os.path.getsize(packed_path)
+        if stored != sent:
+            return False, f"the release asset holds {stored:,} bytes but {sent:,} were sent"
+        return True, f"release asset {DB_BACKUP_RELEASE_TAG}/{DB_BACKUP_ASSET}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def restore_db_from_github(force=False):
     """Pull the last backup from GitHub into the local database.
 
@@ -735,6 +830,36 @@ def restore_db_from_github(force=False):
         branch = _github_backup_branch()
         params = {"ref": branch} if branch else None
         last_status, last_body = None, ""
+
+        # The release asset, when it is the newer copy. Any failure here falls
+        # through to the branch copy below rather than to nothing.
+        _release, asset = _github_release_backup_asset(repo)
+        if asset and _github_release_asset_is_newer(repo, branch, asset):
+            tmp = f"{DATA_DB}.restore-tmp"
+            dl = f"{tmp}.download"
+            try:
+                # The asset endpoint with octet-stream authenticates with the
+                # same token on a private repository; requests drops the token
+                # when GitHub redirects the download to its storage host.
+                status, body = _download_to(
+                    f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}", dl,
+                    {**_github_headers(), "Accept": "application/octet-stream"}, timeout=900)
+                if status == 200:
+                    with gzip.open(dl, "rb") as fin, open(tmp, "wb") as fout:
+                        shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+                    if os.path.getsize(tmp) > 0:
+                        os.replace(tmp, DATA_DB)
+                        return True
+                last_status, last_body = status, body
+            except Exception as exc:
+                last_status, last_body = 0, f"release asset: {type(exc).__name__}: {exc}"
+            finally:
+                for leftover in (dl, tmp):
+                    try:
+                        if os.path.exists(leftover):
+                            os.remove(leftover)
+                    except OSError:
+                        pass
 
         # Newest format first, then the uncompressed path a backup taken before
         # gzipping existed would still be sitting at.
@@ -817,16 +942,6 @@ def backup_db_to_github(return_reason=False):
                 return done(False, msg)
             note = msg
 
-        live_bytes = os.path.getsize(DATA_DB)
-        if _LAST_BACKUP_RATIO and live_bytes * _LAST_BACKUP_RATIO > GITHUB_CONTENTS_MAX_BYTES * 1.1:
-            est_mb = live_bytes * _LAST_BACKUP_RATIO / 1_048_576
-            return done(False, (
-                f"Skipped: the database would be about {est_mb:.0f} MB compressed, larger "
-                f"than GitHub's contents API will store (limit here "
-                f"{GITHUB_CONTENTS_MAX_BYTES / 1_048_576:.0f} MB). The candle store is backed "
-                "up by the scheduled GitHub Actions jobs instead, which push it with git; "
-                "forward tests and learning are covered by the small learning backup."))
-
         url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH_GZ}"
         with tempfile.TemporaryDirectory(prefix="db-backup-",
                                          dir=os.path.dirname(DATA_DB) or None) as work:
@@ -849,6 +964,15 @@ def backup_db_to_github(return_reason=False):
             if raw_mb > 0:
                 _LAST_BACKUP_RATIO = packed_bytes / (raw_mb * 1_048_576)
 
+            # The release asset first: it is what restore reads when it is the
+            # newest copy, and it has no 35 MB ceiling. The contents-API write
+            # below is the fallback for a repository where releases fail.
+            ok, where = _github_upload_release_asset(repo, packed_path)
+            if ok:
+                return done(True, f"Backed up {raw_mb:.1f} MB ({packed_mb:.1f} MB "
+                                  f"compressed) to {repo} {where}.")
+            release_note = f" (release asset upload failed: {where})"
+
             if packed_bytes > GITHUB_CONTENTS_MAX_BYTES:
                 return done(False, (
                     f"Skipped: the database is {packed_mb:.1f} MB compressed "
@@ -856,7 +980,7 @@ def backup_db_to_github(return_reason=False):
                     f"(limit here {GITHUB_CONTENTS_MAX_BYTES / 1_048_576:.0f} MB). The candle "
                     "store is backed up by the scheduled GitHub Actions jobs instead, which "
                     "push it with git; forward tests and learning are covered by the small "
-                    "learning backup."))
+                    "learning backup." + release_note))
 
             # Need the current file's SHA if it already exists, else GitHub
             # rejects the update as a conflicting create.
