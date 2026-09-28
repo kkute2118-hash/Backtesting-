@@ -1,19 +1,17 @@
 "use client";
 
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { api, apiUrl } from "@/lib/api";
+import { api } from "@/lib/api";
 
 import type { Bar } from "./indicators";
 
-export const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1H", "4H", "1D", "1W", "1M"] as const;
+/** Only what a daily swing trader uses: 15m and 1H to time an entry, 1D and 1W to read the trend. */
+export const TIMEFRAMES = ["15m", "1H", "1D", "1W"] as const;
 export type Timeframe = (typeof TIMEFRAMES)[number];
-export const INTRADAY: ReadonlySet<Timeframe> = new Set(["1m", "5m", "15m", "30m", "1H", "4H"]);
-export const TF_SECONDS: Record<Timeframe, number> = {
-  "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1H": 3600, "4H": 14400,
-  "1D": 86400, "1W": 604800, "1M": 2592000,
-};
+export const INTRADAY: ReadonlySet<Timeframe> = new Set(["15m", "1H"]);
+export const TF_SECONDS: Record<Timeframe, number> = { "15m": 900, "1H": 3600, "1D": 86400, "1W": 604800 };
 
 export interface CandlePage {
   symbol: string;
@@ -54,7 +52,7 @@ export function useCandles(symbol: string, tf: Timeframe) {
       api.get<CandlePage>(`/stocks/${encodeURIComponent(symbol)}/candles`, { tf, before: pageParam }),
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (last) => (last.has_more && last.next_before ? last.next_before : undefined),
-    staleTime: INTRADAY.has(tf) ? 30_000 : 5 * 60_000,
+    staleTime: INTRADAY.has(tf) ? 60_000 : 10 * 60_000,
     enabled: Boolean(symbol),
   });
   // Pages arrive newest-first; the chart wants one ascending, de-duplicated array.
@@ -72,83 +70,42 @@ export function useCandles(symbol: string, tf: Timeframe) {
   return { ...query, bars, meta: first };
 }
 
-export type LiveStatus = "connecting" | "live" | "closed" | "polling" | "offline";
+export type LiveStatus = "connecting" | "live" | "closed" | "paused" | "offline";
+
+const POLL_MS = 5_000;
 
 /**
- * The live quote for one symbol: fetched once, then streamed while the market
- * is open. Exactly one EventSource per open chart, closed on unmount or when
- * the server says the session has closed. If streaming fails (a proxy that
- * buffers, a dropped connection twice in a row) it falls back to polling every
- * five seconds rather than hammering reconnects.
+ * The live quote for one symbol. Fetched once; then, only while the market is
+ * open AND the chart is on screen, asked for again every five seconds. The
+ * server shares one Dhan quote per symbol among all viewers, and nothing is
+ * held open between polls, so an idle or hidden chart costs nothing.
  */
 export function useLiveQuote(symbol: string) {
-  const initial = useQuery({
+  const [visible, setVisible] = useState(() => typeof document === "undefined" || !document.hidden);
+  useEffect(() => {
+    const onVis = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  const first = useQuery({
     queryKey: ["chart-live", symbol],
     queryFn: () => api.get<LiveQuote>(`/stocks/${encodeURIComponent(symbol)}/live`),
     enabled: Boolean(symbol),
-    staleTime: 2_000,
+    staleTime: POLL_MS,
+    // Poll only while trading is on and someone is looking; stop at the close.
+    refetchInterval: (q) => (q.state.data?.market_open && visible ? POLL_MS : false),
+    refetchIntervalInBackground: false,
   });
-  const [quote, setQuote] = useState<LiveQuote | null>(null);
-  const [status, setStatus] = useState<LiveStatus>("connecting");
-  const failures = useRef(0);
 
-  useEffect(() => { if (initial.data) setQuote(initial.data); }, [initial.data]);
+  const data = first.data;
+  let status: LiveStatus;
+  if (first.isLoading) status = "connecting";
+  else if (first.isError && !data) status = "offline";
+  else if (!data?.market_open) status = "closed";
+  else if (first.isError) status = "offline";
+  else if (!visible) status = "paused";
+  else status = data.source === "LIVE" ? "live" : "closed";
 
-  const marketOpen = initial.data?.market_open;
-  useEffect(() => {
-    if (!symbol || marketOpen === undefined) return;
-    if (!marketOpen) { setStatus("closed"); return; }
-    let source: EventSource | null = null;
-    let poll: ReturnType<typeof setInterval> | null = null;
-    let cancelled = false;
-    failures.current = 0;
-
-    const startPolling = () => {
-      setStatus("polling");
-      poll = setInterval(async () => {
-        try {
-          const q = await api.get<LiveQuote>(`/stocks/${encodeURIComponent(symbol)}/live`);
-          if (!cancelled) setQuote(q);
-          if (!q.market_open && poll) { clearInterval(poll); setStatus("closed"); }
-        } catch {
-          if (!cancelled) setStatus("offline");
-        }
-      }, 5_000);
-    };
-
-    if (typeof EventSource === "undefined") {
-      startPolling();
-    } else {
-      setStatus("connecting");
-      source = new EventSource(apiUrl(`/stocks/${encodeURIComponent(symbol)}/stream`));
-      source.onmessage = (event) => {
-        failures.current = 0;
-        try {
-          const q = JSON.parse(event.data) as LiveQuote;
-          if (!cancelled) { setQuote(q); setStatus(q.market_open ? "live" : "closed"); }
-        } catch { /* a malformed frame is skipped, the next one replaces it */ }
-      };
-      source.addEventListener("closed", () => {
-        source?.close();
-        if (!cancelled) setStatus("closed");
-      });
-      source.onerror = () => {
-        failures.current += 1;
-        if (failures.current >= 2) {
-          source?.close();
-          source = null;
-          if (!cancelled) startPolling();
-        } else if (!cancelled) {
-          setStatus("connecting");                // EventSource retries once by itself
-        }
-      };
-    }
-    return () => {
-      cancelled = true;
-      source?.close();
-      if (poll) clearInterval(poll);
-    };
-  }, [symbol, marketOpen]);
-
-  return { quote: quote ?? initial.data ?? null, status, error: initial.error, isLoading: initial.isLoading };
+  return { quote: data ?? null, status, error: first.error, isLoading: first.isLoading };
 }

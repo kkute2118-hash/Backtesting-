@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  ArrowUpRight, ChevronDown, Maximize2, Minimize2, Minus, MousePointer2, MoveVertical,
+  ArrowUpRight, ChevronDown, Maximize2, Minimize2, Minus, MousePointer2,
   RotateCcw, Slash, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
 import Link from "next/link";
@@ -34,7 +34,7 @@ const store = {
 };
 
 const LIVE_LABEL: Record<string, string> = {
-  live: "Live", connecting: "Connecting…", polling: "Live (polling)", closed: "Market closed", offline: "Offline",
+  live: "Live", connecting: "Connecting…", paused: "Paused", closed: "Market closed", offline: "Offline",
 };
 
 /**
@@ -43,7 +43,10 @@ const LIVE_LABEL: Record<string, string> = {
  * on larger screens.
  */
 export function ChartPanel({ symbol, onClose }: { symbol: string; onClose(): void }) {
-  const [tf, setTf] = useState<Timeframe>(() => store.get<{ tf: Timeframe }>("chart-prefs", { tf: "1D" }).tf);
+  const [tf, setTf] = useState<Timeframe>(() => {
+    const saved = store.get<{ tf: Timeframe }>("chart-prefs", { tf: "1D" }).tf;
+    return TIMEFRAMES.includes(saved) ? saved : "1D";      // a timeframe since removed falls back to daily
+  });
   const [indicators, setIndicators] = useState<IndicatorConfig>(() => {
     const saved = store.get<Partial<IndicatorConfig>>("chart-indicators", {});
     return Object.fromEntries(Object.entries(DEFAULT_INDICATORS).map(([k, v]) =>
@@ -173,7 +176,7 @@ export function ChartPanel({ symbol, onClose }: { symbol: string; onClose(): voi
           <Sep />
           <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="Drawing tools">
             {([["cursor", "Pointer", MousePointer2], ["hline", "Horizontal line", Minus],
-              ["trend", "Trend line (two clicks)", Slash], ["vline", "Vertical line", MoveVertical]] as const).map(([k, label, Icon]) => (
+              ["trend", "Trend line (two clicks)", Slash]] as const).map(([k, label, Icon]) => (
               <IconBtn key={k} label={label} active={tool === k} onClick={() => setTool(k)} testId={`tool-${k}`}>
                 <Icon className="h-4 w-4" />
               </IconBtn>
@@ -263,11 +266,7 @@ const IND_ROWS: { key: keyof IndicatorConfig; label: string; params: [string, st
   { key: "volume", label: "Volume", params: [] },
   { key: "sma", label: "SMA", params: [["period", "Period"]] },
   { key: "ema", label: "EMA", params: [["period", "Period"]] },
-  { key: "vwap", label: "VWAP", params: [["period", "Bars (daily)"]] },
-  { key: "bb", label: "Bollinger Bands", params: [["period", "Period"], ["mult", "Std dev"]] },
-  { key: "supertrend", label: "Supertrend", params: [["period", "ATR"], ["mult", "Factor"]] },
   { key: "rsi", label: "RSI", params: [["period", "Period"]] },
-  { key: "macd", label: "MACD", params: [["fast", "Fast"], ["slow", "Slow"], ["signal", "Signal"]] },
 ];
 
 function IndicatorMenu({ value, onChange }: { value: IndicatorConfig; onChange(v: IndicatorConfig): void }) {
@@ -284,7 +283,7 @@ function IndicatorMenu({ value, onChange }: { value: IndicatorConfig; onChange(v
         <ChevronDown className="h-3 w-3" />
       </button>
       {open ? (
-        <div className="fixed left-2 right-2 top-28 z-[60] max-h-[70vh] overflow-y-auto rounded-card border border-line bg-surface p-2 shadow-pop sm:absolute sm:left-0 sm:right-auto sm:top-8 sm:w-80">
+        <div className="fixed left-2 right-2 top-28 z-[60] max-h-[70vh] overflow-y-auto rounded-card border border-line bg-surface p-2 shadow-pop sm:absolute sm:left-0 sm:right-auto sm:top-8 sm:w-64">
           {IND_ROWS.map(({ key, label, params }) => {
             const cfg = value[key] as unknown as Record<string, number | boolean>;
             return (
@@ -297,8 +296,8 @@ function IndicatorMenu({ value, onChange }: { value: IndicatorConfig; onChange(v
                 {params.map(([p, plabel]) => (
                   <label key={p} className="flex items-center gap-1 text-2xs text-faint">
                     {plabel}
-                    <input type="number" inputMode="decimal" min={p === "mult" ? 0.5 : 1} max={500}
-                      step={p === "mult" ? 0.5 : 1} value={Number(cfg[p])} id={`ind-${key}-${p}`}
+                    <input type="number" inputMode="numeric" min={1} max={500}
+                      step={1} value={Number(cfg[p])} id={`ind-${key}-${p}`}
                       onChange={(e) => {
                         const v = Number(e.target.value);
                         if (Number.isFinite(v) && v > 0) set(key, { [p]: v });
@@ -309,7 +308,7 @@ function IndicatorMenu({ value, onChange }: { value: IndicatorConfig; onChange(v
               </div>
             );
           })}
-          <p className="px-2 pt-1 text-2xs text-faint">RSI and MACD open in their own panes below the price.</p>
+          <p className="px-2 pt-1 text-2xs text-faint">RSI opens in its own pane below the price.</p>
         </div>
       ) : null}
     </div>
