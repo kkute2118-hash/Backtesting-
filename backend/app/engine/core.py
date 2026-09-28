@@ -13565,7 +13565,7 @@ def add_forward_candidates(candidates, signal_date=None):
 
 # ========================= RESEARCH MODULES =========================
 
-def _s5_forward_exit(symbol, d, entry, initial_stop):
+def _s5_forward_exit(symbol, d, entry, initial_stop, con=None):
     """Run S5's own stop machine over a live position's bars since entry.
 
     Returns (status, exit_price, result_r). Mirrors the backtest exactly - the
@@ -13580,12 +13580,19 @@ def _s5_forward_exit(symbol, d, entry, initial_stop):
     status, exitp, result_r = "ACTIVE", None, None
     risk = entry - initial_stop if np.isfinite(initial_stop) else np.nan
     try:
-        con = _db()
+        # Read through the caller's connection when there is one. A second
+        # connection opened while the caller holds a write transaction (as
+        # refresh_forward_positions does) waited out SQLite's 60 s lock timeout
+        # and then fell into the except below: the position silently stayed
+        # ACTIVE, so only the first S5 trade of each run was ever checked.
+        own = con is None
+        con = _db() if own else con
         try:
             hist = _read_cache(con, symbol, (pd.Timestamp(d.index[0]) - pd.Timedelta(days=500)).date(),
                                pd.Timestamp(d.index[-1]).date())
         finally:
-            con.close()
+            if own:
+                con.close()
         if hist is None or hist.empty:
             return status, exitp, result_r
         f = features(hist)
@@ -13660,7 +13667,7 @@ def refresh_forward_positions():
                 # would record a different strategy's outcome. The stored sl is
                 # still what result_r divides by - it is the risk the trade was
                 # taken with.
-                status, exitp, result_r = _s5_forward_exit(s, d, entry, stop)
+                status, exitp, result_r = _s5_forward_exit(s, d, entry, stop, con=con)
                 if status != "ACTIVE":
                     closed_at = datetime.now().isoformat(timespec="seconds")
             else:

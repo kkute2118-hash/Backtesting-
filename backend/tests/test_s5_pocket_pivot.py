@@ -1166,3 +1166,37 @@ def test_resolved_trades_are_never_touched(seeded_db):
     finally:
         con.close()
     assert statuses == ["ACTIVE", "STOP", "TARGET"]
+
+
+def test_every_s5_position_is_checked_on_the_resolving_connection(seeded_db, frames, monkeypatch):
+    """refresh_forward_positions holds a write transaction while it loops. S5's
+    exit check used to open a second connection, which waited out SQLite's
+    60 s lock timeout and then reported the trade still ACTIVE: only the first
+    S5 position of a run was ever really checked (the live job spent exactly
+    5 x 60 s on the other five)."""
+    _clear_signals()
+    con = core._db()
+    try:
+        con.execute("DELETE FROM forward_tests")
+        con.commit()
+    finally:
+        con.close()
+    start = str(frames["TRENDUP"].index[-40].date())
+    for sym in ("TRENDUP", "CHOPPY"):
+        core.add_forward_candidates(pd.DataFrame([{
+            "Ticker": sym, "Strategy": "S5_POCKETPIVOT", "Score": 50.0,
+            "Entry": 100.0, "SL 7%": 95.0, "Target 3R": None, "Regime": "BULL"}]),
+            signal_date=start)
+    seen = []
+    real = core._s5_forward_exit
+
+    def spy(symbol, d, entry, stop, con=None):
+        seen.append((symbol, con is not None))
+        return real(symbol, d, entry, stop, con=con)
+
+    monkeypatch.setattr(core, "_s5_forward_exit", spy)
+    import time
+    t = time.monotonic()
+    core.refresh_forward_positions()
+    assert time.monotonic() - t < 30
+    assert sorted(seen) == [("CHOPPY", True), ("TRENDUP", True)]
