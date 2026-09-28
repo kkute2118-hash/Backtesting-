@@ -45,10 +45,17 @@ async def lifespan(_: FastAPI):
     # Before anything reads the database: on a host with no persistent disk
     # this container starts with an empty one, and the GitHub backup is the
     # only thing that can put the candles and the learning history back.
-    try:
-        BOOT_RESTORE.update(bootstrap.restore_on_cold_start())
-    except Exception:
-        log.exception("Cold-start restore failed")
+    # Mirror mode (the Oracle server): the GitHub jobs own the data; pull their
+    # newest backup now and whenever they push a new one. Otherwise the one-off
+    # cold-start restore.
+    mirror_minutes = bootstrap.mirror_refresh_minutes()
+    if mirror_minutes > 0:
+        BOOT_RESTORE.update(bootstrap.refresh_mirror(), mode="mirror")
+    else:
+        try:
+            BOOT_RESTORE.update(bootstrap.restore_on_cold_start())
+        except Exception:
+            log.exception("Cold-start restore failed")
 
     try:
         app_store.ensure_app_tables()
@@ -64,6 +71,8 @@ async def lifespan(_: FastAPI):
         # the Data Manager endpoints are exactly what the user needs to
         # diagnose and fix it.
         log.exception("Could not prepare the product tables")
+    if mirror_minutes > 0:
+        bootstrap.start_mirror_refresher(mirror_minutes)
     yield
 
 

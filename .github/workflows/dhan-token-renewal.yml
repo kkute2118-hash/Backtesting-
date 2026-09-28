@@ -1,18 +1,14 @@
-# Keeps the Dhan access token alive so it never expires on you.
+# Renews the Dhan access token by hand (Actions tab -> Run workflow).
 #
-# Dhan invalidates access tokens every 24 hours. This mints a fresh one via
-# PIN + TOTP each morning before the market opens and stores it in the
-# database, which is then pushed back to GitHub — so the app picks
-# up a valid token whenever you next open it, with nothing to paste by hand.
+# It used to run every morning so the token stored in the database backup was
+# always fresh for the web app. The token is no longer stored in the backup
+# (the repository is public, and a Dhan token can place orders), and every
+# scheduled job mints its own at start, so a daily run only pushed an extra
+# 50 MB backup. Kept for manual use.
 name: Dhan token renewal
 
 on:
-  schedule:
-    # 02:30 UTC = 08:00 IST, about 75 minutes before the 09:15 IST open.
-    # Runs every day: a token minted on Friday would otherwise be dead by
-    # Monday, and by weekend research too.
-    - cron: "30 2 * * *"
-  workflow_dispatch:        # lets you renew on demand from the Actions tab
+  workflow_dispatch:
 
 concurrency:
   # Never let two runs write the database backup at the same time.

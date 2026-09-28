@@ -1,5 +1,36 @@
 # Running ATI Lab on Oracle Cloud's free tier
 
+## How it runs: a read-only mirror that updates itself
+
+The scheduled GitHub jobs own the data: they sync prices, run the scans and
+forward tests, and write the database backup. The Oracle server follows them
+and never competes with them:
+
+- **Read-only.** `BACKUP_READONLY=1`: the app never writes the GitHub backup,
+  so it cannot overwrite a newer backup with an older copy.
+- **Refreshes only when there is something new.** `MIRROR_REFRESH_MINUTES=10`:
+  every 10 minutes the app asks GitHub for the newest backup commit (one small
+  API call). It downloads the ~50 MB backup only after a job has pushed a new
+  one, about three times a trading day, and swaps it in atomically. Your
+  preferences, watchlists and presets (`app_*` tables) and the server's own Dhan
+  login are carried over each time.
+- **Never takes the Dhan login from a running job.** `DHAN_YIELD_TO_JOBS=1`:
+  Dhan keeps one live token per account. While a GitHub Dhan job is running the
+  app does not mint a new token (that would cut the job off mid-sync); it shows
+  stored prices for those few minutes and logs in again after the job ends.
+- **Updates itself.** `install-updater.sh` installs a systemd timer that runs
+  `update.sh` every 6 hours: one `git fetch`, and a rebuild only when `main`
+  has changed. It also adds the three settings above to an older `.env`.
+
+A server created before this existed needs one command, once:
+
+```bash
+sudo bash -c 'cd /opt/ati-lab && git fetch origin main && git checkout -B main origin/main && bash deploy/oracle/install-updater.sh'
+```
+
+The Claude page (`/scan`) and the GitHub jobs do not depend on this server at
+all: they keep working whether it is up or down.
+
 Oracle's **Always Free** Ampere server (up to 4 CPU cores and 24 GB of RAM,
 free indefinitely) runs the whole app on one machine. Compared with Render's
 free plan it never sleeps, has a real disk that survives restarts, and has

@@ -159,3 +159,44 @@ def protect_full_database() -> tuple[bool, str]:
     except Exception as exc:
         log.warning("Whole-database backup failed", exc_info=True)
         return False, f"{type(exc).__name__}: {exc}"
+
+
+# ----------------------------------------------------------------- mirror mode
+def mirror_refresh_minutes() -> float:
+    """MIRROR_REFRESH_MINUTES > 0 turns this host into a read-only mirror of
+    the GitHub backup (see core.refresh_mirror_from_backup)."""
+    try:
+        return float(core._secret("MIRROR_REFRESH_MINUTES", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def refresh_mirror() -> dict[str, object]:
+    """One refresh, logged. Never raises."""
+    try:
+        res = core.refresh_mirror_from_backup()
+    except Exception as exc:
+        res = {"changed": False, "sha": None, "reason": f"{type(exc).__name__}: {exc}"}
+    (log.info if res.get("changed") else log.debug)("Mirror refresh: %s", res.get("reason"))
+    if res.get("changed"):
+        try:
+            from app.db import app_store
+            app_store.ensure_app_tables()
+        except Exception:
+            log.warning("Could not re-apply the product tables after a refresh", exc_info=True)
+    return res
+
+
+def start_mirror_refresher(minutes: float) -> None:
+    """Poll for a new backup every `minutes` on a daemon thread. Each poll is
+    one small GitHub API call; the download happens only when a job has pushed."""
+    import threading
+    import time
+
+    def loop():
+        while True:
+            time.sleep(max(1.0, minutes) * 60)
+            refresh_mirror()
+
+    threading.Thread(target=loop, name="mirror-refresh", daemon=True).start()
+    log.info("Mirror mode: checking the GitHub backup every %.0f minute(s)", minutes)
