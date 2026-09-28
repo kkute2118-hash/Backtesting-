@@ -37,7 +37,9 @@ Configuration comes from environment variables (see core._secret):
                                  core.UNIVERSE_CHOICES, including
                                  "NSE Top 2000" for the 2000 most liquid shares
                SCAN_STRATEGIES   default core.DEFAULT_STRATEGIES ("4,5,6");
-                                 retired S1-S3 are ignored
+                                 retired S1-S3 are ignored here: they are
+                                 forward-tested in a separate background
+                                 book (step_shadow) that the page never shows
                SCAN_MIN_SCORE    default DEFAULT_MIN_SCORE (71 — the old 85
                                  gate translated onto the rescaled score)
                SYNC_TAIL_DAYS    default core.LATEST_SYNC_TAIL_DAYS
@@ -300,8 +302,8 @@ def step_events(days_ahead=30):
     return stored
 
 
-def step_scan(tickers, strategies, min_score, session_date=None):
-    data = core.load_scan_dataset(tickers)
+def step_scan(tickers, strategies, min_score, session_date=None, data=None):
+    data = data if data is not None else core.load_scan_dataset(tickers)
     if not data:
         raise RuntimeError(
             "The local candle store has no stock with 260+ bars. Build the history once from "
@@ -332,7 +334,26 @@ def step_scan(tickers, strategies, min_score, session_date=None):
                 f"{sum(rej.values()):,} rejected ("
                 + ", ".join(f"S{k}={v}" for k, v in sorted(rej.items()) if v) + ")")
     log("scan", f"persisted for session {session_date}")
+    step_scan.data = data            # reused by the shadow pass, not reloaded
     return result, regime
+
+
+def step_shadow(tickers, min_score, session_date=None):
+    """Forward-test the retired strategies (S1-S3) in the background.
+
+    Their paper trades form a separate book (core.forward_book): they never
+    block an S4-S6 position, and the page and alerts ignore them. The point is
+    live data in case they are ever reconsidered. Never fails the run.
+    """
+    try:
+        result, _ = step_scan(tickers, list(core.SHADOW_STRATEGIES), min_score,
+                              session_date=session_date, data=getattr(step_scan, "data", None))
+        added = core.add_forward_candidates(result, signal_date=session_date) if len(result) else 0
+        log("shadow", f"S1-S3 background book: {len(result)} setup(s), {added} added")
+        return added
+    except Exception as exc:  # the main book is already saved; this is optional
+        log("shadow", f"background S1-S3 pass skipped ({type(exc).__name__}: {exc})")
+        return 0
 
 
 def step_add(result, min_score=None, session_date=None):
@@ -555,6 +576,7 @@ def run_daily():
     min_score = _env_int("SCAN_MIN_SCORE", core.DEFAULT_MIN_SCORE)
     result, regime = step_scan(tickers, _selected_strategies(), min_score, session_date=stored)
     summary["added"] = step_add(result, min_score, session_date=stored)
+    summary["shadow_added"] = step_shadow(tickers, min_score, session_date=stored)
     summary["regime"] = regime
     summary["qualified"] = int(len(result))
     core._metric_set(LAST_SCANNED_SESSION_KEY, str(stored))
