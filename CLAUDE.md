@@ -19,13 +19,20 @@ stay inside Oracle's **Always Free** allowance, always:
 
 ## How the system runs (read before changing anything operational)
 
-- **No web host.** Render is retired; do not deploy to it or fix it. The
-  dashboard is the Claude artifact https://claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN,
-  rebuilt by the `/scan` skill. Oracle (`deploy/oracle/`) only if the owner asks
-  for a live web app again.
-- **One writer for the database.** Only the GitHub workflows write the
-  `db-backup` branch. Claude sessions and research scripts restore it into a
-  temporary directory and never push it.
+- **Two independent front ends.** Render is retired; do not deploy to it or
+  fix it. The Claude artifact https://claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN,
+  rebuilt by the `/scan` skill, works on its own. The Oracle server
+  (`deploy/oracle/`, `ati-lab`, Always Free) runs the web app as a read-only
+  mirror that follows the backup and `main` by itself (deploy/oracle/README.md).
+  Neither depends on the other.
+- **Secrets never go into the backup.** The repository is public, so anyone
+  can read the `db-backup` branch. `core.BACKUP_EMPTY_TABLES` empties
+  `dhan_token_cache` in every whole-database backup; keep it that way.
+- **One writer for the database, one owner of the Dhan login.** Only the
+  GitHub workflows write the `db-backup` branch; Claude sessions, research
+  scripts and the Oracle mirror (`BACKUP_READONLY=1`) only read it. Dhan keeps
+  one live token per account, so Dhan jobs share the `dhan-db` concurrency
+  group and the mirror yields to them (`DHAN_YIELD_TO_JOBS=1`).
 - **Scanner strategies: S4, S5, S6 only.** S1-S3 are retired
   (`core.RETIRED_STRATEGIES`) from the scanner and the page, but the daily job
   still forward-tests them in a separate background book

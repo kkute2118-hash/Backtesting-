@@ -34,7 +34,7 @@ TWELVEDATA_API_KEY=""         # optional
 # =============================================================================
 
 REPO="kkute2118-hash/Backtesting-"
-BRANCH="claude/stock-scanner-web-migration-t70lh0"
+BRANCH="main"                 # install-updater.sh keeps it on main afterwards
 APP_DIR="/opt/ati-lab"
 
 set -euo pipefail
@@ -97,12 +97,18 @@ GH_REPO=${GH_REPO}
 DB_BACKUP_BRANCH=${DB_BACKUP_BRANCH}
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY}
+# Read-only mirror of the GitHub backup (deploy/oracle/README.md)
+BACKUP_READONLY=1
+MIRROR_REFRESH_MINUTES=10
+DHAN_YIELD_TO_JOBS=1
 ENV
 fi
 
 # --- start -------------------------------------------------------------------
 cd "$APP_DIR"
 docker compose -f deploy/oracle/docker-compose.yml --env-file "$ENV_FILE" up -d --build
+# From now on the server follows main by itself (every 6 hours).
+bash "$APP_DIR/deploy/oracle/install-updater.sh"
 
 echo "=== ATI Lab setup finished $(date -u) ==="
 echo "Open http://${PUBLIC_IP} (after allowing port 80 in the subnet's security list)."

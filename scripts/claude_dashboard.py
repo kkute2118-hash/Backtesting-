@@ -43,7 +43,10 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 # Must be set before core is imported: core picks its data directory and
 # backup location at import time.
-os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="claude-dashboard-"))
+# A stable directory, so a second run in the same container reuses the
+# database (and its Dhan login) instead of downloading 50 MB again.
+os.environ.setdefault("GTF_DATA_DIR", os.path.join(tempfile.gettempdir(), "claude-dashboard-db"))
+os.makedirs(os.environ["GTF_DATA_DIR"], exist_ok=True)
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")
 os.environ.setdefault("DB_BACKUP_BRANCH", "db-backup")
 
@@ -104,7 +107,10 @@ def records(df: pd.DataFrame | None, columns: dict[str, str]) -> list[dict]:
 def restore() -> int:
     if not core._github_configured():
         raise SystemExit("GitHub backup is not configured: set GITHUB_TOKEN (or GH_TOKEN).")
-    core.restore_db_from_github(force=True)
+    # Downloads only when a GitHub job has pushed a newer backup (one small API
+    # call otherwise); keeps this machine's own Dhan login across refreshes.
+    res = core.refresh_mirror_from_backup()
+    log(f"backup {'refreshed' if res['changed'] else 'unchanged'}: {res['reason']}")
     con = core._db()
     try:
         n = int(con.execute("SELECT COUNT(*) FROM candles").fetchone()[0])

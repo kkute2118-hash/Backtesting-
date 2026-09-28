@@ -639,6 +639,110 @@ def _snapshot_db(dest):
         src.close()
 
 
+# ------------------------------------------------------------- read-only mirror
+# A web host (the Oracle server) can run as a MIRROR of the GitHub backup: the
+# scheduled GitHub jobs stay the only writer, and the mirror pulls their newest
+# backup when, and only when, it has changed. Checking costs one small API
+# call; the 50 MB download happens only after a job has pushed a new backup.
+MIRROR_KEEP_LOCAL_PREFIXES = ("app_",)          # the web app's own preferences, watchlists, presets
+MIRROR_KEEP_LOCAL_TABLES = ("dhan_token_cache",)  # the mirror's own Dhan login
+
+
+def _env_truthy(name):
+    return str(_secret(name, "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def backup_is_readonly():
+    """BACKUP_READONLY=1: this host never writes the GitHub backup."""
+    return _env_truthy("BACKUP_READONLY")
+
+
+def _mirror_sha_file():
+    return f"{DATA_DB}.mirror-sha"
+
+
+def latest_backup_commit():
+    """SHA of the newest commit that changed the whole-database backup, or None."""
+    repo, branch = _github_setting("GITHUB_REPO"), _github_backup_branch()
+    params = {"path": GITHUB_BACKUP_PATH_GZ, "per_page": 1}
+    if branch:
+        params["sha"] = branch
+    r = requests.get(f"https://api.github.com/repos/{repo}/commits", headers=_github_headers(),
+                     params=params, timeout=30)
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0]["sha"] if rows else None
+
+
+def _copy_local_tables(old_path, new_path):
+    """Carry the mirror's own tables from the database being replaced into the
+    downloaded one, so a refresh never loses them."""
+    if not os.path.exists(old_path):
+        return []
+    con = sqlite3.connect(new_path)
+    kept = []
+    try:
+        con.execute("ATTACH DATABASE ? AS old", (old_path,))
+        rows = con.execute("SELECT name, sql FROM old.sqlite_master WHERE type='table'").fetchall()
+        for name, sql in rows:
+            if not sql or not (name.startswith(MIRROR_KEEP_LOCAL_PREFIXES)
+                               or name in MIRROR_KEEP_LOCAL_TABLES):
+                continue
+            con.execute(f'DROP TABLE IF EXISTS main."{name}"')
+            con.execute(sql)
+            con.execute(f'INSERT INTO main."{name}" SELECT * FROM old."{name}"')
+            kept.append(name)
+        con.commit()
+        con.execute("DETACH DATABASE old")
+    finally:
+        con.close()
+    return kept
+
+
+def refresh_mirror_from_backup(force=False):
+    """Replace the local database with the newest backup if it changed.
+
+    Returns {"changed": bool, "sha": str|None, "reason": str}. The download is
+    written beside the database, the mirror's own tables are copied into it,
+    and it is moved into place in one step, so a reader never sees a partial
+    file and nothing is kept behind (a forced restore keeps a full copy of the
+    replaced database, which on a mirror refreshing daily would fill the disk).
+    """
+    if not _github_configured():
+        return {"changed": False, "sha": None, "reason": "no GitHub backup configured"}
+    sha = latest_backup_commit()
+    marker = _mirror_sha_file()
+    current = open(marker).read().strip() if os.path.exists(marker) else None
+    if not sha:
+        return {"changed": False, "sha": None, "reason": "no backup found"}
+    if sha == current and os.path.exists(DATA_DB) and not force:
+        return {"changed": False, "sha": sha, "reason": "already current"}
+    repo, branch = _github_setting("GITHUB_REPO"), _github_backup_branch()
+    url = f"https://api.github.com/repos/{repo}/contents/{GITHUB_BACKUP_PATH_GZ}"
+    tmp, dl = f"{DATA_DB}.mirror-tmp", f"{DATA_DB}.mirror-tmp.download"
+    try:
+        # Pin the download to the commit just checked, not whatever is newest by now.
+        status, body = _download_to(url, dl, _github_raw_headers(), params={"ref": sha})
+        if status != 200:
+            return {"changed": False, "sha": sha, "reason": f"download failed: {status} {body[:120]}"}
+        with gzip.open(dl, "rb") as fin, open(tmp, "wb") as fout:
+            shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+        if os.path.getsize(tmp) == 0 or db_row_count(tmp) <= 0:
+            return {"changed": False, "sha": sha, "reason": "downloaded backup is empty"}
+        kept = _copy_local_tables(DATA_DB, tmp)
+        os.replace(tmp, DATA_DB)
+        with open(marker, "w") as f:
+            f.write(sha)
+        with _S6_BREADTH_LOCK:                     # computed from the old candles
+            _S6_BREADTH.update(at=0.0, series=None)
+        return {"changed": True, "sha": sha,
+                "reason": f"refreshed to {sha[:7]}; kept local {', '.join(kept) or 'nothing'}"}
+    finally:
+        for leftover in (dl, tmp):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+
+
 # Emptied in every whole-database backup COPY. feature_snapshots is a large
 # derived cache; dhan_token_cache is a live Dhan credential (it can place
 # orders) and the backup branch is readable by anyone who can read the repo.
@@ -800,6 +904,9 @@ def backup_db_to_github(return_reason=False):
         global _GITHUB_LAST_ERROR
         _GITHUB_LAST_ERROR = "" if ok else reason
         return (ok, reason) if return_reason else ok
+
+    if backup_is_readonly():
+        return done(False, "Read-only mirror (BACKUP_READONLY): the GitHub jobs write the backup.")
 
     if not _github_configured():
         missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
@@ -1170,6 +1277,9 @@ def backup_learning_to_github(return_reason=False):
         _GITHUB_LAST_ERROR = "" if ok else reason
         return (ok, reason) if return_reason else ok
 
+    if backup_is_readonly():
+        return done(False, "Read-only mirror (BACKUP_READONLY): the GitHub jobs write the backup.")
+
     if not _github_configured():
         missing = [n for n in ("GITHUB_TOKEN", "GITHUB_REPO") if not _github_setting(n)]
         return done(False, "Not configured — missing " + " and ".join(missing) + ".")
@@ -1527,6 +1637,11 @@ def _dhan_ensure_fresh_token():
                 fresh = False
         if fresh:
             return token
+        if dhan_job_running():
+            if token and age_hours is not None and age_hours < 24:
+                return token
+            raise RuntimeError("A scheduled GitHub job is using Dhan right now; this host waits "
+                               "for it to finish rather than taking over the login.")
         try:
             return _dhan_generate_fresh_token()
         except Exception:
@@ -1541,6 +1656,40 @@ def _dhan_ensure_fresh_token():
                 return token
             raise
 
+# Dhan keeps ONE live token per account, and every scheduled job mints its own
+# at start. A second host that mints while a job runs voids the job's token
+# mid-sync. With DHAN_YIELD_TO_JOBS=1 (set on the Oracle mirror) this host
+# never mints while one of these workflows is running; it waits for the job to
+# finish, falling back to stored prices meanwhile.
+DHAN_JOB_WORKFLOWS = ("daily-forward-test.yml", "sync-market-data.yml", "build-history.yml",
+                      "dhan-token-renewal.yml", "backtest.yml", "survivorship-study.yml",
+                      "dedupe-forward.yml")
+DHAN_JOB_CHECK_SECONDS = 60.0
+_DHAN_JOB_CHECK = {"at": -1e9, "running": False}
+
+
+def dhan_job_running():
+    """True when this host yields to the jobs and a Dhan job is running now.
+    One cached API call a minute at most; any error reads as "not running"."""
+    if not _env_truthy("DHAN_YIELD_TO_JOBS") or not _github_configured():
+        return False
+    now = time.monotonic()
+    if now - _DHAN_JOB_CHECK["at"] < DHAN_JOB_CHECK_SECONDS:
+        return _DHAN_JOB_CHECK["running"]
+    running = False
+    try:
+        r = requests.get(f"https://api.github.com/repos/{_github_setting('GITHUB_REPO')}/actions/runs",
+                         headers=_github_headers(), params={"status": "in_progress", "per_page": 20},
+                         timeout=15)
+        r.raise_for_status()
+        running = any(os.path.basename(str(w.get("path", ""))) in DHAN_JOB_WORKFLOWS
+                      for w in r.json().get("workflow_runs", []))
+    except Exception:
+        running = False
+    _DHAN_JOB_CHECK.update(at=now, running=running)
+    return running
+
+
 def _dhan_renew_rejected_token(rejected):
     """After Dhan rejects the token, mint one fresh token and say whether to retry.
 
@@ -1553,7 +1702,7 @@ def _dhan_renew_rejected_token(rejected):
     downloads renew once, not once per thread (Dhan allows one mint per two
     minutes).
     """
-    if not _dhan_pin_totp_configured():
+    if not _dhan_pin_totp_configured() or dhan_job_running():
         return False
     with _DHAN_TOKEN_LOCK:
         current, _ = _read_cached_dhan_token()
