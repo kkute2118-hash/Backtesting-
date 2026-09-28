@@ -382,7 +382,7 @@ def step_add(result, min_score=None, session_date=None):
 # 65 MB across a 500-stock universe, which was more than the entire candle
 # history it is computed from. The app has to download and unpack the backup on
 # every cold start, on an instance with 512 MB of RAM.
-BACKUP_SKIP_TABLES = ("feature_snapshots",)
+BACKUP_SKIP_TABLES = core.BACKUP_EMPTY_TABLES      # the snapshot cache and the Dhan token
 
 
 def _stage_backup(stage_path):

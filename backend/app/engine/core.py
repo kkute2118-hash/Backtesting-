@@ -639,22 +639,27 @@ def _snapshot_db(dest):
         src.close()
 
 
-def _drop_derived_cache(path):
-    """Empty the feature snapshot cache in a database COPY and compact it.
+# Emptied in every whole-database backup COPY. feature_snapshots is a large
+# derived cache; dhan_token_cache is a live Dhan credential (it can place
+# orders) and the backup branch is readable by anyone who can read the repo.
+BACKUP_EMPTY_TABLES = ("feature_snapshots", "dhan_token_cache")
 
-    The scheduled job's staging already does this (daily_job.BACKUP_SKIP_TABLES);
-    the API server's whole-database backup did not, so a full-universe scan
-    made its backup too large to store and it was skipped outright. The table
-    is kept, empty, so a restore still has the schema.
+
+def _drop_derived_cache(path):
+    """Empty BACKUP_EMPTY_TABLES in a database COPY and compact it.
+
+    The scheduled job's staging does the same (daily_job.BACKUP_SKIP_TABLES).
+    The tables are kept, empty, so a restore still has the schema.
     """
     con = sqlite3.connect(path)
     try:
-        has = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                          "AND name='feature_snapshots'").fetchone()
-        if has:
-            con.execute("DELETE FROM feature_snapshots")
-            con.commit()
-            con.execute("VACUUM")
+        present = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in BACKUP_EMPTY_TABLES:
+            if table in present:
+                con.execute(f'DELETE FROM "{table}"')
+        con.commit()
+        con.execute("VACUUM")
     finally:
         con.close()
 
