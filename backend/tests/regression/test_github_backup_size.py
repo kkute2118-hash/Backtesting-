@@ -124,6 +124,11 @@ stub = Stub()
 core.requests.get = stub.get
 core.requests.put = stub.put
 core._github_ensure_branch = lambda repo, branch: (True, "")
+# This script covers the branch (contents API) path. The release asset is tried
+# first by both backup and restore; keep it off the network and out of the way.
+# tests/test_release_backup.py covers the asset.
+core._github_release_backup_asset = lambda repo: (None, None)
+core._github_upload_release_asset = lambda repo, packed_path: (False, "no releases in this test")
 
 # --------------------------------------- 1. a database larger than the read cap
 raw_size = build_database(40_000)

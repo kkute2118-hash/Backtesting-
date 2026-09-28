@@ -168,10 +168,19 @@ def backup_env(monkeypatch, frames):
     monkeypatch.setenv("GITHUB_REPO", "owner/repo")
     monkeypatch.setattr(core, "_github_ensure_branch", lambda repo, branch: (True, ""))
     monkeypatch.setattr(core, "_LAST_BACKUP_RATIO", None)
+    # These tests are about the contents-API path; the release asset is tried
+    # first and must not reach the network. Tests of the asset put it back.
+    monkeypatch.setattr(core, "_github_upload_release_asset",
+                        lambda repo, packed_path: (False, "releases unavailable in this test"))
     return path
 
 
+_REAL_RELEASE_UPLOAD = core._github_upload_release_asset
+
+
 def test_an_oversized_backup_is_declined_before_anything_is_sent(monkeypatch, backup_env):
+    # When the release asset cannot be written, a database past the contents
+    # API's limit is declined without a PUT, and the reason says why.
     sent = []
     monkeypatch.setattr(core, "GITHUB_CONTENTS_MAX_BYTES", 1)
     monkeypatch.setattr(core.requests, "put", lambda *a, **k: sent.append(1) or _Resp(201))
@@ -180,11 +189,28 @@ def test_an_oversized_backup_is_declined_before_anything_is_sent(monkeypatch, ba
     ok, reason = core.backup_db_to_github(return_reason=True)
     assert not ok and not sent
     assert "scheduled GitHub Actions" in reason
+    assert "release asset upload failed" in reason
 
-    # The second attempt knows the ratio and does not rebuild the archive.
-    monkeypatch.setattr(core, "_snapshot_db", lambda dest: pytest.fail("rebuilt the snapshot"))
+
+def test_an_oversized_backup_goes_to_the_release_asset(monkeypatch, backup_env):
+    # The asset has no 35 MB ceiling, so size is no reason to skip any more:
+    # that skip is what left the NSE Top 2000 store with no app-side backup.
+    monkeypatch.setattr(core, "GITHUB_CONTENTS_MAX_BYTES", 1)
+    monkeypatch.setattr(core.requests, "put", lambda *a, **k: pytest.fail("used the contents API"))
+    monkeypatch.setattr(core, "_github_upload_release_asset", _REAL_RELEASE_UPLOAD)
+    monkeypatch.setattr(core, "_github_release_backup_asset", lambda repo: ({"id": 7}, None))
+    uploads = []
+
+    def post(url, headers=None, params=None, data=None, timeout=None, **_):
+        assert hasattr(data, "read"), "the asset must be streamed from a file"
+        body = data.read()
+        uploads.append(len(body))
+        return _Resp(201, json.dumps({"size": len(body)}).encode())
+
+    monkeypatch.setattr(core.requests, "post", post)
     ok, reason = core.backup_db_to_github(return_reason=True)
-    assert not ok and "would be about" in reason
+    assert ok, reason
+    assert uploads and "release asset" in reason
 
 
 def test_the_upload_is_streamed_from_a_file(monkeypatch, backup_env):
