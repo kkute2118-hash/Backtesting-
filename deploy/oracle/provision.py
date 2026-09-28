@@ -227,7 +227,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dry-run", action="store_true",
                         help="print the plan and the filled-in blanks, create nothing")
+    parser.add_argument("--name", default=NAME,
+                        help="server name; a new name builds a replacement beside the running "
+                             "server (same network), to delete the old one once it works")
     args = parser.parse_args()
+    server = args.name
 
     script = user_data()
     filled = [v for v in SCRIPT_VARS if os.environ.get(v)]
@@ -244,7 +248,7 @@ def main() -> None:
                  f"({FREE_A1_OCPUS} OCPU / {FREE_A1_MEMORY_GB} GB).")
     if args.dry_run:
         say(f"Would create in {os.environ.get('OCI_REGION', '<OCI_REGION>')}: network "
-            f"{NAME}-vcn with ports 22 and 80 open, and {SHAPE} '{NAME}' "
+            f"{NAME}-vcn with ports 22 and 80 open, and {SHAPE} '{server}' "
             f"({ocpus:g} OCPU, {memory:g} GB, Ubuntu, {BOOT_VOLUME_GB} GB disk) — only after "
             "checking the account's existing usage stays inside Always Free.")
         return
@@ -259,10 +263,10 @@ def main() -> None:
     vn = oci.core.VirtualNetworkClient(config)
     m = oci.core.models
 
-    existing = named(compute.list_instances(compartment).data, NAME)
+    existing = named(compute.list_instances(compartment).data, server)
     if existing is not None:
         ip = public_ip(compute, vn, compartment, existing.id)
-        say(f"Server '{NAME}' already exists ({existing.lifecycle_state}); public IP {ip}.")
+        say(f"Server '{server}' already exists ({existing.lifecycle_state}); public IP {ip}.")
         say(f"OPEN: http://{ip}")
         return
 
@@ -291,7 +295,7 @@ def main() -> None:
         say(f"Launching in {ad}…")
         try:
             instance = compute.launch_instance(m.LaunchInstanceDetails(
-                availability_domain=ad, compartment_id=compartment, display_name=NAME,
+                availability_domain=ad, compartment_id=compartment, display_name=server,
                 shape=SHAPE,
                 shape_config=m.LaunchInstanceShapeConfigDetails(ocpus=ocpus,
                                                                 memory_in_gbs=memory),
@@ -319,7 +323,7 @@ def main() -> None:
         if ip:
             break
         time.sleep(5)
-    say(f"Server '{NAME}' is running; public IP {ip}.")
+    say(f"Server '{server}' is running; public IP {ip}.")
     say("The app now installs and builds itself: allow 10-15 minutes.")
     say(f"OPEN: http://{ip}")
 
