@@ -5,6 +5,7 @@ import { ThemeProvider } from "next-themes";
 import { useEffect, useState, type ReactNode } from "react";
 import { Toaster } from "sonner";
 
+import { ChartProvider } from "@/features/chart/ChartProvider";
 import { ApiError, pingHealth } from "@/lib/api";
 
 /**
@@ -69,7 +70,7 @@ export function Providers({ children }: { children: ReactNode }) {
         enableSystem={false}
         disableTransitionOnChange
       >
-        {children}
+        <ChartProvider>{children}</ChartProvider>
         <Toaster
           position="bottom-right"
           toastOptions={{

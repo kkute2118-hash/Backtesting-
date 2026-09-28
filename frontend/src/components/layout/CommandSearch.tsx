@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { useDebounced, useDismiss } from "@/components/ui/Inputs";
+import { useOpenChart } from "@/features/chart/ChartProvider";
 import { useStockSearch } from "@/hooks/queries";
 import { cn } from "@/lib/utils";
 
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
  */
 export function CommandSearch() {
   const router = useRouter();
+  const openChart = useOpenChart();
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -48,7 +50,8 @@ export function CommandSearch() {
     setOpen(false);
     setTerm("");
     inputRef.current?.blur();
-    router.push(`/stocks/${encodeURIComponent(symbol)}`);
+    if (openChart) openChart(symbol);
+    else router.push(`/stocks/${encodeURIComponent(symbol)}`);
   }
 
   function onKeyDown(event: React.KeyboardEvent) {

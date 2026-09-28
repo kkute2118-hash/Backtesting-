@@ -1,6 +1,6 @@
 "use client";
 
-import { Eye, Plus, ShieldCheck, TrendingUp } from "lucide-react";
+import { CandlestickChart, Eye, Plus, ShieldCheck, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -20,6 +20,8 @@ import { errorMessage } from "@/lib/api";
 import { compact, date, inr, inrCompact, int, num, relativeTime, signed } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Row } from "@/types/api";
+
+import { useOpenChart } from "@/features/chart/ChartProvider";
 
 import { ConditionMatrix } from "./ConditionMatrix";
 import { IndicatorPanel } from "./IndicatorPanel";
@@ -105,7 +107,10 @@ export function StockPage({ symbol }: { symbol: string }) {
           </p>
         </div>
 
-        <AddToWatchlist symbol={q.symbol} />
+        <div className="flex flex-wrap items-center gap-2">
+          <OpenChartButton symbol={q.symbol} />
+          <AddToWatchlist symbol={q.symbol} />
+        </div>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -432,5 +437,16 @@ function AddToWatchlist({ symbol }: { symbol: string }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function OpenChartButton({ symbol }: { symbol: string }) {
+  const openChart = useOpenChart();
+  if (!openChart) return null;
+  return (
+    <Button size="sm" variant="primary" onClick={() => openChart(symbol)}>
+      <CandlestickChart className="h-3.5 w-3.5" aria-hidden />
+      Open chart
+    </Button>
   );
 }

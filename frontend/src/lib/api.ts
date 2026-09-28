@@ -3,6 +3,11 @@ import type { ApiErrorBody } from "@/types/api";
 const BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const PREFIX = "/api/v1";
 
+/** Absolute URL of a read endpoint, for EventSource (which cannot use fetch). */
+export function apiUrl(path: string): string {
+  return `${BASE}${PREFIX}${path}`;
+}
+
 /**
  * A failure the UI can actually show someone.
  *

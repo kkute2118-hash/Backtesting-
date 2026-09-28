@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { CheckboxGroup, Field, Select } from "@/components/ui/Inputs";
-import { Banner, Note, Stat } from "@/components/ui/Misc";
+import { Banner, Note, Stat, SymbolLink } from "@/components/ui/Misc";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/States";
 import { FreshnessBanner } from "@/features/dashboard/FreshnessCard";
 import { JobProgress } from "@/features/scanner/JobProgress";
@@ -356,7 +356,7 @@ export function DataPage() {
                 <tbody>
                   {(store.data?.thin_symbols ?? []).map((entry) => (
                     <tr key={entry.symbol} className="border-b border-line/60 last:border-0">
-                      <td className="px-4 py-1.5 font-medium">{entry.symbol}</td>
+                      <td className="px-4 py-1.5 font-medium"><SymbolLink symbol={entry.symbol} /></td>
                       <td className="tabular px-4 py-1.5 text-right text-warn">
                         {int(entry.bars)}
                       </td>
@@ -389,7 +389,7 @@ export function DataPage() {
                 <tbody>
                   {(diagnostics.data?.rows ?? []).map((row, index) => (
                     <tr key={index} className="border-b border-line/60 last:border-0">
-                      <td className="px-4 py-1.5 font-medium">{String(row.symbol ?? "")}</td>
+                      <td className="px-4 py-1.5 font-medium">{row.symbol ? <SymbolLink symbol={String(row.symbol)} /> : ""}</td>
                       <td className="tabular px-4 py-1.5 text-right">
                         {int(row.bar_count as number)}
                       </td>

@@ -4,6 +4,7 @@ import { Info } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { useOpenChart } from "@/features/chart/ChartProvider";
 import { cn } from "@/lib/utils";
 import { direction, signedPct } from "@/lib/format";
 
@@ -87,11 +88,22 @@ export function ScoreBar({ score }: { score: number | null | undefined }) {
   );
 }
 
+/**
+ * A stock name anywhere in the app. A plain click or tap opens the chart
+ * panel; Ctrl/Cmd/Shift-click or a middle click still opens the full stock
+ * page, as a link should.
+ */
 export function SymbolLink({ symbol, className }: { symbol: string; className?: string }) {
+  const openChart = useOpenChart();
   return (
     <Link
       href={`/stocks/${encodeURIComponent(symbol)}`}
-      onClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (!openChart || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault();
+        openChart(symbol);
+      }}
       className={cn("font-semibold text-ink hover:text-accent hover:underline", className)}
     >
       {symbol}
