@@ -81,3 +81,39 @@ In each cell, the first figure is 2022-24 and the second is 2025-26.
   quarterly.
 - **Breadth 0.40** is the one change that clearly hurts: 2025-26 turns
   negative. It confirms that the gate matters.
+
+## 4. Is the entry too late? (`scripts/s6_entry_timing.py`)
+
+Same stock rules, breadth gate, re-arm and exit. Only the entry changes. Each
+cell is the average per closed trade (trades, win %):
+
+| Entry | 2022-24 | 2025-26 |
+|---|---|---|
+| **Breakout close (S6 now)** | **+20.6% (590, 44%)** | **+2.3% (38, 26%)** |
+| Early: close within 3% below the 50-day high | +20.9% (447, 47%) | +0.6% (28, 25%) |
+| Early: within 5% below | +25.8% (291, 48%) | -3.9% (16, 25%) |
+| Pullback: first close 3% under the breakout within 10 days | +18.7% (321, 46%) | +6.0% (18, 33%) |
+
+Breakout trades by distance from the 52-week high at entry:
+
+| At entry | 2022-24 | 2025-26 |
+|---|---|---|
+| 0-1% below (at the high) | +24.9% (178) | -6.4% (11) |
+| 1-5% below | +17.0% (303) | -1.9% (16) |
+| 5-15% below | +23.5% (109) | +17.1% (11) |
+
+**Buying earlier does not help reliably.**
+
+- **Early 3%** is the same as the breakout on 2022-24 and worse on 2025-26.
+- **Early 5%** looks best on 2022-24 but loses money on 2025-26, so it fails
+  the evidence rule. Stocks that come near the high and then turn back down
+  are the losers an early entry adds.
+- **Pullback** entries miss about half the trades: the strongest stocks never
+  dip 3%. They earn less on 2022-24. They look better on 2025-26, but on only
+  18 trades.
+- **Buying at the 52-week high was not worse** in 2022-24; it was one of the
+  best buckets. That is momentum: stocks at new highs tend to keep going. The
+  2025-26 buckets are 11-16 trades each, too few to read.
+
+**Not adopted.** Nothing here beats the breakout close on both periods. Re-run
+this quarterly with the cross-check.
