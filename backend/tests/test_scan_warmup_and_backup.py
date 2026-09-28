@@ -10,6 +10,10 @@ of the forward tests - becomes too big to store.
 from __future__ import annotations
 
 import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 import pandas as pd
@@ -48,6 +52,32 @@ def test_derived_cache_is_stripped_from_a_backup_copy(tmp_path):
     assert con.execute("SELECT COUNT(*) FROM forward_tests").fetchone()[0] == 1
     con.close()
     assert path.stat().st_size < before
+
+
+def test_the_dhan_token_never_leaves_in_a_backup(tmp_path, monkeypatch):
+    """The backup branch is readable by anyone who can read the repository,
+    and a Dhan access token can place orders. Both backup paths must drop it."""
+    import daily_job
+    path = tmp_path / "db.sqlite3"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE dhan_token_cache(id INTEGER, access_token TEXT, issued_at TEXT)")
+    con.execute("INSERT INTO dhan_token_cache VALUES (1, 'eyJsecret', '2026-09-28')")
+    con.execute("CREATE TABLE forward_tests(id INTEGER)")
+    con.execute("INSERT INTO forward_tests VALUES (1)")
+    con.commit()
+    con.close()
+
+    copy = tmp_path / "copy.sqlite3"
+    copy.write_bytes(path.read_bytes())
+    core._drop_derived_cache(str(copy))                       # the API's backup path
+    assert b"eyJsecret" not in copy.read_bytes()
+
+    monkeypatch.setattr(core, "DATA_DB", str(path))           # the scheduled job's path
+    stage = tmp_path / "stage.gz"
+    daily_job._stage_backup(str(stage))
+    import gzip
+    raw = gzip.open(stage).read()
+    assert b"eyJsecret" not in raw and b"forward_tests" in raw
 
 
 def test_warm_up_writes_the_snapshots_a_scan_reuses(monkeypatch):
