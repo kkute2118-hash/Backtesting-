@@ -95,3 +95,12 @@ def test_margin_borrows_past_cash_and_pays_interest_on_it():
     days = (idx[-1] - idx[0]).days
     assert mtf.stats["interest_paid"] == pytest.approx(300_000 * 0.125 / 365 * days, rel=0.05)
     assert mtf.stats["final"] < 100_000                     # flat trades: interest + pledge are pure cost
+
+
+def test_risk_can_be_set_per_strategy():
+    idx = pd.bdate_range("2026-01-05", periods=10)
+    closes = pd.DataFrame({s: [100.0] * 10 for s in ("A", "B")}, index=idx)
+    t = pd.DataFrame([_trade("S5_POCKETPIVOT", "A", 0, 5, idx), _trade("S6_BREAKOUT", "B", 0, 5, idx)])
+    r = run_portfolio(t, closes, costs=NO_COSTS, risk_by_strategy={"S5_POCKETPIVOT": 0.5})
+    q = dict(zip(r.fills.symbol, r.fills.qty))
+    assert q == {"A": 50, "B": 100}          # 0.5% and 1% of 1 lakh over Rs 10 risk

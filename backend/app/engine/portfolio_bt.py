@@ -185,7 +185,8 @@ def _stats(equity, fills, capital):
 def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
                   max_positions=10, position_cap_pct=25.0, costs=IndianDeliveryCosts(),
                   start=None, end=None, priority=("S4_SEPA", "S5_POCKETPIVOT", "S6_BREAKOUT"),
-                  leverage=1.0, margin_interest_pct=12.5, pledge_fee=20.0):
+                  leverage=1.0, margin_interest_pct=12.5, pledge_fee=20.0,
+                  risk_by_strategy=None):
     """Replay `trades` through an account.
 
     buckets:  {strategy: fraction of capital} for separate money per strategy,
@@ -198,6 +199,8 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
     Fills:    at the trade's own entry and exit prices, worsened by slippage,
               plus the charges in `costs`.
     `closes`: DataFrame dates x symbols of daily closes, for marking to market.
+    risk_by_strategy: {strategy: risk %} overriding `risk_pct` for those
+              strategies, e.g. {"S5_POCKETPIVOT": 0.5}.
     Margin (MTF): `leverage` > 1 lets the bucket borrow up to (leverage - 1) x
               its value; risk and the position cap scale with it (2x risks
               2% where 1x risks 1%). Interest of `margin_interest_pct` a year
@@ -280,7 +283,8 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
                 skipped["too_small"] += 1; continue
             # cash plus what may still be borrowed against the bucket's value
             room = cash[b] + (lev - 1) * values[b]
-            budget = min(values[b] * risk_pct * lev / 100 / risk_per_share * px,
+            r_pct = (risk_by_strategy or {}).get(r.strategy, risk_pct)
+            budget = min(values[b] * r_pct * lev / 100 / risk_per_share * px,
                          values[b] * position_cap_pct * lev / 100, room)
             qty = int(budget // px)
             extra = pledge_fee if lev > 1 else 0.0
@@ -318,7 +322,8 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
     res.stats["settings"] = {"buckets": buckets, "risk_pct": risk_pct, "max_positions": max_positions,
                              "position_cap_pct": position_cap_pct, "costs": asdict(costs),
                              "leverage": lev, "margin_interest_pct": margin_interest_pct if lev > 1 else 0,
-                             "pledge_fee": pledge_fee if lev > 1 else 0}
+                             "pledge_fee": pledge_fee if lev > 1 else 0,
+                             "risk_by_strategy": risk_by_strategy or {}}
     return res
 
 
