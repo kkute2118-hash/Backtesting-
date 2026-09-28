@@ -27,8 +27,10 @@ stay inside Oracle's **Always Free** allowance, always:
   `db-backup` branch. Claude sessions and research scripts restore it into a
   temporary directory and never push it.
 - **Scanner strategies: S4, S5, S6 only.** S1-S3 are retired
-  (`core.RETIRED_STRATEGIES`); their code stays for research and for paper
-  trades opened before retirement.
+  (`core.RETIRED_STRATEGIES`); their code stays for research, and the GitHub
+  job still resolves paper trades opened before retirement, but the page
+  shows S4-S6 only. The owner reviewed S1-S6 on 28 Sep 2026
+  (`research/STRATEGY_SHORTLIST.md`) and chose to keep S4, S5 and S6.
 - **Evidence rule.** A new filter or rule gates trades only if it was chosen on
   2022-24 data and holds on 2025-26 data. Otherwise it is a flag (like the
   results calendar) or it is not adopted (like the S5 market filter). Findings

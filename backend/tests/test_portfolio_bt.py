@@ -69,3 +69,29 @@ def test_costs_reduce_the_result():
     free = run_portfolio(t, closes, costs=NO_COSTS).stats["final"]
     real = run_portfolio(t, closes).stats["final"]
     assert real < free
+
+
+def test_margin_doubles_the_position_and_charges_interest():
+    # Entry 100, stop 90: 1x risks 1% (100 shares); 2x risks 2% (200 shares,
+    # Rs 20,000 of stock, capped at 50% of value, all within cash here).
+    closes = _closes(10, AAA=[100.0] * 5 + [110.0] * 5)
+    t = pd.DataFrame([_trade("S6_BREAKOUT", "AAA", 0, 5, closes.index)])
+    one = run_portfolio(t, closes, capital=100_000, costs=NO_COSTS)
+    two = run_portfolio(t, closes, capital=100_000, costs=NO_COSTS, leverage=2.0, pledge_fee=0)
+    assert one.fills.iloc[0].qty == 100 and two.fills.iloc[0].qty == 200
+    assert one.stats["interest_paid"] == 0 and two.stats["final"] == pytest.approx(102_000)
+
+
+def test_margin_borrows_past_cash_and_pays_interest_on_it():
+    # Tiny risk per share: the position cap binds. 1x caps at 25% of value;
+    # 4x at 100%, so four such trades need Rs 4 lakh on a Rs 1 lakh account.
+    idx = pd.bdate_range("2026-01-05", periods=30)
+    closes = pd.DataFrame({s: [100.0] * 30 for s in "ABCD"}, index=idx)
+    t = pd.DataFrame([_trade("S6_BREAKOUT", s, 0, 29, idx, stop=99.0, exit_=100.0) for s in "ABCD"])
+    cash = run_portfolio(t, closes, capital=100_000, costs=NO_COSTS)
+    mtf = run_portfolio(t, closes, capital=100_000, costs=NO_COSTS, leverage=4.0, pledge_fee=20)
+    assert cash.fills.qty.sum() == 1000                     # 4 x Rs 25,000
+    assert mtf.fills.qty.sum() > 3000                       # borrowed about Rs 3 lakh
+    days = (idx[-1] - idx[0]).days
+    assert mtf.stats["interest_paid"] == pytest.approx(300_000 * 0.125 / 365 * days, rel=0.05)
+    assert mtf.stats["final"] < 100_000                     # flat trades: interest + pledge are pure cost
