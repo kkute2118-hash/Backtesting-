@@ -80,9 +80,52 @@ def test_a_replaced_token_dh906_is_an_account_refusal(monkeypatch):
 
     monkeypatch.setattr(core.requests, "post", post)
     monkeypatch.setattr(core, "_dhan_headers", lambda: {})
+    monkeypatch.setattr(core, "_dhan_pin_totp_configured", lambda: False)  # cannot renew
     with pytest.raises(core.DhanAccessError) as err:
         core._dhan_post("/charts/historical", {}, label="historical")
     assert len(calls) == 1 and "one live token" in str(err.value)
+
+
+def test_a_replaced_token_is_renewed_once_then_the_request_retried(monkeypatch):
+    """The dashboard restores the backup, whose cached token another login
+    had already voided: renew once and carry on instead of going quiet."""
+    body = b'{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}'
+    state = {"token": "old", "mints": 0}
+    sent = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.append(headers["access-token"])
+        return _Resp(200, b"{}") if headers["access-token"] == "new" else _Resp(400, body)
+
+    def mint():
+        state["mints"] += 1
+        state["token"] = "new"
+        return "new"
+
+    monkeypatch.setattr(core.requests, "post", post)
+    monkeypatch.setattr(core, "_dhan_headers", lambda: {"access-token": state["token"]})
+    monkeypatch.setattr(core, "_read_cached_dhan_token", lambda: (state["token"], "x"))
+    monkeypatch.setattr(core, "_dhan_pin_totp_configured", lambda: True)
+    monkeypatch.setattr(core, "_dhan_generate_fresh_token", mint)
+    core._dhan_post("/marketfeed/quote", {}, label="quote")
+    assert sent == ["old", "new"] and state["mints"] == 1
+
+    # The quote endpoint's own wording for the same rejection.
+    body = b'{"data":{"808":"Authentication Failed - Client ID or Token invalid"},"status":"failed"}'
+    monkeypatch.setattr(core.requests, "post",
+                        lambda url, headers=None, json=None, timeout=None:
+                        _Resp(200, b"{}") if headers["access-token"] == "new" else _Resp(401, body))
+    state["token"] = "old"
+    core._dhan_post("/marketfeed/quote", {}, label="quote")
+    assert state["mints"] == 2
+    body = b'{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}'
+    monkeypatch.setattr(core.requests, "post", post)
+
+    # A token that is still rejected after renewal is raised, not looped on.
+    state["token"] = "old"
+    monkeypatch.setattr(core, "_dhan_generate_fresh_token", lambda: "old")
+    with pytest.raises(core.DhanAccessError):
+        core._dhan_post("/marketfeed/quote", {}, label="quote")
 
 
 def test_the_top_up_stops_at_the_first_account_refusal(monkeypatch):
