@@ -32,17 +32,16 @@ def test_daily_pages_walk_back_without_gaps_or_overlap(seeded_db, monkeypatch):
     assert all(t % 86_400 == 0 for t in times)
 
 
-def test_weekly_and_monthly_bars_are_built_from_the_daily_ones(seeded_db, frames):
+def test_weekly_bars_are_built_from_the_daily_ones(seeded_db, frames):
     daily = frames["TRENDUP"]
     weekly = charting.candles("TRENDUP", "1W")["candles"]
-    monthly = charting.candles("TRENDUP", "1M")["candles"]
-    last_month = daily[daily.index.to_period("M") == daily.index[-1].to_period("M")]
-    m = monthly[-1]
-    assert m["open"] == round(float(last_month.open.iloc[0]), 2)
-    assert m["high"] == round(float(last_month.high.max()), 2)
-    assert m["close"] == round(float(last_month.close.iloc[-1]), 2)
-    assert m["volume"] == pytest.approx(float(last_month.volume.sum()))
-    assert len(weekly) > len(monthly)
+    last_week = daily[daily.index.to_period("W-FRI") == daily.index[-1].to_period("W-FRI")]
+    w = weekly[-1]
+    assert w["open"] == round(float(last_week.open.iloc[0]), 2)
+    assert w["high"] == round(float(last_week.high.max()), 2)
+    assert w["close"] == round(float(last_week.close.iloc[-1]), 2)
+    assert w["volume"] == pytest.approx(float(last_week.volume.sum()))
+    assert pd.Timestamp(w["time"], unit="s").date() == last_week.index[0].date()
 
 
 def test_bad_requests_are_explained(seeded_db):
@@ -52,14 +51,16 @@ def test_bad_requests_are_explained(seeded_db):
         charting.candles("../etc", "1D")
     with pytest.raises(ApiError, match="Unsupported timeframe"):
         charting.candles("TRENDUP", "2m")
+    with pytest.raises(ApiError, match="Unsupported timeframe"):
+        charting.candles("TRENDUP", "1m")                        # dropped to keep the server light
 
 
 def test_intraday_needs_the_dhan_feed(seeded_db, monkeypatch):
     monkeypatch.setattr(core, "dhan_configured", lambda: False)
     with pytest.raises(ApiError) as err:
-        charting.candles("TRENDUP", "5m")
+        charting.candles("TRENDUP", "15m")
     assert err.value.status_code == 503 and "Daily" in err.value.message
-    assert charting.available_timeframes() == ["1D", "1W", "1M"]
+    assert charting.available_timeframes() == ["1D", "1W"]
 
 
 # -------------------------------------------------------------- intraday
@@ -86,28 +87,21 @@ def fake_dhan(seeded_db, monkeypatch):
     return calls
 
 
-def test_thirty_minute_bars_are_built_from_fifteen(fake_dhan):
-    out = charting.candles("TRENDUP", "30m")
+def test_fifteen_minute_bars_keep_india_time(fake_dhan):
+    out = charting.candles("TRENDUP", "15m")
     day = [c for c in out["candles"] if pd.Timestamp(c["time"], unit="s").date() == pd.Timestamp("2026-09-25").date()]
     first = pd.Timestamp(day[0]["time"], unit="s")
     assert (first.hour, first.minute) == (9, 15)                  # India time on the axis
-    assert len(day) == 13                                         # 09:15 ... 15:15
-    assert day[0]["open"] == 100 and day[0]["close"] == 101.5 and day[0]["volume"] == 20
+    assert len(day) == 25                                         # 09:15 ... 15:15
     assert fake_dhan[0][1] == "15"
 
 
-def test_four_hour_bars_split_the_session_in_two(fake_dhan):
-    day = [c for c in charting.candles("TRENDUP", "4H")["candles"]
-           if pd.Timestamp(c["time"], unit="s").date() == pd.Timestamp("2026-09-25").date()]
-    assert [pd.Timestamp(c["time"], unit="s").strftime("%H:%M") for c in day] == ["09:15", "13:15"]
-
-
 def test_intraday_pages_are_cached_and_walk_back(fake_dhan):
-    first = charting.candles("TRENDUP", "5m")
-    charting.candles("TRENDUP", "5m")
+    first = charting.candles("TRENDUP", "1H")
+    charting.candles("TRENDUP", "1H")
     assert len(fake_dhan) == 1                                    # the second view is served from memory
     assert first["has_more"] and first["next_before"]
-    older = charting.candles("TRENDUP", "5m", before=first["next_before"])
+    older = charting.candles("TRENDUP", "1H", before=first["next_before"])
     assert older["candles"][-1]["time"] < first["candles"][0]["time"]
 
 
@@ -136,13 +130,10 @@ def test_one_dhan_quote_serves_every_viewer(seeded_db, monkeypatch):
     assert a["source"] == "LIVE" and a["change"] == pytest.approx(2.4)
 
 
-def test_the_stream_sends_the_quote_and_ends_when_the_market_is_closed(client, monkeypatch):
-    monkeypatch.setattr(core, "dhan_configured", lambda: False)
-    monkeypatch.setattr(core, "nse_market_is_open", lambda *a, **k: False)
-    with client.stream("GET", "/api/v1/stocks/TRENDUP/stream") as response:
-        assert response.status_code == 200
-        body = "".join(response.iter_text())
-    assert body.startswith("data: {") and "event: closed" in body
+def test_live_route_and_no_stream(client):
+    r = client.get("/api/v1/stocks/TRENDUP/live")
+    assert r.status_code == 200 and r.json()["ltp"] > 0
+    assert client.get("/api/v1/stocks/TRENDUP/stream").status_code == 404
 
 
 def test_candles_route(client):

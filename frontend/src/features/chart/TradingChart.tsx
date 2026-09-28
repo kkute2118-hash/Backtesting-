@@ -8,39 +8,30 @@ import {
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 
 import { INTRADAY, TF_SECONDS, type LiveQuote, type Timeframe } from "./data";
-import {
-  bollinger, ema, macd, rsi, sma, supertrend, supportResistance, vwap,
-  type Bar, type Series,
-} from "./indicators";
+import { ema, rsi, sma, supportResistance, type Bar, type Series } from "./indicators";
 
 // ------------------------------------------------------------------ config
+// Kept to what the strategies read: trend (moving averages), momentum (RSI)
+// and volume. Everything is computed in the browser, and only when switched on.
 export interface IndicatorConfig {
   volume: { on: boolean };
   sma: { on: boolean; period: number };
   ema: { on: boolean; period: number };
-  vwap: { on: boolean; period: number };
-  bb: { on: boolean; period: number; mult: number };
-  supertrend: { on: boolean; period: number; mult: number };
   rsi: { on: boolean; period: number };
-  macd: { on: boolean; fast: number; slow: number; signal: number };
 }
 
 export const DEFAULT_INDICATORS: IndicatorConfig = {
   volume: { on: true },
-  sma: { on: false, period: 20 },
+  sma: { on: false, period: 200 },
   ema: { on: true, period: 50 },
-  vwap: { on: false, period: 20 },
-  bb: { on: false, period: 20, mult: 2 },
-  supertrend: { on: false, period: 10, mult: 3 },
   rsi: { on: false, period: 14 },
-  macd: { on: false, fast: 12, slow: 26, signal: 9 },
 };
 
-export type DrawTool = "cursor" | "hline" | "trend" | "vline";
+export type DrawTool = "cursor" | "hline" | "trend";
 
 interface Drawing {
   id: string;
-  kind: "hline" | "trend" | "vline";
+  kind: "hline" | "trend";
   a: { time: number; price: number };
   b?: { time: number; price: number };
 }
@@ -54,9 +45,8 @@ export interface TradingChartHandle {
 
 const IST = 19_800;
 const COLORS = {
-  up: "#22c55e", down: "#ef4444", sma: "#f59e0b", ema: "#3b82f6", vwap: "#a855f7",
-  bb: "#64748b", stUp: "#22c55e", stDown: "#ef4444", rsi: "#8b5cf6", macd: "#3b82f6",
-  signal: "#f59e0b", draw: "#f59e0b", support: "#22c55e", resistance: "#ef4444",
+  up: "#22c55e", down: "#ef4444", sma: "#f59e0b", ema: "#3b82f6", rsi: "#8b5cf6",
+  draw: "#f59e0b", support: "#22c55e", resistance: "#ef4444",
 };
 
 const t = (sec: number) => sec as UTCTimestamp;
@@ -81,19 +71,13 @@ function mergeLive(server: Bar[], q: LiveQuote | null, tf: Timeframe, state: Liv
   const ltp = q.ltp;
   let bucket: number;
   if (tf === "1D") bucket = day;
-  else if (tf === "1W" || tf === "1M") {
-    const d = new Date(last.time * 1000);
-    const n = new Date(day * 1000);
-    const same = tf === "1M"
-      ? d.getUTCFullYear() === n.getUTCFullYear() && d.getUTCMonth() === n.getUTCMonth()
-      : Math.floor((day / 86_400 + 3) / 7) === Math.floor((last.time / 86_400 + 3) / 7);   // weeks from Monday
+  else if (tf === "1W") {
+    const same = Math.floor((day / 86_400 + 3) / 7) === Math.floor((last.time / 86_400 + 3) / 7);   // weeks from Monday
     bucket = same ? last.time : day;
   } else {
     const open = day + 9 * 3600 + 15 * 60;
     if (nowWall < open) return bars;
-    bucket = tf === "4H"
-      ? (nowWall < day + 13 * 3600 + 15 * 60 ? open : day + 13 * 3600 + 15 * 60)
-      : open + Math.floor((nowWall - open) / TF_SECONDS[tf]) * TF_SECONDS[tf];
+    bucket = open + Math.floor((nowWall - open) / TF_SECONDS[tf]) * TF_SECONDS[tf];
   }
   const dayVol = q.volume ?? 0;
   const delta = state.cumVol === null ? 0 : Math.max(0, dayVol - state.cumVol);
@@ -143,7 +127,6 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
 ) {
   const mainEl = useRef<HTMLDivElement>(null);
   const rsiEl = useRef<HTMLDivElement>(null);
-  const macdEl = useRef<HTMLDivElement>(null);
   const svgEl = useRef<SVGSVGElement>(null);
   const legendEl = useRef<HTMLDivElement>(null);
 
@@ -153,14 +136,13 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const overlays = useRef<Record<string, ISeriesApi<"Line">>>({});
   const rsiChart = useRef<IChartApi | null>(null);
   const rsiSeries = useRef<ISeriesApi<"Line"> | null>(null);
-  const macdChart = useRef<IChartApi | null>(null);
-  const macdSeries = useRef<{ line: ISeriesApi<"Line">; signal: ISeriesApi<"Line">; hist: ISeriesApi<"Histogram"> } | null>(null);
   const levelLines = useRef<IPriceLine[]>([]);
   const drawLines = useRef<Record<string, IPriceLine>>({});
 
   const shown = useRef<Bar[]>([]);               // what the chart currently holds, live bar included
   const liveState = useRef<LiveState>({ key: "", cumVol: null, bar: null });
   const pending = useRef<{ time: number; price: number } | null>(null);
+  const redrawFrame = useRef(0);
   const moreRef = useRef({ hasMore, loadingOlder, onNeedOlder });
   moreRef.current = { hasMore, loadingOlder, onNeedOlder };
   const toolRef = useRef({ tool, onToolDone });
@@ -203,7 +185,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const onRange = (range: LogicalRange | null) => {
       const m = moreRef.current;
       if (range && range.from < 15 && m.hasMore && !m.loadingOlder) m.onNeedOlder();
-      redrawSvg();
+      scheduleRedraw();
     };
     c.timeScale().subscribeVisibleLogicalRangeChange(onRange);
     c.subscribeCrosshairMove(onCrosshair);
@@ -212,6 +194,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     // end point of a trend line drawn at speed.
     let down: { x: number; y: number } | null = null;
     const onDown = (e: PointerEvent) => { down = { x: e.clientX, y: e.clientY }; };
+    // Dragging the price axis rescales without moving the time range: follow it.
+    const onMove = (e: PointerEvent) => { if (e.buttons) scheduleRedraw(); };
     const onUp = (e: PointerEvent) => {
       const start = down;
       down = null;
@@ -221,13 +205,18 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     };
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("pointerup", onUp);
-    const ro = new ResizeObserver(() => redrawSvg());
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("wheel", scheduleRedraw, { passive: true });
+    const ro = new ResizeObserver(() => scheduleRedraw());
     ro.observe(el);
     return () => {
       ro.disconnect();
       c.unsubscribeCrosshairMove(onCrosshair);
       el.removeEventListener("pointerdown", onDown);
       el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("wheel", scheduleRedraw);
+      cancelAnimationFrame(redrawFrame.current);
       c.timeScale().unsubscribeVisibleLogicalRangeChange(onRange);
       c.remove();
       chart.current = null;
@@ -265,35 +254,25 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     rsiSeries.current = p.addLineSeries({ color: COLORS.rsi, lineWidth: 1, priceLineVisible: false });
     rsiSeries.current.createPriceLine({ price: 70, color: "#64748b", lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: "" });
     rsiSeries.current.createPriceLine({ price: 30, color: "#64748b", lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false, title: "" });
-    syncPane(p);
-    return () => { p.remove(); rsiChart.current = null; rsiSeries.current = null; };
+    const unsync = syncPane(p);
+    if (shown.current.length) paintIndicators(shown.current, false);
+    return () => { unsync(); p.remove(); rsiChart.current = null; rsiSeries.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [indicators.rsi.on, makePane, symbol, tf]);
 
-  useEffect(() => {
-    if (!indicators.macd.on || !macdEl.current) return;
-    const p = makePane(macdEl.current);
-    macdChart.current = p;
-    macdSeries.current = {
-      hist: p.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false }),
-      line: p.addLineSeries({ color: COLORS.macd, lineWidth: 1, priceLineVisible: false }),
-      signal: p.addLineSeries({ color: COLORS.signal, lineWidth: 1, priceLineVisible: false }),
-    };
-    syncPane(p);
-    return () => { p.remove(); macdChart.current = null; macdSeries.current = null; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indicators.macd.on, makePane, symbol, tf]);
-
+  /** Keep the pane scrolled with the price chart; returns the unsubscribe. */
   function syncPane(p: IChartApi) {
     const c = chart.current;
-    if (!c) return;
+    if (!c) return () => undefined;
     const range = c.timeScale().getVisibleLogicalRange();
     if (range) p.timeScale().setVisibleLogicalRange(range);
-    c.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+    const follow = (r: LogicalRange | null) => {
       if (r) {
         try { p.timeScale().setVisibleLogicalRange(r); } catch { /* pane already removed */ }
       }
-    });
+    };
+    c.timeScale().subscribeVisibleLogicalRangeChange(follow);
+    return () => { try { c.timeScale().unsubscribeVisibleLogicalRangeChange(follow); } catch { /* chart gone */ } };
   }
 
   // ------------------------------------------------------------ the data
@@ -316,6 +295,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       shown.current = data;
       paintIndicators(data, true);
       updateLegend(null);
+      scheduleRedraw();                        // autoscale may have moved the price axis
       return;
     }
 
@@ -394,31 +374,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const cfg = indicators;
     if (cfg.sma.on) put(lineSeries("sma", COLORS.sma), sma(close, cfg.sma.period), data, lastOnly); else dropSeries("sma");
     if (cfg.ema.on) put(lineSeries("ema", COLORS.ema), ema(close, cfg.ema.period), data, lastOnly); else dropSeries("ema");
-    if (cfg.vwap.on) put(lineSeries("vwap", COLORS.vwap, 1, LineStyle.Dotted), vwap(data, intraday, cfg.vwap.period), data, lastOnly); else dropSeries("vwap");
-    if (cfg.bb.on) {
-      const b = bollinger(close, cfg.bb.period, cfg.bb.mult);
-      put(lineSeries("bbU", COLORS.bb, 1, LineStyle.Dashed), b.upper, data, lastOnly);
-      put(lineSeries("bbM", COLORS.bb), b.mid, data, lastOnly);
-      put(lineSeries("bbL", COLORS.bb, 1, LineStyle.Dashed), b.lower, data, lastOnly);
-    } else { dropSeries("bbU"); dropSeries("bbM"); dropSeries("bbL"); }
-    if (cfg.supertrend.on) {
-      const st = supertrend(data, cfg.supertrend.period, cfg.supertrend.mult);
-      // One series, coloured per point: green below price in an uptrend, red above it in a downtrend.
-      const s = lineSeries("st", COLORS.stUp, 2);
-      if (lastOnly) {
-        const i = data.length - 1;
-        if (st.line[i] !== null) s.update({ time: t(data[i].time), value: st.line[i] as number, color: st.up[i] ? COLORS.stUp : COLORS.stDown });
-      } else {
-        s.setData(st.line.flatMap((v, i) => (v === null ? [] : [{ time: t(data[i].time), value: v, color: st.up[i] ? COLORS.stUp : COLORS.stDown }])));
-      }
-    } else dropSeries("st");
     if (cfg.rsi.on) put(rsiSeries.current, rsi(close, cfg.rsi.period), data, lastOnly);
-    if (cfg.macd.on && macdSeries.current) {
-      const m = macd(close, cfg.macd.fast, cfg.macd.slow, cfg.macd.signal);
-      put(macdSeries.current.line, m.line, data, lastOnly);
-      put(macdSeries.current.signal, m.signal, data, lastOnly);
-      put(macdSeries.current.hist, m.hist, data, lastOnly, (i) => ((m.hist[i] ?? 0) >= 0 ? "rgba(34,197,94,0.55)" : "rgba(239,68,68,0.55)"));
-    }
   }
 
   function paintLevels(data: Bar[]) {
@@ -469,8 +425,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   function onCrosshair(param: MouseEventParams) {
     updateLegend(param);
     const time = param.time;
-    for (const [p, s] of [[rsiChart.current, rsiSeries.current], [macdChart.current, macdSeries.current?.line]] as const) {
-      if (!p || !s) continue;
+    const p = rsiChart.current;
+    const s = rsiSeries.current;
+    if (p && s) {
       try {
         if (time === undefined) p.clearCrosshairPosition();
         else p.setCrosshairPosition(0, time as Time, s);
@@ -514,7 +471,6 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const at = { time, price };
     const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     if (current === "hline") drawings.current.push({ id, kind: "hline", a: at });
-    else if (current === "vline") drawings.current.push({ id, kind: "vline", a: at });
     else if (current === "trend") {
       if (!pending.current) { pending.current = at; redrawSvg(); return; }
       drawings.current.push({ id, kind: "trend", a: pending.current, b: at });
@@ -532,13 +488,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     if (!svg || !c || !cs) return;
     const x = (time: number) => c.timeScale().timeToCoordinate(t(time));
     const y = (price: number) => cs.priceToCoordinate(price);
-    const h = svg.clientHeight;
     const parts: string[] = [];
     for (const d of drawings.current) {
-      if (d.kind === "vline") {
-        const xx = x(d.a.time);
-        if (xx !== null) parts.push(`<line x1="${xx}" x2="${xx}" y1="0" y2="${h}" stroke="${COLORS.draw}" stroke-width="1"/>`);
-      } else if (d.kind === "trend" && d.b) {
+      if (d.kind === "trend" && d.b) {
         const [x1, y1, x2, y2] = [x(d.a.time), y(d.a.price), x(d.b.time), y(d.b.price)];
         if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
           parts.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${COLORS.draw}" stroke-width="1.5"/>`);
@@ -553,13 +505,12 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     svg.innerHTML = parts.join("");
   }
 
-  // Redraw drawings when the price scale moves too (autoscale on scroll).
-  useEffect(() => {
-    let raf = 0;
-    const loop = () => { redrawSvg(); raf = requestAnimationFrame(loop); };
-    if (drawings.current.some((d) => d.kind !== "hline") || pending.current) raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  });
+  // Trend lines are an SVG overlay: redraw them only when the view moved, at
+  // most once a frame, instead of on every animation frame.
+  function scheduleRedraw() {
+    if (redrawFrame.current) return;
+    redrawFrame.current = requestAnimationFrame(() => { redrawFrame.current = 0; redrawSvg(); });
+  }
 
   // --------------------------------------------------------------- handle
   useImperativeHandle(ref, () => ({
@@ -603,12 +554,6 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         <div className="relative h-24 shrink-0 border-t border-line sm:h-28">
           <span className={paneLabel}>RSI {indicators.rsi.period}</span>
           <div ref={rsiEl} className="absolute inset-0" />
-        </div>
-      ) : null}
-      {indicators.macd.on ? (
-        <div className="relative h-24 shrink-0 border-t border-line sm:h-28">
-          <span className={paneLabel}>MACD {indicators.macd.fast} {indicators.macd.slow} {indicators.macd.signal}</span>
-          <div ref={macdEl} className="absolute inset-0" />
         </div>
       ) : null}
     </div>

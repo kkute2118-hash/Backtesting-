@@ -3,11 +3,14 @@
 One place decides where each timeframe comes from, so the chart never asks
 for more than it shows:
 
-  1D / 1W / 1M   the stored daily candles (1W and 1M built from them). No
-                 Dhan call; the same bars the scanner and backtests read.
-  1m ... 4H      Dhan's intraday candles, fetched per window on demand and
-                 never written to the database. 30m is built from 15m and
-                 4H from 1H, because Dhan serves 1, 5, 15, 25 and 60 minutes.
+  1D / 1W       the stored daily candles (1W built from them). No Dhan
+                 call; the same bars the scanner and backtests read.
+  15m / 1H       Dhan's intraday candles, for timing an entry the daily
+                 scan found; fetched per window on demand and never written
+                 to the database.
+
+Only these four, on purpose: the strategies trade daily bars, and every
+extra timeframe is more Dhan requests and memory on a small server.
 
 Every response is one page of bars ending before `before` (or now), with the
 cursor for the next older page, so the chart loads the recent past first and
@@ -18,7 +21,8 @@ Times are epoch seconds of the India wall clock (IST read as UTC). The chart
 library draws UTC, so this is what makes its axis read 09:15, not 03:45.
 
 The live quote is cached for LIVE_TTL_SECONDS across every viewer, so ten
-open charts on one stock cost one Dhan request every two seconds, not ten.
+open charts on one stock cost one Dhan request every five seconds, not ten.
+The chart polls it; there is no held-open stream per viewer.
 """
 
 from __future__ import annotations
@@ -36,19 +40,15 @@ from app.engine import core
 from app.services.stocks import _history, _normalise
 
 IST_OFFSET = 19_800                     # seconds east of UTC
-DAILY = ("1D", "1W", "1M")
-INTRADAY = {                            # tf: (Dhan interval, resample rule, days per page, max days back)
-    "1m": ("1", None, 5, 60),
-    "5m": ("5", None, 25, 180),
-    "15m": ("15", None, 60, 365),
-    "30m": ("15", "30min", 60, 365),
-    "1H": ("60", None, 90, 730),
-    "4H": ("60", "4h", 90, 730),
+DAILY = ("1D", "1W")
+INTRADAY = {                            # tf: (Dhan interval, days per page, max days back)
+    "15m": ("15", 30, 180),
+    "1H": ("60", 90, 365),
 }
-TIMEFRAMES = ("1m", "5m", "15m", "30m", "1H", "4H", "1D", "1W", "1M")
-DAILY_PAGE_BARS = {"1D": 600, "1W": 400, "1M": 240}
-PAST_TTL, TODAY_TTL, LIVE_TTL_SECONDS = 86_400.0, 30.0, 2.0
-CACHE_MAX = 256
+TIMEFRAMES = ("15m", "1H", "1D", "1W")
+DAILY_PAGE_BARS = {"1D": 400, "1W": 260}
+PAST_TTL, TODAY_TTL, LIVE_TTL_SECONDS = 86_400.0, 60.0, 5.0
+CACHE_MAX = 128
 
 _cache: dict[tuple, tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
@@ -126,8 +126,6 @@ def _daily_page(sym: str, tf: str, before: pd.Timestamp | None) -> dict[str, Any
     df = df[["open", "high", "low", "close", "volume"]].astype(float)
     if tf == "1W":
         df = _ohlc(df, df.index.to_period("W-FRI"))
-    elif tf == "1M":
-        df = _ohlc(df, df.index.to_period("M"))
     if before is not None:
         df = df[df.index < before]
     n = DAILY_PAGE_BARS[tf]
@@ -162,10 +160,10 @@ def dhan_intraday(sym: str, interval: str, start: datetime, end: datetime) -> pd
 def _intraday_page(sym: str, tf: str, before: pd.Timestamp | None) -> dict[str, Any]:
     if not intraday_available():
         raise ApiError("Intraday charts need the Dhan data feed, which is not configured on this "
-                       "server. Daily, weekly and monthly charts still work.",
+                       "server. Daily and weekly charts still work.",
                        status_code=503, code="not_configured")
     _history(sym, lookback_days=30)                     # unknown symbol -> 404 before any Dhan call
-    interval, rule, days, max_back = INTRADAY[tf]
+    interval, days, max_back = INTRADAY[tf]
     now = core.market_now().replace(tzinfo=None)
     end = min(before.to_pydatetime(), now) if before is not None else now
     # Windows start at midnight, so one page ends exactly where the next begins.
@@ -190,16 +188,9 @@ def _intraday_page(sym: str, tf: str, before: pd.Timestamp | None) -> dict[str, 
     df = raw[raw.index >= pd.Timestamp(start)]
     if before is not None:
         df = df[df.index < before]
-    if rule == "30min" and len(df):
-        # Session-anchored half hours: 09:15, 09:45, ... (NSE opens at 09:15).
-        df = _ohlc(df, (df.index - pd.Timedelta(minutes=15)).floor("30min"))
-    elif rule == "4h" and len(df):
-        # Two bars a session: 09:15-13:14 and 13:15-15:30.
-        minutes = df.index.hour * 60 + df.index.minute
-        df = _ohlc(df, df.index.normalize().astype(str) + np.where(minutes >= 13 * 60 + 15, "b", "a"))
     return {"candles": _bars(df), "has_more": start > floor,
             "next_before": int(pd.Timestamp(start).value // 1_000_000_000) if start > floor else None,
-            "source": f"Dhan intraday ({interval} min{', combined' if rule else ''})"}
+            "source": f"Dhan intraday ({interval} min)"}
 
 
 def candles(symbol: str, tf: str = "1D", before: str | int | None = None) -> dict[str, Any]:
