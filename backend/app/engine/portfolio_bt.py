@@ -114,20 +114,26 @@ def collect_trades(data, start, end, strategies=("S4_SEPA", "S5_POCKETPIVOT", "S
                 "exit_date": t["Exit Date"], "exit": t["Exit"], "exit_reason": t["Exit Reason"],
                 "rank_key": t["atr_pct"]}))
 
-    if "S4_SEPA" in strategies:
-        t = core.run_raw_signal_backtest(long_data, [4], start, end)
-        if len(t):
-            ranks = core.sector_rank_history() if apply_entry_filter else None
-            lookup = core.sector_map(source="index") if apply_entry_filter else None
-            keep = [is_eligible(s, d) and (not apply_entry_filter or core.historical_entry_verdict(
-                        4, long_data[s], d, sector_ranks=ranks, sector_lookup=lookup, ticker=s)[0])
-                    for s, d in zip(t["ticker"], t["signal_date"])]
-            t = t[keep]
-            frames.append(pd.DataFrame({
-                "strategy": "S4_SEPA", "symbol": t["ticker"].map(_norm), "signal_date": t["signal_date"],
-                "entry_date": t["entry_date"], "entry": t["entry"], "stop": t["stop"],
-                "exit_date": t["exit_date"], "exit": t["exit_price"], "exit_reason": t["outcome"],
-                "rank_key": t["atr_pct"]}))
+    # S1-S4 share the raw-signal replay; S1-S3 are retired from the scanner but
+    # kept here for research, with the ATR entry filter they ran under live.
+    raw = [k for k in (1, 2, 3, 4) if core.strategy_label_for(k) in strategies]
+    ranks = lookup = None
+    if 4 in raw and apply_entry_filter:
+        ranks = core.sector_rank_history()
+        lookup = core.sector_map(source="index")
+    for k in raw:
+        t = core.run_raw_signal_backtest(long_data, [k], start, end)
+        if not len(t):
+            continue
+        keep = [is_eligible(s, d) and (not apply_entry_filter or core.historical_entry_verdict(
+                    k, long_data[s], d, sector_ranks=ranks, sector_lookup=lookup, ticker=s)[0])
+                for s, d in zip(t["ticker"], t["signal_date"])]
+        t = t[keep]
+        frames.append(pd.DataFrame({
+            "strategy": core.strategy_label_for(k), "symbol": t["ticker"].map(_norm),
+            "signal_date": t["signal_date"], "entry_date": t["entry_date"], "entry": t["entry"],
+            "stop": t["stop"], "exit_date": t["exit_date"], "exit": t["exit_price"],
+            "exit_reason": t["outcome"], "rank_key": t["atr_pct"]}))
 
     if not frames:
         return pd.DataFrame(columns=TRADE_COLUMNS)
@@ -178,7 +184,8 @@ def _stats(equity, fills, capital):
 
 def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
                   max_positions=10, position_cap_pct=25.0, costs=IndianDeliveryCosts(),
-                  start=None, end=None, priority=("S4_SEPA", "S5_POCKETPIVOT", "S6_BREAKOUT")):
+                  start=None, end=None, priority=("S4_SEPA", "S5_POCKETPIVOT", "S6_BREAKOUT"),
+                  leverage=1.0, margin_interest_pct=12.5, pledge_fee=20.0):
     """Replay `trades` through an account.
 
     buckets:  {strategy: fraction of capital} for separate money per strategy,
@@ -191,7 +198,15 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
     Fills:    at the trade's own entry and exit prices, worsened by slippage,
               plus the charges in `costs`.
     `closes`: DataFrame dates x symbols of daily closes, for marking to market.
+    Margin (MTF): `leverage` > 1 lets the bucket borrow up to (leverage - 1) x
+              its value; risk and the position cap scale with it (2x risks
+              2% where 1x risks 1%). Interest of `margin_interest_pct` a year
+              is charged daily on the borrowed cash, and `pledge_fee` per buy.
+              Margin calls are not modelled: a bucket whose value reaches zero
+              stops trading, and max_drawdown_pct shows how close it came.
+              leverage=1 is exactly the cash account.
     """
+    lev = max(1.0, float(leverage))
     closes = closes.sort_index()
     dates = closes.index
     if start is not None:
@@ -211,6 +226,8 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
               for d, g in t.groupby("entry_date")}
     slip = costs.slippage_pct / 100
     eq_rows = []
+    interest_paid = 0.0
+    prev_day = None
 
     def mark(b, d):
         v = cash[b]
@@ -221,6 +238,15 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
         return v
 
     for d in dates:
+        # interest on borrowed cash, for every calendar day since the last session
+        if lev > 1 and prev_day is not None:
+            days = (d - prev_day).days
+            for b in names:
+                if cash[b] < 0:
+                    charge = -cash[b] * margin_interest_pct / 100 / 365 * days
+                    cash[b] -= charge
+                    interest_paid += charge
+        prev_day = d
         # exits first: a slot freed today can be reused by today's signal
         for b in names:
             for sym in list(open_pos[b]):
@@ -250,16 +276,21 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
             risk_per_share = px - float(r.stop)
             if risk_per_share <= 0:
                 continue
-            budget = min(values[b] * risk_pct / 100 / risk_per_share * px,
-                         values[b] * position_cap_pct / 100, cash[b])
+            if values[b] <= 0:
+                skipped["too_small"] += 1; continue
+            # cash plus what may still be borrowed against the bucket's value
+            room = cash[b] + (lev - 1) * values[b]
+            budget = min(values[b] * risk_pct * lev / 100 / risk_per_share * px,
+                         values[b] * position_cap_pct * lev / 100, room)
             qty = int(budget // px)
-            # whole shares, and the buy charges must fit in the cash on hand too
-            while qty >= 1 and qty * px + costs.buy(qty * px) > cash[b]:
+            extra = pledge_fee if lev > 1 else 0.0
+            # whole shares, and the buy charges must fit in the buying power too
+            while qty >= 1 and qty * px + costs.buy(qty * px) + extra > room:
                 qty -= 1
             if qty < 1:
                 skipped["too_small"] += 1; continue
             value = qty * px
-            fee = costs.buy(value)
+            fee = costs.buy(value) + extra
             cash[b] -= value + fee
             open_pos[b][r.symbol] = {"qty": qty, "fill_entry": px, "exit": float(r.exit),
                                      "exit_date": pd.Timestamp(r.exit_date), "last": px,
@@ -283,8 +314,11 @@ def run_portfolio(trades, closes, capital=100_000.0, buckets=None, risk_pct=1.0,
     res = PortfolioResult(equity=equity, bucket_equity=bucket_eq, fills=fills_df, skipped=skipped)
     res.stats = _stats(equity, fills_df, capital)
     res.stats["skipped"] = skipped
+    res.stats["interest_paid"] = round(interest_paid, 2)
     res.stats["settings"] = {"buckets": buckets, "risk_pct": risk_pct, "max_positions": max_positions,
-                             "position_cap_pct": position_cap_pct, "costs": asdict(costs)}
+                             "position_cap_pct": position_cap_pct, "costs": asdict(costs),
+                             "leverage": lev, "margin_interest_pct": margin_interest_pct if lev > 1 else 0,
+                             "pledge_fee": pledge_fee if lev > 1 else 0}
     return res
 
 
