@@ -63,15 +63,30 @@ GitHub job `.github/workflows/daily-forward-test.yml`. Do not run
    - whether prices were live or the last close (`scan.live.reason`).
    Then give the page link.
 
-5. Alert, only when there is something to act on. After a scheduled run
-   (the 15:05 routine), call the PushNotification tool with one line if the
-   JSON has any `scan.signals`, or any `forward.closed` row whose `closed_at`
-   is today, or `scan.live.degraded` is true. Examples:
-   "2 setups: WELCORP S6 buy <=2,840 stop 2,391; MCX S5 ... Page: <link>",
-   "Paper exit: ABDL S3 target +21%", "Prices NOT live: allow api.dhan.co".
-   Keep it under 200 characters, lead with the action. Send nothing on a day
-   with no setups, no exits and live prices: an alert every day stops being
-   read.
+5. Daily phone message: a Google Calendar event. After a scheduled run (the
+   15:05 routine), on every trading day, put one event on the owner's primary
+   calendar (`kkute2118@gmail.com`) with the Google Calendar connector. The
+   Calendar app on the phone shows it as a notification; this is the owner's
+   chosen daily message.
+
+   - Time: 15:10-15:15 IST (`timeZone` "Asia/Kolkata"), `availability`
+     AVAILABILITY_FREE, `overrideReminders` [{"method": "popup", "minutes": 0}],
+     `notificationLevel` NONE.
+   - One event per day: first search today's events for a title starting
+     "ATI scan"; update that event if it exists instead of adding another.
+   - Title (the notification text, under 90 characters), action first:
+     "ATI scan: 2 setups - WELCORP S6 <=2,840 SL 2,391; MCX S5 ...",
+     "ATI scan: exit NIACL S5 -1.0R", "ATI scan: no setups, S6 waiting (breadth 0.11)",
+     "ATI scan: PRICES NOT LIVE - check Dhan".
+   - Description: the step 4 summary as short lines (setups with entry, stop
+     and suggested quantity at 1% risk on Rs 1 lakh; exits today; the three
+     nearest S6 watchlist names; open paper trades; whether prices were live)
+     and the page link.
+   - Also call PushNotification with the same line when there is something to
+     act on (setups, an exit today, or prices not live). It reaches the phone
+     only when Remote Control is connected, so the calendar event is the one
+     that always arrives.
+   - Skip the event on market holidays and weekends (no scan runs then).
 
 ## Answering questions without republishing
 
