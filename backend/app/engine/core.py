@@ -749,21 +749,40 @@ def refresh_mirror_from_backup(force=False):
 # derived cache; dhan_token_cache is a live Dhan credential (it can place
 # orders) and the backup branch is readable by anyone who can read the repo.
 BACKUP_EMPTY_TABLES = ("feature_snapshots", "dhan_token_cache")
+# Tables of research capture runs (run_id per run) of which a backup keeps only
+# the newest run. raw_signal_fingerprints held three runs, 103 MB raw: two of
+# the same study recorded twice, both before the point-in-time fix, so their
+# features carry look-ahead. Every reader already uses the newest run by
+# default. Dropping the older ones took the backup from 83 to 64 MB, well
+# inside GitHub's 100 MB file limit with 2,000 stocks stored. The older runs
+# stay in the db-backup branch's history.
+BACKUP_NEWEST_RUN_ONLY = ("raw_signal_fingerprints",)
+
+
+def trim_backup_copy(con):
+    """Shrink an open connection to a database COPY for backup: empty
+    BACKUP_EMPTY_TABLES and keep the newest run of BACKUP_NEWEST_RUN_ONLY.
+    Tables are kept, so a restore still has the schema. Caller commits and
+    vacuums. Never call it on the live database."""
+    present = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in BACKUP_EMPTY_TABLES:
+        if table in present:
+            con.execute(f'DELETE FROM "{table}"')
+    for table in BACKUP_NEWEST_RUN_ONLY:
+        if table in present:
+            con.execute(f'DELETE FROM "{table}" WHERE run_id IS NULL OR run_id < '
+                        f'(SELECT MAX(run_id) FROM "{table}")')
 
 
 def _drop_derived_cache(path):
-    """Empty BACKUP_EMPTY_TABLES in a database COPY and compact it.
+    """Trim a database COPY for backup (trim_backup_copy) and compact it.
 
-    The scheduled job's staging does the same (daily_job.BACKUP_SKIP_TABLES).
-    The tables are kept, empty, so a restore still has the schema.
+    The scheduled job's staging does the same (daily_job._stage_backup).
     """
     con = sqlite3.connect(path)
     try:
-        present = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        for table in BACKUP_EMPTY_TABLES:
-            if table in present:
-                con.execute(f'DELETE FROM "{table}"')
+        trim_backup_copy(con)
         con.commit()
         con.execute("VACUUM")
     finally:

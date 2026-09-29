@@ -99,3 +99,37 @@ def test_warm_up_writes_the_snapshots_a_scan_reuses(monkeypatch):
     assert progress and progress[-1] == 1.0
     # The scan passes the same frame; the stored snapshot must count as a match.
     assert core._snapshot_matches(saved["AAA.NS"], frames["AAA.NS"])
+
+
+def test_a_backup_keeps_only_the_newest_capture_run(tmp_path, monkeypatch):
+    """Old research capture runs are dropped from both backup paths, which is
+    what keeps the backup under GitHub's 100 MB file limit. The live database
+    keeps them."""
+    import daily_job
+    path = tmp_path / "db.sqlite3"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE raw_signal_fingerprints(id INTEGER, run_id INTEGER, ticker TEXT)")
+    con.executemany("INSERT INTO raw_signal_fingerprints VALUES (?,?,?)",
+                    [(i, 1 + i % 3, f"OLDRUN{i}" if i % 3 != 2 else f"NEWRUN{i}") for i in range(30)])
+    con.execute("CREATE TABLE forward_tests(id INTEGER)")
+    con.execute("INSERT INTO forward_tests VALUES (1)")
+    con.commit()
+    con.close()
+
+    copy = tmp_path / "copy.sqlite3"
+    copy.write_bytes(path.read_bytes())
+    core._drop_derived_cache(str(copy))
+    con = sqlite3.connect(copy)
+    assert {r[0] for r in con.execute("SELECT DISTINCT run_id FROM raw_signal_fingerprints")} == {3}
+    assert con.execute("SELECT COUNT(*) FROM forward_tests").fetchone()[0] == 1
+    con.close()
+
+    monkeypatch.setattr(core, "DATA_DB", str(path))
+    stage = tmp_path / "stage.gz"
+    daily_job._stage_backup(str(stage))
+    import gzip
+    raw = gzip.open(stage).read()
+    assert b"NEWRUN" in raw and b"OLDRUN" not in raw
+    live = sqlite3.connect(path)
+    assert live.execute("SELECT COUNT(*) FROM raw_signal_fingerprints").fetchone()[0] == 30
+    live.close()

@@ -53,6 +53,15 @@ if git -C "$work" diff --quiet -- "$DEST_PATH" 2>/dev/null && \
 fi
 
 size_mb=$(awk "BEGIN{printf \"%.1f\", $(stat -c%s "$BACKUP_STAGE_PATH") / 1048576}")
+# GitHub refuses any file over 100 MB. Fail with a message that says so before
+# the push does, and warn while there is still room to act.
+if awk "BEGIN{exit !($size_mb >= 99)}"; then
+  echo "::error title=Database backup too large::${size_mb} MB compressed; GitHub rejects files over 100 MB. Trim the backup (core.trim_backup_copy) before the next run."
+  exit 1
+fi
+if awk "BEGIN{exit !($size_mb >= 90)}"; then
+  echo "::warning title=Database backup near GitHub's limit::${size_mb} MB compressed of 100 MB. Trim it soon (core.trim_backup_copy)."
+fi
 git -C "$work" add "$DEST_PATH"
 git -C "$work" commit --quiet -m "Auto-backup DB $(date -u +%Y-%m-%dT%H:%M:%SZ) (${size_mb} MB compressed)"
 

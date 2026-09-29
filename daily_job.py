@@ -468,11 +468,7 @@ def _stage_backup(stage_path):
         shutil.copyfile(core.DATA_DB, work)
         con = sqlite3.connect(work)
         try:
-            present = {r[0] for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
-            for table in BACKUP_SKIP_TABLES:
-                if table in present:
-                    con.execute(f'DELETE FROM "{table}"')
+            core.trim_backup_copy(con)   # BACKUP_SKIP_TABLES emptied, old capture runs dropped
             con.commit()
             con.execute("VACUUM")      # otherwise the freed pages ride along anyway
         finally:
