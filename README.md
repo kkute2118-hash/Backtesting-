@@ -15,8 +15,8 @@ permissions.** A setup score ranks quality; it is not a probability of profit.
 
 ## How it runs now (September 2026)
 
-No web server is needed for daily use. Render is retired: its free plan slept
-after 15 idle minutes and was killed for exceeding 512 MB.
+No web server is needed for daily use. The web app runs on an Oracle Cloud
+Always Free server (`deploy/oracle/`); Render is no longer used.
 
 | When (IST, trading days) | What | Where |
 |---|---|---|
@@ -114,22 +114,12 @@ latest sessions* daily thereafter.
 
 ## 🚀 Deploying it
 
-Two processes, so two hosts — or one machine running both. Streamlit Cloud
-cannot serve this; it only runs `streamlit run`.
-
-`render.yaml` and `frontend/vercel.json` are in the repository, so both are
-connect-and-deploy; `docker-compose.yml` covers a single VPS.
-
-`render.yaml` targets Render's **free** plan, which has no persistent disk and
-sleeps when idle. The app handles that by treating the GitHub backup as its
-disk: it restores the whole database on every cold start and pushes it back
-after a sync. That makes `GH_BACKUP_TOKEN`, `GH_REPO` and `DB_BACKUP_BRANCH`
-**mandatory** there — without them, every sleep loses your candles, forward
-tests and accumulated learning. A paid instance with a real disk removes both
-the dependency and the sleep.
-
-**Step-by-step, including the order the two URLs have to be wired together:
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).**
+The web app runs on one Oracle Cloud Always Free server (`deploy/oracle/`),
+which follows `main` and the database backup by itself. `docker-compose.yml`
+runs the same on any other machine with Docker. The database has three
+copies: the `db-backup` branch, the `db-backup` GitHub Release and daily
+snapshots on the Oracle disk.
+**Details: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).**
 
 ---
 

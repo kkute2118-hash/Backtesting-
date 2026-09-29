@@ -19,8 +19,8 @@ stay inside Oracle's **Always Free** allowance, always:
 
 ## How the system runs (read before changing anything operational)
 
-- **Two independent front ends.** Render is retired; do not deploy to it or
-  fix it. The Claude artifact https://claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN,
+- **Two independent front ends.** Render is gone (its config removed from the
+  repository and all credentials removed from its services); never deploy to it. The Claude artifact https://claude.ai/artifact/Dvt7jL3RgXxi4eNw3gc6dN,
   rebuilt by the `/scan` skill, works on its own. The Oracle server
   (`deploy/oracle/`, `ati-lab`, Always Free) runs the web app as a read-only
   mirror that follows the backup and `main` by itself (deploy/oracle/README.md).

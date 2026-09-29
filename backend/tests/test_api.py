@@ -311,7 +311,6 @@ def test_cors_is_not_a_wildcard():
     from app.core.config import Settings
     default = Settings.model_fields["cors_origins"].default
     assert "*" not in default
-    assert "ati-lab.onrender.com" in default
     assert "localhost:3000" in default, "dev must still work"
 
 

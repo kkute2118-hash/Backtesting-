@@ -68,9 +68,9 @@ async function forward(request: NextRequest, path: string[]) {
     });
     const text = await response.text();
     const type = response.headers.get("Content-Type") ?? "application/json";
-    // A 5xx that is not JSON came from Render's edge, not the API: the
-    // instance is waking or restarting. Say that, instead of forwarding an
-    // HTML error page the UI can only report as "Request failed (502)".
+    // A 5xx that is not JSON came from the proxy, not the API: the API is
+    // restarting. Say that, instead of forwarding an HTML error page the UI
+    // can only report as "Request failed (502)".
     if (response.status >= 500 && !type.includes("json")) {
       return NextResponse.json(
         { error: { code: "server_unavailable", message: UNAVAILABLE_MESSAGE } },

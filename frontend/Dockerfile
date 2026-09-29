@@ -1,5 +1,4 @@
-# The frontend as a container. Only needed for self-hosting; Vercel builds this
-# project from source without a Dockerfile.
+# The frontend as a container (deploy/oracle/docker-compose.yml builds it).
 FROM node:22-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./

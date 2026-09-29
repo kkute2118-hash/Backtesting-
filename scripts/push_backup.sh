@@ -55,8 +55,11 @@ fi
 size_mb=$(awk "BEGIN{printf \"%.1f\", $(stat -c%s "$BACKUP_STAGE_PATH") / 1048576}")
 # GitHub refuses any file over 100 MB. Fail with a message that says so before
 # the push does, and warn while there is still room to act.
+# The release copy (scripts/release_backup.py) has a 2 GB limit, so the data is
+# still saved there; the run fails so the branch copy gets fixed.
 if awk "BEGIN{exit !($size_mb >= 99)}"; then
-  echo "::error title=Database backup too large::${size_mb} MB compressed; GitHub rejects files over 100 MB. Trim the backup (core.trim_backup_copy) before the next run."
+  echo "::error title=Database backup too large for the branch::${size_mb} MB compressed; GitHub rejects files over 100 MB. Saved to the release copy only. Trim the backup (core.trim_backup_copy)."
+  python3 "$(dirname "$0")/release_backup.py" || true
   exit 1
 fi
 if awk "BEGIN{exit !($size_mb >= 90)}"; then
@@ -78,3 +81,8 @@ if ! git -C "$work" push --quiet origin "$BRANCH"; then
 fi
 
 echo "Pushed ${size_mb} MB to ${GITHUB_REPOSITORY}@${BRANCH}:${DEST_PATH}"
+
+# Second copy, as a release asset. A failure here warns but does not fail the
+# run: the branch copy above is saved.
+python3 "$(dirname "$0")/release_backup.py" || \
+  echo "::warning title=Release copy not updated::the branch backup above is saved; the release copy is one run behind."

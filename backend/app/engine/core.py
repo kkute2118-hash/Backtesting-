@@ -394,6 +394,14 @@ GITHUB_BACKUP_PATH = "backups/market_data.sqlite3"
 # existed is not stranded.
 GITHUB_BACKUP_PATH_GZ = GITHUB_BACKUP_PATH + ".gz"
 
+# Second copy: the same file as an asset of the GitHub Release tagged
+# GITHUB_RELEASE_TAG, uploaded by scripts/push_backup.sh after every branch push.
+# A release asset may be up to 2 GB against 100 MB for a file on a branch, so it
+# is the copy that keeps working if the database outgrows the branch. Restore
+# reads the branch first and falls back to it.
+GITHUB_RELEASE_TAG = os.environ.get("DB_RELEASE_TAG", "db-backup")
+GITHUB_RELEASE_ASSET = "market_data.sqlite3.gz"
+
 # Attempts for the upload itself, not for the whole backup: see the retry loop
 # in backup_db_to_github().
 GITHUB_UPLOAD_ATTEMPTS = 3
@@ -902,6 +910,28 @@ def restore_db_from_github(force=False):
                             os.remove(leftover)
                     except OSError:
                         pass
+
+        # The branch copy was missing or unreadable: try the release copy.
+        url = f"https://github.com/{repo}/releases/download/{GITHUB_RELEASE_TAG}/{GITHUB_RELEASE_ASSET}"
+        tmp = f"{DATA_DB}.restore-tmp"
+        dl = f"{tmp}.download"
+        try:
+            status, body = _download_to(url, dl, {"Accept": "application/octet-stream"})
+            if status == 200:
+                with gzip.open(dl, "rb") as fin, open(tmp, "wb") as fout:
+                    shutil.copyfileobj(fin, fout, _STREAM_BLOCK)
+                if os.path.getsize(tmp) > 0:
+                    os.replace(tmp, DATA_DB)
+                    return True
+        except Exception:
+            pass
+        finally:
+            for leftover in (dl, tmp):
+                try:
+                    if os.path.exists(leftover):
+                        os.remove(leftover)
+                except OSError:
+                    pass
 
         # Nothing to restore. Record why so the Data Manager and the scheduled
         # job can report it instead of silently starting from an empty database.

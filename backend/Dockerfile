@@ -1,7 +1,7 @@
-# The backend as a container, for any host that is not Render.
+# The backend as a container (deploy/oracle/docker-compose.yml builds it).
 #
-# Nothing here is Render-specific: it reads the same environment variables as a
-# local run, and it expects DATA_DB to point somewhere that survives a restart.
+# It reads the same environment variables as a local run, and it expects
+# DATA_DB to point somewhere that survives a restart.
 FROM python:3.11-slim
 
 # libgomp is needed by scikit-learn's runtime; curl is used by the healthcheck.

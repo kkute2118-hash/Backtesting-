@@ -1,11 +1,9 @@
 /**
- * Liveness for the Next server itself. Render's health check calls this.
+ * Liveness for the Next server itself.
  *
- * Deliberately says nothing about the API. A health check that failed when
- * the backend was asleep would have Render replace a perfectly healthy web
- * instance for a condition it cannot fix - and on the free plan the backend
- * is asleep most of the time. "Is this server answering?" is the only
- * question this route is allowed to answer.
+ * Deliberately says nothing about the API: a web server should not be
+ * restarted for a condition it cannot fix. "Is this server answering?" is the
+ * only question this route is allowed to answer.
  *
  * force-dynamic and no-store because a cached 200 is not a health check: it
  * would keep reporting success from a process that had stopped working.

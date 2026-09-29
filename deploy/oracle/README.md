@@ -10,7 +10,7 @@ and never competes with them:
   so it cannot overwrite a newer backup with an older copy.
 - **Refreshes only when there is something new.** `MIRROR_REFRESH_MINUTES=10`:
   every 10 minutes the app asks GitHub for the newest backup commit (one small
-  API call). It downloads the ~50 MB backup only after a job has pushed a new
+  API call). It downloads the ~64 MB backup only after a job has pushed a new
   one, about three times a trading day, and swaps it in atomically. Your
   preferences, watchlists and presets (`app_*` tables) and the server's own Dhan
   login are carried over each time.
@@ -21,6 +21,12 @@ and never competes with them:
 - **Updates itself.** `install-updater.sh` installs a systemd timer that runs
   `update.sh` every 6 hours: one `git fetch`, and a rebuild only when `main`
   has changed. It also adds the three settings above to an older `.env`.
+- **Keeps its own daily copies.** `update.sh` also installs
+  `ati-lab-snapshot.timer`: at 03:00 IST, at the lowest CPU and disk priority,
+  `snapshot.sh` writes `/var/backups/ati-lab/market_data-YYYY-MM-DD.sqlite3.gz`
+  (14 daily copies plus the first of each month for 6 months). It is the third
+  copy of the database, after the `db-backup` branch and the `db-backup`
+  GitHub Release (docs/DEPLOYMENT.md).
 
 A server created before this existed needs one command, once:
 
@@ -32,9 +38,8 @@ The Claude page (`/scan`) and the GitHub jobs do not depend on this server at
 all: they keep working whether it is up or down.
 
 Oracle's **Always Free** Ampere server (up to 4 CPU cores and 24 GB of RAM,
-free indefinitely) runs the whole app on one machine. Compared with Render's
-free plan it never sleeps, has a real disk that survives restarts, and has
-roughly 40 times the memory.
+free indefinitely) runs the whole app on one machine. It never sleeps and has
+a real disk that survives restarts.
 
 Everything is started by one script, `cloud-init.sh`, which you paste in while
 creating the server. You need an Oracle Cloud account first
