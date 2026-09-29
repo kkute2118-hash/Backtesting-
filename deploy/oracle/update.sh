@@ -24,6 +24,45 @@ for kv in BACKUP_READONLY=1 MIRROR_REFRESH_MINUTES=10 DHAN_YIELD_TO_JOBS=1; do
   fi
 done
 
+# Daily database snapshots on this server's disk (snapshot.sh), at the lowest
+# CPU and disk priority so the app never waits on them. Installed or refreshed
+# here, before the up-to-date check, so every server gets it within one update
+# cycle without a manual step.
+install_snapshot_timer() {
+  local unit=/etc/systemd/system/ati-lab-snapshot.service
+  local want
+  want="[Unit]
+Description=Daily ATI Lab database snapshot (third copy, on this disk)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$APP_DIR/deploy/oracle/snapshot.sh
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=50%"
+  if [ "$(cat "$unit" 2>/dev/null)" != "$want" ]; then
+    printf '%s\n' "$want" > "$unit"
+    cat > /etc/systemd/system/ati-lab-snapshot.timer <<'UNIT'
+[Unit]
+Description=Daily ATI Lab database snapshot at 03:00 IST
+
+[Timer]
+OnCalendar=*-*-* 21:30:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+    chmod +x "$APP_DIR/deploy/oracle/snapshot.sh"
+    systemctl daemon-reload
+    systemctl enable --now ati-lab-snapshot.timer
+    echo "$(date -u +%FT%TZ) daily snapshot timer installed"
+  fi
+}
+install_snapshot_timer || echo "$(date -u +%FT%TZ) could not install the snapshot timer"
+
 # Fetch with the backup token when there is one, so the update keeps working if
 # the repository is made private; the token is used for this call only and is
 # never written into .git/config.

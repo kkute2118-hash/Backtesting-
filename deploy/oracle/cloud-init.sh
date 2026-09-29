@@ -20,7 +20,7 @@ DHAN_TOTP_SECRET=""
 DHAN_ACCESS_TOKEN=""          # only if you do not use PIN + TOTP
 
 # GitHub backup: the candle store and learning history come back from here on
-# first boot, so the new server starts with everything Render has.
+# first boot, so the new server starts with the latest backup.
 GH_BACKUP_TOKEN=""            # fine-grained token, Contents: read and write
 GH_REPO="kkute2118-hash/Backtesting-"
 DB_BACKUP_BRANCH="db-backup"

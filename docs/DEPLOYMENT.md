@@ -1,283 +1,55 @@
 # Deployment
 
-> **Retired for daily use (Sep 2026).** The system now runs without a web server:
-> GitHub Actions does the data work and a Claude artifact is the dashboard. See
-> "How it runs now" in the README. What follows is kept for the day a live web
-> app is needed again; prefer `deploy/oracle/` (Always Free only) over Render.
+The web app runs on one Oracle Cloud **Always Free** server as a read-only
+mirror: `deploy/oracle/` (see its README for provisioning, the self-update and
+the Always Free limits, which `provision.py` enforces). Render and Vercel are
+no longer used and their configuration has been removed.
 
-The application is two processes, so it needs two hosts (or one machine running
-both). Streamlit Cloud cannot serve it — it only runs `streamlit run`.
-
-| Part | What it needs |
+| Part | Where |
 | --- | --- |
-| `backend/` | Python 3.11, and **a disk that survives a restart** for the SQLite file |
-| `frontend/` | any Next.js host |
+| Data: candles, scans, paper trades, backup | GitHub Actions (`.github/workflows/`), the only writer of the backup |
+| Web app (API + Next.js + Caddy) | Oracle, `deploy/oracle/docker-compose.yml`, follows `main` and the backup by itself |
+| Daily dashboard and alerts | the Claude artifact, rebuilt by the `/scan` skill |
 
-The persistent disk is the part that matters. Candles can be re-synced from
-Dhan in one job; forward tests, resolved outcomes and accumulated learning
-**cannot be rebuilt from anywhere**. Configure the GitHub backup as well, so the
-irreplaceable half survives even losing the disk.
+## The database and its three copies
 
----
+1. **`db-backup` branch**, `backups/market_data.sqlite3.gz`: the primary copy,
+   pushed with git by `scripts/push_backup.sh` after every job. Each push is a
+   separate commit, so any earlier day can be restored from the branch history.
+   GitHub limits a file on a branch to 100 MB; the script warns at 90 MB and
+   refuses at 99 MB. `core.trim_backup_copy` keeps the file small.
+2. **GitHub Release `db-backup`**: the same file, uploaded by
+   `scripts/release_backup.py` right after the branch push, as
+   `market_data.sqlite3.gz` (newest) plus one dated file per day for the last 7
+   days. A release asset may be up to 2 GB, so this copy keeps working if the
+   database outgrows the branch. `core.restore_db_from_github` falls back to it.
+3. **Oracle's own disk**: `deploy/oracle/snapshot.sh`, run daily at 03:00 IST
+   by `ati-lab-snapshot.timer` at the lowest CPU and disk priority, keeps 14
+   daily snapshots and the first of each month for 6 months in
+   `/var/backups/ati-lab/`.
 
-## Recommended: Render + Vercel
+Restore by hand from any of them: download or copy the `.gz`, then
+`gunzip -c market_data….sqlite3.gz > market_data.sqlite3`.
 
-Closest to the push-to-deploy experience Streamlit Cloud gave you. Roughly ten
-minutes, and the order matters — the frontend needs the API's URL, and the API
-needs the frontend's URL.
+## Running it elsewhere
 
-### 1. Backend on Render
+`docker-compose.yml` at the repository root runs the same two processes on
+any machine with Docker. The backend needs a disk that survives a restart for
+the SQLite file (`DATA_DB`), and the GitHub backup settings (`GH_BACKUP_TOKEN`,
+`GH_REPO`, `DB_BACKUP_BRANCH`) to restore it. A mirror sets
+`BACKUP_READONLY=1` so it never writes the backup.
 
-1. <https://dashboard.render.com/blueprints> → **New Blueprint Instance**.
-2. Connect this repository and pick the branch. Render reads `render.yaml` and
-   proposes one web service with a 5 GB disk.
-3. It will prompt for every value marked `sync: false`. Fill in at minimum:
-
-   ```text
-   DHAN_CLIENT_ID       your Dhan client id
-   DHAN_PIN             your trading PIN          ┐ preferred: the app then mints
-   DHAN_TOTP_SECRET     the base32 TOTP secret    ┘ its own 24h token
-   CORS_ORIGINS         http://localhost:3000     (corrected in step 3)
-   ```
-
-   Leave the optional ones blank if you do not use them — the scanner,
-   backtests and forward tests all work without Twelve Data and Anthropic.
-4. Deploy. When it goes green, open `https://<your-service>.onrender.com/docs`
-   — the interactive API documentation. **This is not the app**, it is the API.
-
-> `render.yaml` is configured for the **free** plan, which has no persistent
-> disk. Read *Running on the free plan* below before relying on it — the GitHub
-> backup is mandatory there. Switching to `starter` and uncommenting the `disk`
-> block removes that dependency and the 15-minute sleep, at a monthly cost.
-
-### 2. Frontend on Vercel
-
-1. <https://vercel.com/new> → import this repository.
-2. **Root Directory: `frontend`.** Vercel detects Next.js on its own.
-3. Add one environment variable:
-
-   ```text
-   NEXT_PUBLIC_API_URL = https://<your-service>.onrender.com
-   ```
-
-   It is read at build time, so it must be set before the first build. It is a
-   URL, not a credential — no provider key is ever exposed to the browser.
-4. Deploy. **The URL Vercel gives you is your app** — the replacement for the
-   Streamlit link.
-
-### 3. Let the two talk
-
-Back on Render, set `CORS_ORIGINS` to the Vercel URL and redeploy:
-
-```text
-CORS_ORIGINS = https://your-app.vercel.app
-```
-
-A browser treats a different origin as a different site, so until this is set
-every request from the frontend is blocked and the app shows *"Cannot reach the
-analysis server"*. Include a comma-separated list if you also want to develop
-locally against the deployed API:
-
-```text
-CORS_ORIGINS = https://your-app.vercel.app,http://localhost:3000
-```
-
-### 4. First run
-
-Open your Vercel URL. The candle store starts empty, so:
-
-1. **Data Manager → Sync missing history** — once, to build the history. It is
-   rate-limited to five requests a second, so a full universe takes a while.
-2. **Data Manager → Back up now** — confirm a `backups/market_data.sqlite3.gz`
-   file appears on the `db-backup` branch. If it fails, **Test the backup path**
-   names the exact reason.
-3. Thereafter, **Top up latest sessions** daily — or leave it to the scheduled
-   GitHub Actions job, which does it for you.
-
----
-
-## Running on the free plan
-
-The free plan has **no persistent disk** and **sleeps after ~15 minutes idle**.
-The filesystem — and therefore the whole SQLite database — is discarded on
-every sleep. That is survivable, but only because the app treats the GitHub
-backup as its disk:
-
-```text
-cold start  →  restore_on_cold_start()   pulls the whole database back
-               (candles + forward tests + learning)
-after a sync →  the candle store is pushed back up
-after a
-forward-test →  the small learning backup is pushed (rate-limited)
-write
-```
-
-`app/services/bootstrap.py` does this, and it exists because of an ordering
-trap worth knowing about: `core` restores the *small* learning backup at import
-time, which makes the database non-empty, and `restore_db_from_github()`
-refuses to overwrite a non-empty database. So a naive startup hook silently
-skips the whole-database restore and leaves you with learning history but no
-candles — an app that looks configured and can scan nothing. The bootstrap
-checks the `candles` table specifically, and merges the learning backup back on
-top afterwards.
-
-**This makes the three `GH_*` variables mandatory on the free plan**, not
-optional. Without them every sleep costs you everything the app has
-accumulated.
-
-### Setting it up
-
-1. Create a GitHub token with write access to this repository:
-   <https://github.com/settings/personal-access-tokens/new> → *Repository
-   access* → **Only select repositories** → this repo → *Repository permissions*
-   → **Contents: Read and write**.
-2. On the API service, set:
-
-   ```text
-   GH_BACKUP_TOKEN    the token from step 1
-   GH_REPO            owner/repo          (not a URL)
-   DB_BACKUP_BRANCH   db-backup
-   ```
-
-3. Sync some history, then check **Data Manager → Back up now**. A
-   `backups/market_data.sqlite3.gz` file should appear on the `db-backup` branch.
-   It is gzipped because the uncompressed file is too large for GitHub's
-   contents API once a full universe is stored.
-   The branch is created automatically on the first backup.
-4. Confirm recovery works: `GET /api/v1/health` reports a `boot_restore`
-   object saying what the last cold start recovered.
-
-### What free still costs you
-
-- **First request after a sleep takes ~50 seconds**, plus the restore.
-- **A very large candle store gets slow to move.** The whole-database backup
-  goes through GitHub's Contents API, which caps a file at 100 MB. Nifty 500
-  over a few years is comfortably inside that; the NSE Top 2000 universe
-  over many years eventually is not. If you get there, switch to a disk.
-- **Nothing runs while the service sleeps.** Scheduled work is unaffected —
-  the GitHub Actions jobs run on GitHub's runners against `daily_job.py` and
-  never touch the web host at all. On the free plan they are doing the real
-  daily work, and the web app is the viewer.
-
----
-
-## Alternative: one machine
-
-Any VPS with Docker. Both processes, one command:
-
-```bash
-git clone -b <branch> https://github.com/kkute2118-hash/Backtesting-.git
-cd Backtesting-
-cp backend/.env.example .env          # fill in your credentials
-docker compose up -d
-```
-
-Open `http://<your-server>:3000`. Put a reverse proxy with TLS in front of both
-ports before exposing it to the internet, and set `NEXT_PUBLIC_API_URL` and
-`CORS_ORIGINS` to the public hostnames.
-
-The database lives in the `market-data` Docker volume — a named volume, not a
-bind mount into the checkout, so `git pull` can never land on top of it.
-
----
-
-## The scheduled jobs are separate
-
-`.github/workflows/` runs on GitHub's runners against `daily_job.py`. It does
-not touch either host and keeps working through any hosting change.
-
-It reads **GitHub Actions secrets**, which are a different store from your
-hosting provider's environment variables. Setting one does not set the other —
-this is the single most common reason the backup works in the app but not in the
-scheduled job, or the reverse. In particular the jobs need their own
-`DHAN_CLIENT_ID`, `DHAN_PIN` and `DHAN_TOTP_SECRET` (or `DHAN_ACCESS_TOKEN`)
-under *Settings → Secrets and variables → Actions*; without them every run stops
-at the token step.
-
-### Build the history there, not on the web host
-
-On a free tier the candle history cannot be downloaded by the app itself: a
-fraction of a CPU, a restart under load, and each restart wipes the database.
-Run **Actions → Build candle history → Run workflow** once instead. It downloads
-on a GitHub runner and pushes the result to the backup branch, which is where
-both the app and the daily job read it from. The workflows default that branch
-to `db-backup`; if you override it with a `DB_BACKUP_BRANCH` repository
-variable, set the same value on the API service or the app will look in the
-wrong place.
-
----
-
-## Checklist
-
-- [ ] Backend deployed, `/api/v1/health` returns `"status": "ok"`
-- [ ] Persistent disk mounted, `DATA_DB` pointing at it
-- [ ] Frontend deployed, `NEXT_PUBLIC_API_URL` set to the backend URL
-- [ ] `CORS_ORIGINS` on the backend set to the frontend URL
-- [ ] Dhan credentials set; **Settings** shows Dhan as configured
-- [ ] History built once — Data Manager on a paid host, or the
-      **Build candle history** workflow on a free one
-- [ ] `GH_BACKUP_TOKEN` + `GH_REPO` + `DB_BACKUP_BRANCH` set, and a backup verified
-- [ ] The same secrets added to GitHub Actions for the scheduled jobs
-      (Dhan credentials included — the jobs cannot read the host's environment)
-
-## Frontend environment (Next.js service)
+## Frontend environment
 
 | variable | why |
 |---|---|
-| `NEXT_PUBLIC_API_URL` | Where the BROWSER sends reads. Inlined at **build** time, so changing it needs a rebuild. |
-| `API_BACKEND_URL` | Where the **server-side** mutation gateway forwards. Read at request time. Falls back to `NEXT_PUBLIC_API_URL` when unset. |
-| `API_ACCESS_KEY` | Same value as on the API service. Server-side only - **never** prefix it `NEXT_PUBLIC_`, which would compile the secret into the browser bundle. |
+| `NEXT_PUBLIC_API_URL` | Where the browser sends reads. Inlined at **build** time. |
+| `API_BACKEND_URL` | Where the server-side mutation gateway forwards. Read at request time. |
+| `API_ACCESS_KEY` | Same value as on the API. Server-side only; never prefix it `NEXT_PUBLIC_`. |
 
-`API_BACKEND_URL` exists because `NEXT_PUBLIC_*` values are baked into the
-bundle when it is built. A server-side read of one returns whatever was set at
-build time and silently ignores the running environment, which turned every
-mutation into a 502 against a stale URL. Setting `API_BACKEND_URL` makes the
-backend address changeable without a rebuild; leaving it unset keeps the old
-behaviour.
-
-### Checking the guard end to end
-
-```
-# 1. straight at the API without a key - must be 401
-curl -o /dev/null -w '%{http_code}\n' -X PUT \
-  https://ati-lab-api.onrender.com/api/v1/preferences \
-  -H 'Content-Type: application/json' -d '{"key":"probe","value":"x"}'
-
-# 2. through the frontend's gateway, no key from the caller - must be 200
-curl -w '\n%{http_code}\n' -X PUT \
-  https://ati-lab.onrender.com/api/gateway/preferences \
-  -H 'Content-Type: application/json' -d '{"key":"probe","value":"ok"}'
-```
-
-401 then 200 means the guard is on and the gateway is attaching the key. Two
-401s means the keys differ between the services.
-
-### Health checks
-
-Both services expose `/health`, and each answers only for itself.
+## Health checks
 
 | service | path | what it means |
 |---|---|---|
-| `ati-lab-api` | `/health` | the API process is up. No database, no imports - it answers while a scan holds SQLite and the GIL. `/api/v1/health` is the deeper check that also reports the database and the cold-start restore. |
-| `ati-lab` | `/health` | the Next server is up. Says nothing about the API. |
-
-The frontend check deliberately does **not** call the backend. On the free
-plan the API is asleep most of the time, and a web instance replaced for a
-condition it cannot fix is worse than no health check at all.
-
-### render.yaml is not the source of truth
-
-`ati-lab-api` and `ati-lab` were created by hand in the Render dashboard, not
-imported as a Blueprint, so `render.yaml` is **not applied to them**. Editing
-it changes nothing in production; it describes what the services should look
-like and is the starting point if they are ever recreated.
-
-Everything is therefore set per service in the dashboard, under Settings and
-Environment. `render.yaml`'s header lists exactly what.
-
-One ordering rule, learned the hard way: **deploy the `/health` route before
-setting the Health Check Path.** Setting it against a build that lacks the
-route makes the check 404, the deploy never reports healthy, and it blocks the
-commit that would add the route - a deadlock that needs a manual deploy
-cancel to break. Both services carry the route now, so this only matters when
-adding a check to a new service.
+| API | `/health` | the API process is up; no database work. `/api/v1/health` also reports the database. |
+| Web | `/health` | the Next server is up; says nothing about the API. |
