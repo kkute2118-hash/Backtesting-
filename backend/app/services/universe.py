@@ -30,8 +30,8 @@ def choices() -> list[dict]:
 def resolve(names: list[str], allow_network: bool = True, purpose: str = "scan") -> list[str]:
     """Ticker list for the selected universes, with a usable error on failure.
 
-    ``purpose="download"`` is for the data jobs: for the NSE Top 2000 it returns
-    every candidate share, so the store can rank them (see core.resolve_universe).
+    ``purpose`` is passed to core.resolve_universe. For the NSE Top 2000 every
+    purpose but "candidates" returns at most NSE_TOP_N names.
     """
     if not names:
         raise ApiError("Select at least one universe to scan.")

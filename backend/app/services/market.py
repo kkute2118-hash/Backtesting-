@@ -145,13 +145,13 @@ def _breadth_from_signals(days: int = 30) -> dict[str, Any]:
             """SELECT strategy, COUNT(*) AS signals,
                       SUM(selected_for_forward) AS at_gate,
                       MAX(signal_date) AS last_signal
-                 FROM scanner_signals WHERE signal_date >= ?
+                 FROM scanner_signals WHERE signal_date >= ? AND COALESCE(passed_filter, 1) = 1
              GROUP BY strategy ORDER BY signals DESC""",
             (since,),
         ).fetchall()
         recent = con.execute(
             """SELECT signal_date, COUNT(*) AS signals
-                 FROM scanner_signals WHERE signal_date >= ?
+                 FROM scanner_signals WHERE signal_date >= ? AND COALESCE(passed_filter, 1) = 1
              GROUP BY signal_date ORDER BY signal_date""",
             (since,),
         ).fetchall()
@@ -169,7 +169,11 @@ def _breadth_from_signals(days: int = 30) -> dict[str, Any]:
 
 
 def _top_opportunities(limit: int = 8) -> list[dict[str, Any]]:
-    """The highest-scoring signals the scanner has actually recorded."""
+    """The highest-scoring signals the scanner has actually recorded.
+
+    Only signals that passed their strategy's entry filter: the rejected ones
+    are stored too (passed_filter=0) so the filter stays measurable, but they
+    are not opportunities - on a low-breadth day every S1-S3 signal is one."""
     con = core._db()
     try:
         df = pd.read_sql_query(
@@ -177,13 +181,47 @@ def _top_opportunities(limit: int = 8) -> list[dict[str, Any]]:
                       safety_status, entry, stop, target, rsi, relvol,
                       selected_for_forward
                  FROM scanner_signals
-                WHERE signal_date = (SELECT MAX(signal_date) FROM scanner_signals)
+                WHERE COALESCE(passed_filter, 1) = 1
+                  AND signal_date = (SELECT MAX(signal_date) FROM scanner_signals
+                                      WHERE COALESCE(passed_filter, 1) = 1)
              ORDER BY score DESC LIMIT ?""",
             con, params=(int(limit),),
         )
     finally:
         con.close()
     return frame_to_records(df)
+
+
+def market_breadth(history_sessions: int = 120) -> dict[str, Any]:
+    """The S6 market gate as the UI shows it: today's breadth, the 0.50
+    threshold, which strategies it holds back, and recent history.
+
+    Breadth is the share of Nifty 500 members closing above their prior
+    50-session high, summed over 10 sessions (core.market_breakout_breadth).
+    """
+    series = core.market_breakout_breadth().dropna()
+    threshold = float(core.S6_MIN_BREADTH)
+    gated = [f"S{s}" for s in core.IMPLEMENTED_STRATEGIES
+             if core.ENTRY_FILTER_BY_STRATEGY.get(s) == "s6traits"] + ["S6"]
+    if series.empty:
+        return {"ready": False, "latest": None, "as_of": None, "threshold": threshold,
+                "gate_open": False, "gated_strategies": gated, "history": [],
+                "universe": core.S6_BREADTH_UNIVERSE, "window": core.S6_BREADTH_WINDOW}
+    tail = series.tail(int(history_sessions))
+    latest = float(series.iloc[-1])
+    open_days = series.tail(250)
+    return {
+        "ready": True,
+        "latest": round(latest, 3),
+        "as_of": str(series.index[-1].date()),
+        "threshold": threshold,
+        "gate_open": latest >= threshold,
+        "gated_strategies": gated,
+        "universe": core.S6_BREADTH_UNIVERSE,
+        "window": core.S6_BREADTH_WINDOW,
+        "open_share_1y": round(float((open_days >= threshold).mean()), 3),
+        "history": [{"date": str(d.date()), "value": round(float(v), 3)} for d, v in tail.items()],
+    }
 
 
 def overview() -> dict[str, Any]:
@@ -220,10 +258,18 @@ def overview() -> dict[str, Any]:
         "freshness": fresh,
         "forward": {"summary": summary.get("rows", []), "totals": book},
         "breadth": _breadth_from_signals(),
+        "market_breadth": _safe_market_breadth(),
         "top_opportunities": _top_opportunities(),
         "latest_scan": _latest_scan(),
         "providers": provider_status(),
     }
+
+
+def _safe_market_breadth() -> dict[str, Any] | None:
+    try:
+        return market_breadth()
+    except Exception:
+        return None
 
 
 def sector_strength(lookbacks: tuple[int, ...] = (21, 63, 126)) -> dict[str, Any]:

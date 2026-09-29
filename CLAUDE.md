@@ -40,6 +40,12 @@ stay inside Oracle's **Always Free** allowance, always:
   after S4-S6. `core.RETIRED_STRATEGIES` is empty; if a strategy is retired
   again, the daily job forward-tests it in the separate background book
   (`core.SHADOW_STRATEGIES`, `daily_job.step_shadow`).
+- **Universes: at most 2,000 NSE shares.** "NSE Top 2000" is the 2,000 most
+  liquid ordinary NSE shares; every download is capped there
+  (`core.resolve_universe`). Only the history build ranks the full ~2,700
+  candidates, then prunes to 2,000 (`daily_job._build_top2000`). Market breadth
+  is always measured on the Nifty 500 (`core.S6_BREADTH_UNIVERSE`), whatever
+  else the store holds, because the 0.50 gate was fitted on it.
 - **Evidence rule.** A new filter or rule gates trades only if it was chosen on
   2022-24 data and holds on 2025-26 data. Otherwise it is a flag (like the
   results calendar) or it is not adopted (like the S5 market filter). Findings

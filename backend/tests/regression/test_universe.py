@@ -80,9 +80,11 @@ core.index_universe = lambda name, **_: [f"IDX{i}.NS" for i in range(500)]
 full = core.resolve_universe(core.FULL_NSE_UNIVERSE)
 check("NSE Top 2000 resolves to exactly 2000 names", len(full) == core.NSE_TOP_N, str(len(full)))
 check("SME scrips are excluded", "TINYSM.NS" not in full)
-download = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="download")
-check("a download covers every candidate share, so all of them can be ranked",
+download = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="candidates")
+check("the history build's candidate list covers every share, so all can be ranked",
       len(download) == 2600 and "TINYSM.NS" not in download, str(len(download)))
+_dl = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="download")
+check("a data download never exceeds the top 2000", len(_dl) == core.NSE_TOP_N, str(len(_dl)))
 check("the old universe name still resolves",
       core.resolve_universe("NSE All Cash (~2000)") == full)
 

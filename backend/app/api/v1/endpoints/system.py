@@ -58,9 +58,12 @@ def _build_config() -> dict[str, Any]:
     return {
         "providers": market.provider_status(),
         "universes": core.UNIVERSE_CHOICES,
-        # The scanner's three strategies. S1-S3 are retired (see the engine's
-        # RETIRED_STRATEGIES) and no longer offered.
+        # All six scanner strategies. S1-S3 returned on 29 Sep 2026, each gated
+        # by S6's market traits (entry rule s6traits, research/S123_IMPROVED.md).
         "strategies": [
+            {"id": 1, "label": "S1", "name": "Monthly trend, gated by market breadth"},
+            {"id": 2, "label": "S2", "name": "EMA momentum, gated by market breadth"},
+            {"id": 3, "label": "S3", "name": "50-EMA pullback, gated by market breadth"},
             {"id": 4, "label": "S4_SEPA", "name": "SEPA stage analysis"},
             {"id": 5, "label": "S5_POCKETPIVOT", "name": "Pocket pivot (O'Neil disciple)"},
             {"id": 6, "label": core.S6_LABEL, "name": "50-day breakout with market breadth"},

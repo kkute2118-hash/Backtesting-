@@ -16,6 +16,7 @@ import type { Row } from "@/types/api";
 
 import { BreadthChart } from "./BreadthChart";
 import { FreshnessBanner } from "./FreshnessCard";
+import { MarketBreadthCard } from "./MarketBreadthCard";
 
 function n(row: Row, key: string): number | null {
   const value = row[key];
@@ -140,6 +141,8 @@ export function DashboardPage() {
           icon={<Database className="h-3.5 w-3.5" />}
         />
       </div>
+
+      {data.market_breadth?.ready ? <MarketBreadthCard breadth={data.market_breadth} /> : null}
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">
