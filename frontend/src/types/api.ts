@@ -149,6 +149,8 @@ export interface Overview {
     by_strategy: Array<{ strategy: string; signals: number; at_gate: number; last_signal: string | null }>;
     daily: Array<{ date: string; signals: number }>;
   };
+  /** The S6 market gate; null when the server could not compute it. */
+  market_breadth?: MarketBreadth | null;
   top_opportunities: Row[];
   latest_scan: {
     id: string;
@@ -159,6 +161,20 @@ export interface Overview {
     strategies: number[];
   } | null;
   providers: ProviderStatus;
+}
+
+/** Share of Nifty 500 members closing above their 50-day high, summed over 10 sessions. */
+export interface MarketBreadth {
+  ready: boolean;
+  latest: number | null;
+  as_of: string | null;
+  threshold: number;
+  gate_open: boolean;
+  gated_strategies: string[];
+  universe: string;
+  window: number;
+  open_share_1y?: number;
+  history: Array<{ date: string; value: number }>;
 }
 
 export interface ForwardTotals {

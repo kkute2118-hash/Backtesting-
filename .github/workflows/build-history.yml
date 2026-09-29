@@ -7,6 +7,13 @@
 # real cores, 16 GB and no restarts, so it does the job here and pushes the
 # result to the backup branch — which is where the app and the daily job both
 # read it from.
+#
+# NSE Top 2000: fetches ~4 months of every ordinary NSE share (~2,700) to rank
+# them by traded value, downloads the full history for the 2,000 most liquid
+# only, and deletes the short histories of the rest. The store never holds
+# more than 2,000 shares for it. Use 2 years for it: 3+ years for 2,000 stocks
+# pushes the compressed backup towards GitHub's 100 MB file limit. Once built,
+# the daily job keeps all 2,000 current by itself.
 name: Build candle history
 
 on:

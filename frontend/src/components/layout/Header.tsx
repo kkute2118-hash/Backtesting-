@@ -1,6 +1,6 @@
 "use client";
 
-import { Menu } from "lucide-react";
+import { Activity, Menu } from "lucide-react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { useState } from "react";
@@ -37,6 +37,34 @@ function MarketPill() {
           : `last close ${date(market.last_completed_session)}`}
       </span>
     </div>
+  );
+}
+
+/**
+ * Market breadth: the gate S1, S2, S3 and S6 wait on. Shown on every page and
+ * on phones, because it decides whether most strategies can trade at all.
+ */
+function BreadthPill() {
+  const { data } = useOverview();
+  const b = data?.market_breadth;
+  if (!b?.ready || b.latest === null) return null;
+  const open = b.gate_open;
+  return (
+    <Link
+      href="/#market-breadth"
+      title={`Market breadth ${b.latest.toFixed(2)} (needs ${b.threshold.toFixed(2)}): ` +
+        `${open ? "open" : "waiting"} for ${b.gated_strategies.join(", ")}. ` +
+        `Share of ${b.universe} stocks at a 50-day high, summed over ${b.window} sessions.`}
+      data-testid="breadth-pill"
+      className={cn("flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1",
+        open ? "border-up/40 bg-up-soft text-up" : "border-warn/40 bg-warn-soft text-warn")}
+    >
+      <Activity className="h-3.5 w-3.5" aria-hidden />
+      <span className="text-2xs font-semibold tabular">{b.latest.toFixed(2)}</span>
+      <span className="hidden text-2xs font-medium sm:inline">
+        {open ? "breadth open" : `breadth · needs ${b.threshold.toFixed(2)}`}
+      </span>
+    </Link>
   );
 }
 
@@ -92,6 +120,7 @@ export function Header() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
+          <BreadthPill />
           <MarketPill />
           <CommandSearch />
           <ThemeToggle />

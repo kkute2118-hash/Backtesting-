@@ -34,7 +34,7 @@ export function BreadthChart({
   return (
     <div className="h-52 w-full px-1 pb-1">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 12, right: 8, bottom: 4, left: -18 }}>
+        <AreaChart data={data} margin={{ top: 12, right: 8, bottom: 4, left: -8 }}>
           <defs>
             <linearGradient id="breadth" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="hsl(var(--accent))" stopOpacity={0.35} />

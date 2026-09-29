@@ -300,10 +300,12 @@ def resolve_universe(name, allow_network=True, purpose="scan"):
     index_universe() only knows the index CSVs and raises KeyError on the
     full-NSE option.
 
-    ``purpose`` only matters for the NSE Top 2000 list. A scan gets the top
-    NSE_TOP_N by stored liquidity; a download ("download") gets every EQ-series
-    candidate, because a name the store has never held cannot be ranked, and
-    downloading only the current top 2000 would freeze the list forever.
+    ``purpose`` only matters for the NSE Top 2000 list. A scan and a download
+    ("scan", "download") both get the top NSE_TOP_N by stored liquidity, so the
+    store never holds more than that many shares for this universe. Only the
+    history build asks for "candidates": every EQ-series share, which it fetches
+    a few months of just to rank them, then keeps the top NSE_TOP_N
+    (daily_job.run_bootstrap).
     """
     if canonical_universe(name) == FULL_NSE_UNIVERSE:
         if not dhan_configured():
@@ -313,7 +315,7 @@ def resolve_universe(name, allow_network=True, purpose="scan"):
                 "DHAN_ACCESS_TOKEN) to the backend environment, or pick one of the Nifty index "
                 "universes instead."
             )
-        if purpose == "download":
+        if purpose == "candidates":
             return nse_equity_universe()
         return nse_liquid_universe()
     return index_universe(name, allow_network=allow_network)
@@ -6793,6 +6795,10 @@ S6_INITIAL_STOP_ATR = 3.0          # initial stop = entry - 3 x ATR(14)
 S6_TRAIL_PCT = 20.0                # exit on a close 20% below the highest close since entry
 S6_LABEL = "S6_BREAKOUT"
 S6_BREADTH_COLUMN = "mkt_breadth10"
+# Breadth is measured on this index's members, whatever else the store holds.
+# The 0.50 gate was fitted when the store held exactly the Nifty 500; counting
+# the 1,500 smaller NSE Top 2000 names as well would change what 0.50 means.
+S6_BREADTH_UNIVERSE = "Nifty 500"
 
 # Breadth is one GROUP BY over every stored candle, so it is cached like the
 # session calendar. It only changes when a sync writes new candles.
@@ -6801,16 +6807,28 @@ _S6_BREADTH = {"at": 0.0, "series": None}
 _S6_BREADTH_LOCK = threading.Lock()
 
 
-def market_breakout_breadth(force=False):
-    """Market breadth per session: the share of stored stocks closing above
-    their prior 50-session high, summed over the last S6_BREADTH_WINDOW sessions.
+def breadth_members():
+    """Bare symbols of S6_BREADTH_UNIVERSE from the stored member list, or []
+    when it has never been downloaded. Never touches the network."""
+    try:
+        members = index_universe(S6_BREADTH_UNIVERSE, allow_network=False)
+    except Exception:
+        return []
+    return sorted({str(t).upper().replace(".NS", "") for t in members})
 
-    Always measured across the whole stored equity universe, never the
-    universe being scanned. The thresholds were fitted on the full store, and a
-    Nifty 50 scan would otherwise read breadth off 50 names and gate on noise.
-    Indices (symbols starting with ^) are excluded. Returns an empty Series if
-    the store is empty or unreadable, which makes S6 fire nowhere rather than
-    everywhere.
+
+def market_breakout_breadth(force=False):
+    """Market breadth per session: the share of S6_BREADTH_UNIVERSE members
+    closing above their prior 50-session high, summed over the last
+    S6_BREADTH_WINDOW sessions.
+
+    Never the universe being scanned: a Nifty 50 scan would otherwise read
+    breadth off 50 names and gate on noise, and an NSE Top 2000 scan would
+    read it off a different market from the one the 0.50 gate was fitted on.
+    Falls back to every stored stock only when the member list has never been
+    downloaded (a fresh store or a test fixture). Indices (symbols starting
+    with ^) are excluded. Returns an empty Series if the store is empty or
+    unreadable, which makes S6 fire nowhere rather than everywhere.
     """
     now = time.monotonic()
     with _S6_BREADTH_LOCK:
@@ -6821,17 +6839,22 @@ def market_breakout_breadth(force=False):
                 and now - _S6_BREADTH["at"] < S6_BREADTH_TTL_SECONDS):
             return cached
     n = int(S6_BREAKOUT_LOOKBACK)
+    members = breadth_members()
+    where = "symbol NOT LIKE '^%'"
+    if members:
+        where += f" AND symbol IN ({','.join('?' * len(members))})"
     q = f"""
         SELECT dt, AVG(CASE WHEN n={n} AND close>prior_hi THEN 1.0 ELSE 0.0 END) AS share
         FROM (SELECT dt, close, MAX(high) OVER w AS prior_hi, COUNT(high) OVER w AS n
-              FROM candles WHERE symbol NOT LIKE '^%'
+              FROM candles WHERE {where}
               WINDOW w AS (PARTITION BY symbol ORDER BY dt
                            ROWS BETWEEN {n} PRECEDING AND 1 PRECEDING))
         GROUP BY dt ORDER BY dt"""
     try:
         con = _db()
         try:
-            daily = pd.read_sql_query(q, con, parse_dates=["dt"]).set_index("dt")["share"]
+            daily = pd.read_sql_query(q, con, params=members or None,
+                                      parse_dates=["dt"]).set_index("dt")["share"]
         finally:
             con.close()
         series = daily.rolling(S6_BREADTH_WINDOW).sum().rename(S6_BREADTH_COLUMN)

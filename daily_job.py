@@ -157,6 +157,73 @@ def _universes():
     return out or ["Nifty 500"]
 
 
+# How much history ranks a share the store has never held. Four months gives
+# the NSE_TOP_TURNOVER_SESSIONS (60) sessions the liquidity median reads.
+RANK_HISTORY_DAYS = 120
+# Once the store holds this many shares the NSE Top 2000 has been built, and
+# the daily top-up keeps all of it current whatever SCAN_UNIVERSE scans.
+TOP2000_BUILT_AT = 1000
+
+
+def _stored_share_count():
+    con = core._db()
+    try:
+        return int(con.execute(
+            "SELECT COUNT(DISTINCT symbol) FROM candles WHERE symbol NOT LIKE '^%'").fetchone()[0])
+    finally:
+        con.close()
+
+
+def _sync_universes(universes):
+    """What the daily top-up downloads: the scanned universes, plus the NSE Top
+    2000 once it has been built, so the web app's 2000-stock scan stays current."""
+    names = list(universes)
+    if core.FULL_NSE_UNIVERSE not in names and _stored_share_count() >= TOP2000_BUILT_AT:
+        names.append(core.FULL_NSE_UNIVERSE)
+    return names
+
+
+def _prune_outside(keep):
+    """Delete candles of shares outside `keep` (bare or .NS symbols) and outside
+    the breadth universe. Indices are kept. Returns the symbols removed."""
+    keep = {str(t).upper().replace(".NS", "") for t in keep} | set(core.breadth_members())
+    con = core._db()
+    try:
+        stored = [r[0] for r in con.execute(
+            "SELECT DISTINCT symbol FROM candles WHERE symbol NOT LIKE '^%'")]
+        drop = [sym for sym in stored if sym not in keep]
+        for i in range(0, len(drop), 500):
+            part = drop[i:i + 500]
+            con.execute(f"DELETE FROM candles WHERE symbol IN ({','.join('?' * len(part))})", part)
+        con.commit()
+    finally:
+        con.close()
+    return drop
+
+
+def _build_top2000(end, summary):
+    """Rank every ordinary NSE share and keep the NSE_TOP_N most liquid.
+
+    A share the store has never held cannot be ranked, so each one first gets
+    RANK_HISTORY_DAYS of candles (one request per share). The ranking then picks
+    the top NSE_TOP_N, the full history is downloaded for those only, and the
+    short histories of the rest are deleted: the store never holds more than
+    NSE_TOP_N shares for this universe.
+    """
+    candidates = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="candidates")
+    held = set(core.stored_median_turnover(candidates))
+    unranked = [t for t in candidates if t not in held]
+    log("rank", f"{len(candidates):,} ordinary NSE shares; {len(unranked):,} not stored yet, "
+                f"fetching {RANK_HISTORY_DAYS} days of each to rank them")
+    if unranked:
+        core.download_prices(tuple(unranked), end - timedelta(days=RANK_HISTORY_DAYS), end,
+                             max_workers=5)
+    top = core.nse_liquid_universe()
+    summary["ranked"] = len(candidates)
+    log("rank", f"kept the {len(top):,} most liquid by median traded value")
+    return top
+
+
 # ----------------------------------------------------------------- steps ----
 
 def step_restore():
@@ -516,7 +583,7 @@ def run_daily():
     universes = _universes()
     # Download every candidate, scan the ranked list: for the NSE Top 2000 the
     # two differ (see core.resolve_universe); for an index they are the same.
-    download = core.resolve_universes(universes, purpose="download")
+    download = core.resolve_universes(_sync_universes(universes), purpose="download")
     log("universe", f"{', '.join(universes)} — {len(download):,} symbols to sync")
 
     step_sync(download, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
@@ -684,12 +751,19 @@ def run_bootstrap():
         log("rebuild", f"deleted {removed:,} stored candle(s); every bar will be re-downloaded")
 
     universes = _universes()
-    tickers = core.resolve_universes(universes, purpose="download")
+    end = core.last_expected_nse_session()
+    others = [u for u in universes if u != core.FULL_NSE_UNIVERSE]
+    tickers = core.resolve_universes(others, purpose="download") if others else []
+    if core.FULL_NSE_UNIVERSE in universes:
+        top = _build_top2000(end, summary)
+        tickers = sorted(set(tickers) | set(top))
+        dropped = _prune_outside(tickers)
+        summary["pruned"] = len(dropped)
+        log("rank", f"removed the short history of {len(dropped):,} share(s) outside the list")
     summary["universes"] = universes
     summary["symbols"] = len(tickers)
     log("universe", f"{', '.join(universes)} — {len(tickers):,} symbols")
 
-    end = core.last_expected_nse_session()
     start = end - timedelta(days=365 * years)
     log("build", f"downloading {start} → {end}. Rate-limited to ~5 requests/second, "
                  f"so expect roughly {len(tickers) * 0.25 / 60:.0f}+ minutes.")

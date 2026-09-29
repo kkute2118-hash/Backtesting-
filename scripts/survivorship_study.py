@@ -103,9 +103,10 @@ def main():
     data_start = end - timedelta(days=365 * args.years)
     start = pd.Timestamp(args.start) if args.start else pd.Timestamp(data_start + timedelta(days=400))
     if args.download:
-        # purpose="download": every ordinary NSE share Dhan lists, not today's
+        # purpose="candidates": every ordinary NSE share Dhan lists, not today's
         # 2000 most liquid, which would itself be a list chosen with hindsight.
-        tickers = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="download")
+        # This job never writes the backup, so the extra names stay on the runner.
+        tickers = core.resolve_universe(core.FULL_NSE_UNIVERSE, purpose="candidates")
         log(f"downloading {len(tickers)} symbols {data_start} .. {end}")
         got = core.sync_missing_backtest_data(tickers, data_start, end)
         errs = list(core._DHAN_LAST_DATA_ERRORS)
