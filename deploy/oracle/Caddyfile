@@ -1,8 +1,8 @@
 # One public origin for both processes. /api/gateway belongs to the web app
 # (it is the Next server's mutation proxy), so it is matched before /api/v1.
 #
-# The whole site needs a login (user "owner"). The hash below is bcrypt of a
-# 20-character random password: safe to publish, not practical to reverse.
+# The whole site needs a login (user "krushna21"). Only a bcrypt hash of the
+# password is here; the owner chose the password.
 # Only /health (web) and /health/api (API) are open, for the uptime check
 # (.github/workflows/uptime.yml); both return {"status": "ok"} and nothing else.
 #
@@ -25,7 +25,7 @@
 	encode gzip
 	@private not path /health /health/api
 	basic_auth @private {
-		owner $2a$14$x55MsO/4InC9kqBG6kzSG.bkqBnPPs2iJeWVvvTacoq2Gtf5vmNFW
+		krushna21 $2a$14$ZsyVGW8YFc8rE3tqlKECs.1QO5Cvo3K18WKVluoKK/1XymGUsPG6W
 	}
 	handle /health {
 		reverse_proxy web:3000
