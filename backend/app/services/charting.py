@@ -230,9 +230,9 @@ def live(symbol: str) -> dict[str, Any]:
         quote = _cached(("live", sym), LIVE_TTL_SECONDS, fetch)
     if quote:
         q = {"symbol": sym, "ltp": float(quote["ltp"]),
-             "open": _num(quote.get("open")), "high": _num(quote.get("high")),
-             "low": _num(quote.get("low")), "volume": _num(quote.get("volume")),
-             "prev_close": _num(quote.get("prev_close")) or stored["prev_close"],
+             "open": _price(quote.get("open")), "high": _price(quote.get("high")),
+             "low": _price(quote.get("low")), "volume": _num(quote.get("volume")),
+             "prev_close": _price(quote.get("prev_close")) or stored["prev_close"],
              "session": str(core.market_today()), "source": "LIVE", "ts": quote.get("ts")}
         # Before today's first trade the quote repeats yesterday; keep the stored bar then.
         if not market_open and stored["session"] == q["session"]:
@@ -253,3 +253,10 @@ def _num(v):
     except (TypeError, ValueError):
         return None
     return f if np.isfinite(f) else None
+
+
+def _price(v):
+    """A price, or None. Before the first trade Dhan reports the day's high and
+    low (and sometimes open) as 0, which the header must not show as Rs 0."""
+    f = _num(v)
+    return f if f and f > 0 else None
