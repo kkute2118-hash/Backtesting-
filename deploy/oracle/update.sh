@@ -16,7 +16,14 @@ cd "$APP_DIR"
 # Mirror settings (see deploy/oracle/README.md): the GitHub jobs own the data
 # and the Dhan login; this server follows them. Added once to an existing .env.
 changed_env=0
-for kv in BACKUP_READONLY=1 MIRROR_REFRESH_MINUTES=10 DHAN_YIELD_TO_JOBS=1; do
+# SITE_HOST: a public name for this server's IP (1.2.3.4 -> 1-2-3-4.sslip.io),
+# which gives Caddy a free HTTPS certificate. Derived from PUBLIC_URL.
+ip="$(grep -E '^PUBLIC_URL=' "$ENV_FILE" | head -1 | sed -E 's#^PUBLIC_URL=https?://##; s#[/:].*$##')"
+site_host=""
+if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  site_host="${ip//./-}.sslip.io"
+fi
+for kv in BACKUP_READONLY=1 MIRROR_REFRESH_MINUTES=10 DHAN_YIELD_TO_JOBS=1 ${site_host:+SITE_HOST=$site_host}; do
   key="${kv%%=*}"
   if ! grep -q "^${key}=" "$ENV_FILE"; then
     echo "$kv" >> "$ENV_FILE"
@@ -63,6 +70,15 @@ UNIT
 }
 install_snapshot_timer || echo "$(date -u +%FT%TZ) could not install the snapshot timer"
 
+# HTTPS: Oracle's Ubuntu image rejects everything but SSH and the port 80 that
+# cloud-init.sh opened. Open 443 the same way, once, and persist it.
+if ! iptables -C INPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT 2>/dev/null; then
+  reject_at="$(iptables -L INPUT --line-numbers | awk '/REJECT/ {print $1; exit}')"
+  iptables -I INPUT "${reject_at:-1}" -p tcp --dport 443 -m state --state NEW -j ACCEPT
+  netfilter-persistent save >/dev/null 2>&1 || true
+  echo "$(date -u +%FT%TZ) opened port 443 for HTTPS"
+fi
+
 # Fetch with the backup token when there is one, so the update keeps working if
 # the repository is made private; the token is used for this call only and is
 # never written into .git/config.
@@ -83,6 +99,9 @@ git checkout --quiet -B main origin/main
 git reset --quiet --hard origin/main
 echo "$(date -u +%FT%TZ) updating to $(git rev-parse --short HEAD)"
 "${COMPOSE[@]}" up -d --build
+# The Caddyfile is a mounted file: a change to it alone does not recreate the
+# container, so reload it every update (a no-op when nothing changed).
+"${COMPOSE[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
 # Old image layers pile up with every rebuild; the boot disk is only ~47 GB.
 docker image prune -f >/dev/null
 echo "$(date -u +%FT%TZ) running $(git rev-parse --short HEAD)"

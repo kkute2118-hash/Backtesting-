@@ -140,3 +140,13 @@ def test_candles_route(client):
     r = client.get("/api/v1/stocks/TRENDUP/candles", params={"tf": "1W"})
     assert r.status_code == 200 and r.json()["candles"]
     assert client.get("/api/v1/stocks/NOPE/candles").status_code == 404
+
+
+def test_a_pre_open_quote_never_shows_zero_prices(seeded_db, monkeypatch):
+    monkeypatch.setattr(core, "dhan_configured", lambda: True)
+    monkeypatch.setattr(core, "nse_market_is_open", lambda *a, **k: False)
+    monkeypatch.setattr(core, "dhan_quote_snapshot", lambda s: {"TRENDUP": {
+        "ltp": 123.4, "open": 123.4, "high": 0.0, "low": 0.0, "prev_close": 121.0,
+        "volume": 0.0, "ts": "2026-09-30T09:00:00"}})
+    q = charting.live("TRENDUP")
+    assert q["high"] is None and q["low"] is None and q["open"] == 123.4

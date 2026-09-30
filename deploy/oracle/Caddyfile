@@ -1,8 +1,40 @@
 # One public origin for both processes. /api/gateway belongs to the web app
 # (it is the Next server's mutation proxy), so it is matched before /api/v1.
-:80 {
-	encode gzip
+#
+# The whole site needs a login (user "owner"). The hash below is bcrypt of a
+# 20-character random password: safe to publish, not practical to reverse.
+# Only /health (web) and /health/api (API) are open, for the uptime check
+# (.github/workflows/uptime.yml); both return {"status": "ok"} and nothing else.
+#
+# Two addresses serve the same app:
+#   https://{$SITE_HOST}   HTTPS with a free, automatic Let's Encrypt
+#                          certificate. SITE_HOST is <ip-with-dashes>.sslip.io,
+#                          a public name that resolves to the server's IP;
+#                          update.sh writes it into .env.
+#   http://<ip>            plain HTTP, kept so the app never depends on the
+#                          certificate being issued.
+{
+	servers {
+		timeouts {
+			read_header 10s
+		}
+	}
+}
 
+(app) {
+	encode gzip
+	@private not path /health /health/api
+	basic_auth @private {
+		owner $2a$14$x55MsO/4InC9kqBG6kzSG.bkqBnPPs2iJeWVvvTacoq2Gtf5vmNFW
+	}
+	handle /health {
+		reverse_proxy web:3000
+	}
+	# The API's liveness (no data, no database), for the uptime check.
+	handle /health/api {
+		rewrite * /health
+		reverse_proxy api:8000
+	}
 	handle /api/gateway/* {
 		reverse_proxy web:3000
 	}
@@ -18,4 +50,12 @@
 	handle {
 		reverse_proxy web:3000
 	}
+}
+
+{$SITE_HOST:localhost} {
+	import app
+}
+
+:80 {
+	import app
 }

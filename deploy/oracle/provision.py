@@ -111,7 +111,7 @@ def named(items, name):
 
 
 def ensure_network(vn, oci, compartment: str):
-    """VCN, internet gateway, default route to it, ports 22 and 80, one subnet."""
+    """VCN, internet gateway, default route to it, ports 22, 80 and 443, one subnet."""
     m = oci.core.models
     vcn = named(vn.list_vcns(compartment).data, f"{NAME}-vcn")
     if vcn is None:
@@ -140,7 +140,7 @@ def ensure_network(vn, oci, compartment: str):
             tcp_options=m.TcpOptions(destination_port_range=m.PortRange(min=port, max=port)))
 
     vn.update_security_list(vcn.default_security_list_id, m.UpdateSecurityListDetails(
-        ingress_security_rules=[tcp(22), tcp(80)],
+        ingress_security_rules=[tcp(22), tcp(80), tcp(443)],
         egress_security_rules=[m.EgressSecurityRule(protocol="all", destination="0.0.0.0/0",
                                                     destination_type="CIDR_BLOCK")]))
 

@@ -1,0 +1,41 @@
+# Is the Oracle web app up? Checked every hour; a failed run makes GitHub email
+# the repository owner (Settings -> Notifications -> Actions, on by default).
+#
+# Reads only the two open liveness paths, which return {"status": "ok"} and
+# nothing else, so it needs no password. The plain-HTTP address decides pass
+# or fail; the HTTPS name is reported as a warning only, so a certificate
+# still being issued never raises a false alarm.
+#
+# Set the repository variable ORACLE_IP if the server's address changes.
+name: Oracle uptime
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the web app and the API
+        env:
+          IP: ${{ vars.ORACLE_IP || '132.226.191.194' }}
+        run: |
+          host="${IP//./-}.sslip.io"
+          fail=0
+          for path in /health /health/api; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --retry 2 --retry-delay 10 "http://$IP$path" || true)
+            echo "http://$IP$path -> $code"
+            [ "$code" = 200 ] || fail=1
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://$host/health" || true)
+          echo "https://$host/health -> $code"
+          [ "$code" = 200 ] || echo "::warning title=HTTPS not answering::https://$host/health returned $code (certificate not issued yet, or port 443 closed)"
+          if [ "$fail" = 1 ]; then
+            echo "::error title=Oracle app is down::http://$IP did not answer. Check the server in the Oracle console (Compute -> Instances -> ati-lab-2)."
+            exit 1
+          fi

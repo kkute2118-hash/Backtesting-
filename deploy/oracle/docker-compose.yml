@@ -7,6 +7,13 @@
 # paths to the API and everything else to the web app, so the browser talks to
 # one origin: no CORS, and no second port to open in Oracle's firewall.
 
+# Every container's log is capped (3 x 10 MB) so logs cannot fill the disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   api:
     build: ../../backend
@@ -19,13 +26,16 @@ services:
       # A named volume, never the checkout: `git pull` must not touch the data.
       - market-data:/data
     restart: unless-stopped
+    logging: *logging
 
   web:
     build:
       context: ../../frontend
       args:
-        # Compiled into the browser bundle, so it is the PUBLIC address.
-        NEXT_PUBLIC_API_URL: ${PUBLIC_URL}
+        # Empty: the browser calls the API on the same origin it loaded the
+        # page from (Caddy routes /api/v1 to the API), so the app works on both
+        # https://SITE_HOST and http://<ip> from one build.
+        NEXT_PUBLIC_API_URL: ""
     environment:
       # The server-side mutation gateway talks to the API over the internal
       # network, and attaches the key; the browser never sees either.
@@ -34,17 +44,30 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    logging: *logging
 
   caddy:
     image: caddy:2
     ports:
       - "80:80"
+      - "443:443"
+    environment:
+      # <ip-with-dashes>.sslip.io, written into .env by update.sh; Caddy gets
+      # a free Let's Encrypt certificate for it.
+      SITE_HOST: ${SITE_HOST:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates survive restarts, so Let's Encrypt is asked once, not on
+      # every rebuild (it rate-limits).
+      - caddy-data:/data
+      - caddy-config:/config
     depends_on:
       - api
       - web
     restart: unless-stopped
+    logging: *logging
 
 volumes:
   market-data:
+  caddy-data:
+  caddy-config:

@@ -143,9 +143,21 @@ Two things on your side keep it that way:
   update command above.
 - **API_ACCESS_KEY** is generated on the server by the script; the web app adds
   it to every change request automatically.
-- **Plain http**: the site is served over `http://` on the IP address. For
-  `https://` you need a domain name pointing at the server; Caddy can then get
-  a certificate by itself (replace `:80` in `Caddyfile` with the domain, and
-  open port 443 as in step 3).
+- **Login**: the whole site asks for a username and password (user `owner`).
+  Only a bcrypt hash of the password is in `Caddyfile`; the owner has the
+  password. To change it: `docker run --rm caddy:2 caddy hash-password`, put
+  the new hash in `Caddyfile`, push to `main`. `/health` and `/health/api`
+  stay open (they say only "ok") for the uptime check.
+- **HTTPS**: `https://<ip-with-dashes>.sslip.io` (for 132.226.191.194:
+  `https://132-226-191-194.sslip.io`). sslip.io is a free public name that
+  points at the IP; Caddy gets a Let's Encrypt certificate for it by itself.
+  `update.sh` writes `SITE_HOST` into `.env` and opens port 443 in the
+  server's firewall; port 443 is open in the Oracle network's security list.
+  `http://<ip>` keeps working too, with the same login.
+- **Uptime**: `.github/workflows/uptime.yml` checks the app every hour; a
+  failed run emails the repository owner.
+- **Logs** are capped at 3 x 10 MB per container, so they cannot fill the disk.
 - **Idle reclamation**: Oracle may reclaim an Always Free server that sits
-  almost completely idle for 7 days. Daily use of the app is enough to avoid it.
+  almost completely idle for 7 days. The data does not depend on it (the
+  backup branch and release copy are on GitHub); the uptime check would say so,
+  and `provision.py` recreates the server.
