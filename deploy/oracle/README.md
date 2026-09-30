@@ -143,7 +143,7 @@ Two things on your side keep it that way:
   update command above.
 - **API_ACCESS_KEY** is generated on the server by the script; the web app adds
   it to every change request automatically.
-- **Login**: the whole site asks for a username and password (user `owner`).
+- **Login**: the whole site asks for a username and password (user `krushna21`).
   Only a bcrypt hash of the password is in `Caddyfile`; the owner has the
   password. To change it: `docker run --rm caddy:2 caddy hash-password`, put
   the new hash in `Caddyfile`, push to `main`. `/health` and `/health/api`
