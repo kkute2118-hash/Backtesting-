@@ -103,3 +103,12 @@ def test_overview_carries_market_breadth(seeded_db, client):
     assert b["threshold"] == core.S6_MIN_BREADTH
     assert b["gated_strategies"] == ["S1", "S2", "S3", "S6"]
     assert b["ready"] is True and b["history"]
+
+
+def test_new_index_members_get_their_history(store, monkeypatch):
+    _put(["OLD"], days=300)
+    _put(["NEWMEMBER"], days=7)
+    asked = []
+    monkeypatch.setattr(core, "download_prices", lambda tickers, start, end, **_: asked.extend(tickers))
+    got = daily_job._backfill_short_history(["OLD.NS", "NEWMEMBER.NS", "NEVERSEEN.NS"], date(2026, 9, 29))
+    assert got == ["NEVERSEEN.NS", "NEWMEMBER.NS"] and asked == got

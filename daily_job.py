@@ -183,6 +183,33 @@ def _sync_universes(universes):
     return names
 
 
+# A stock that joins an index (Nifty rebalances twice a year) arrives with only
+# the few days the daily top-up asks for, and a scan needs a year of history.
+BACKFILL_MIN_BARS = 260
+BACKFILL_YEARS = 2
+BACKFILL_MAX_PER_RUN = 100
+
+
+def _backfill_short_history(tickers, end):
+    """Download BACKFILL_YEARS of history for the tickers holding fewer than
+    BACKFILL_MIN_BARS stored sessions (at most BACKFILL_MAX_PER_RUN a run).
+    A genuinely recent listing simply gets what exists. Returns the symbols."""
+    wanted = {str(t).upper().replace(".NS", ""): t for t in tickers}
+    if not wanted:
+        return []
+    con = core._db()
+    try:
+        counts = dict(con.execute("SELECT symbol, COUNT(*) FROM candles GROUP BY symbol").fetchall())
+    finally:
+        con.close()
+    short = sorted(t for sym, t in wanted.items() if counts.get(sym, 0) < BACKFILL_MIN_BARS)
+    short = short[:BACKFILL_MAX_PER_RUN]
+    if short:
+        core.download_prices(tuple(short), end - timedelta(days=365 * BACKFILL_YEARS), end,
+                             max_workers=5)
+    return short
+
+
 def _prune_outside(keep):
     """Delete candles of shares outside `keep` (bare or .NS symbols) and outside
     the breadth universe. Indices are kept. Returns the symbols removed."""
@@ -583,6 +610,15 @@ def run_daily():
     log("universe", f"{', '.join(universes)} — {len(download):,} symbols to sync")
 
     step_sync(download, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
+    try:
+        filled = _backfill_short_history(download, core.last_expected_nse_session())
+        if filled:
+            log("backfill", f"downloaded {BACKFILL_YEARS} years for {len(filled)} stock(s) with "
+                            f"under {BACKFILL_MIN_BARS} sessions stored (new index members): "
+                            f"{', '.join(t.replace('.NS', '') for t in filled[:12])}"
+                            f"{'…' if len(filled) > 12 else ''}")
+    except Exception as exc:                  # never fail the run for this
+        log("backfill", f"skipped: {type(exc).__name__}: {exc}")
 
     tickers = core.resolve_universes(universes)
     if len(tickers) != len(download):
