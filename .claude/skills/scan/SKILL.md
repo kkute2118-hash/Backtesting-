@@ -71,7 +71,7 @@ GitHub job `.github/workflows/daily-forward-test.yml`. Do not run
 
    | Run (routine) | Event time (IST) | Title starts | What it is for |
    |---|---|---|---|
-   | 09:12 morning | 09:20-09:25 | "ATI 9:20" | market overview at the open: breadth and gate, regime, open paper trades and any gap through a stop, S6 watchlist, setups forming (provisional until the close) |
+   | 09:16 morning (after the 09:15 open, so prices are live) | 09:20-09:25 | "ATI 9:20" | market overview at the open: breadth and gate, regime, open paper trades and any gap through a stop, S6 watchlist, setups forming (provisional until the close) |
    | 15:05 afternoon | 15:15-15:20 | "ATI 3:15" | the decision run: setups to act on before 15:30 with entry, stop and quantity, exits today |
 
    - Settings: `timeZone` "Asia/Kolkata", `availability` AVAILABILITY_FREE,
@@ -129,7 +129,7 @@ shape is produced by `scripts/claude_dashboard.py`, so add fields there first.
 | IST, weekdays | Routine | What it does |
 |---|---|---|
 | 09:05 | ATI Lab morning data job kick | Wakes a small dedicated session that calls `workflow_dispatch` on `daily-forward-test.yml`. GitHub starts its own cron runs 4-5 hours late on this repository; dispatched runs start within seconds. The workflow's crons stay as a fallback. |
-| 09:12 | ATI Lab morning overview | Runs this skill with live prices and posts the 09:20 phone message (step 5). |
+| 09:16 | ATI Lab morning overview | Runs this skill with live prices and posts the 09:20 phone message (step 5). |
 | 15:05 | ATI Lab daily scan | Wakes the session that owns the page and runs this skill. The morning job has finished by then, so the page shows the newest candles, forward-test results and setups before the 15:30 close. |
 
 Manage them in claude.ai under Routines. If the page's "Updated" time is not
