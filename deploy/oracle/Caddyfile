@@ -35,6 +35,12 @@
 		rewrite * /health
 		reverse_proxy api:8000
 	}
+	# The server's daily work (backend/app/tasks/oracle_daily.py): scan and
+	# backtest reports as JSON files, behind the same login.
+	handle /reports/* {
+		root * /srv/data
+		file_server browse
+	}
 	handle /api/gateway/* {
 		reverse_proxy web:3000
 	}

@@ -61,6 +61,8 @@ services:
       # every rebuild (it rate-limits).
       - caddy-data:/data
       - caddy-config:/config
+      # Read-only, for /reports/ only (the daily work's JSON reports).
+      - market-data:/srv/data:ro
     depends_on:
       - api
       - web
