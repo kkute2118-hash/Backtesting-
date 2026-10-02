@@ -70,6 +70,60 @@ UNIT
 }
 install_snapshot_timer || echo "$(date -u +%FT%TZ) could not install the snapshot timer"
 
+# The server's daily work (daily-work.sh): an NSE Top 2000 scan at 09:20,
+# 12:30 and 15:10 IST on weekdays, and a two-year backtest of every strategy
+# every night at 02:00 IST. Reports at /reports/. Written only when changed.
+install_daily_work_timers() {
+  local changed=0 name want
+  for name in scan research; do
+    want="[Unit]
+Description=ATI Lab daily work: $name
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$APP_DIR/deploy/oracle/daily-work.sh $name
+TimeoutStartSec=3h"
+    if [ "$(cat /etc/systemd/system/ati-lab-$name.service 2>/dev/null)" != "$want" ]; then
+      printf '%s\n' "$want" > "/etc/systemd/system/ati-lab-$name.service"
+      changed=1
+    fi
+  done
+  local scan_timer research_timer
+  scan_timer="[Unit]
+Description=NSE Top 2000 scan at 09:20, 12:30 and 15:10 IST on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 03:50:00 UTC
+OnCalendar=Mon..Fri *-*-* 07:00:00 UTC
+OnCalendar=Mon..Fri *-*-* 09:40:00 UTC
+
+[Install]
+WantedBy=timers.target"
+  research_timer="[Unit]
+Description=Two-year backtest of every strategy, nightly at 02:00 IST
+
+[Timer]
+OnCalendar=*-*-* 20:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target"
+  if [ "$(cat /etc/systemd/system/ati-lab-scan.timer 2>/dev/null)" != "$scan_timer" ]; then
+    printf '%s\n' "$scan_timer" > /etc/systemd/system/ati-lab-scan.timer; changed=1
+  fi
+  if [ "$(cat /etc/systemd/system/ati-lab-research.timer 2>/dev/null)" != "$research_timer" ]; then
+    printf '%s\n' "$research_timer" > /etc/systemd/system/ati-lab-research.timer; changed=1
+  fi
+  if [ "$changed" = 1 ]; then
+    chmod +x "$APP_DIR/deploy/oracle/daily-work.sh"
+    systemctl daemon-reload
+    systemctl enable --now ati-lab-scan.timer ati-lab-research.timer
+    echo "$(date -u +%FT%TZ) daily work timers installed"
+  fi
+}
+install_daily_work_timers || echo "$(date -u +%FT%TZ) could not install the daily work timers"
+
 # HTTPS: Oracle's Ubuntu image rejects everything but SSH and the port 80 that
 # cloud-init.sh opened. Open 443 the same way, once, and persist it.
 if ! iptables -C INPUT -p tcp --dport 443 -m state --state NEW -j ACCEPT 2>/dev/null; then

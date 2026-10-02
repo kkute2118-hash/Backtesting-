@@ -24,6 +24,8 @@ stay inside Oracle's **Always Free** allowance, always:
   rebuilt by the `/scan` skill, works on its own. The Oracle server
   (`deploy/oracle/`, `ati-lab`, Always Free) runs the web app as a read-only
   mirror that follows the backup and `main` by itself (deploy/oracle/README.md).
+  It also runs its own daily scans and a nightly backtest
+  (`app/tasks/oracle_daily.py`), reports only, at `/reports/`.
   Neither depends on the other.
 - **Secrets never go into the backup.** The repository is public, so anyone
   can read the `db-backup` branch. `core.BACKUP_EMPTY_TABLES` empties

@@ -27,6 +27,19 @@ and never competes with them:
   (14 daily copies plus the first of each month for 6 months). It is the third
   copy of the database, after the `db-backup` branch and the `db-backup`
   GitHub Release (docs/DEPLOYMENT.md).
+- **Does real work every day.** `update.sh` also installs two timers that run
+  `daily-work.sh` inside the API container at `nice 15`
+  (`backend/app/tasks/oracle_daily.py`):
+  - `ati-lab-scan.timer`: S1-S6 over the stored NSE Top 2000 at 09:20, 12:30
+    and 15:10 IST on weekdays, with live Dhan prices while the market is open
+    (about 2 minutes each);
+  - `ati-lab-research.timer`: at 02:00 IST every night, every strategy backtested
+    over the last 2 years on every stored stock, by market-breadth band and as a
+    Rs 1 lakh account.
+
+  Reports are JSON files under `/reports/` on the site (same login), kept for
+  30 days. Neither job writes the backup or GitHub. The daily load is also what
+  keeps Oracle from reclaiming the server as idle (below).
 
 A server created before this existed needs one command, once:
 
@@ -158,6 +171,7 @@ Two things on your side keep it that way:
   failed run emails the repository owner.
 - **Logs** are capped at 3 x 10 MB per container, so they cannot fill the disk.
 - **Idle reclamation**: Oracle may reclaim an Always Free server that sits
-  almost completely idle for 7 days. The data does not depend on it (the
+  almost completely idle for 7 days; the daily scans and nightly research above
+  keep it busy. The data does not depend on it (the
   backup branch and release copy are on GitHub); the uptime check would say so,
   and `provision.py` recreates the server.
