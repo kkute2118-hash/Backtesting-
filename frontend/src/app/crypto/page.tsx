@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardHeader, CardBody } from "@/components/ui/Card";
 
 interface TrendStats {
   equity: number;
@@ -78,7 +78,7 @@ export default function CryptoTradingPage() {
     return (
       <div className="p-8">
         <h1 className="text-3xl font-bold mb-4">🚀 Crypto Trading (4H Retest Entry)</h1>
-        <div className="text-lg text-gray-600">Loading trading data...</div>
+        <div className="text-lg text-muted">Loading trading data...</div>
       </div>
     );
   }
@@ -87,11 +87,11 @@ export default function CryptoTradingPage() {
     return (
       <div className="p-8">
         <h1 className="text-3xl font-bold mb-4">🚀 Crypto Trading (4H Retest Entry)</h1>
-        <Card className="border-red-300 bg-red-50">
-          <CardContent className="pt-6">
+        <Card>
+          <CardBody>
             <p className="text-red-800">⚠️ {error}</p>
             <p className="text-sm text-red-600 mt-2">The trend_paper.py job may not have run yet. Check Oracle logs.</p>
-          </CardContent>
+          </CardBody>
         </Card>
       </div>
     );
@@ -101,15 +101,15 @@ export default function CryptoTradingPage() {
     <div className="p-8 max-w-7xl mx-auto">
       <div className="flex justify-between items-start mb-6">
         <div>
-          <h1 className="text-3xl font-bold">🚀 Crypto Trading (4H Retest Entry)</h1>
-          <p className="text-gray-600 mt-2">
+          <h1 className="text-3xl font-bold text-ink">🚀 Crypto Trading (4H Retest Entry)</h1>
+          <p className="text-muted mt-2">
             Retest entry + Dynamic leverage on 9 pairs (4 crypto + 5 forex)
           </p>
         </div>
         <button
           onClick={() => setAutoRefresh(!autoRefresh)}
           className={`px-4 py-2 rounded ${
-            autoRefresh ? "bg-green-600 text-white" : "bg-gray-300 text-gray-700"
+            autoRefresh ? "bg-positive text-white" : "bg-surface text-ink"
           }`}
         >
           {autoRefresh ? "🔄 Auto-refresh ON" : "⏸️ Auto-refresh OFF"}
@@ -119,60 +119,50 @@ export default function CryptoTradingPage() {
       {/* Key Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">Current Equity</CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardHeader title="Current Equity" />
+          <CardBody>
             <div className="text-2xl font-bold">Rs {stats?.equity?.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</div>
-            <p className="text-xs text-gray-500 mt-1">Started: Rs 10,000</p>
-          </CardContent>
+            <p className="text-xs text-muted mt-1">Started: Rs 10,000</p>
+          </CardBody>
         </Card>
 
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">Return Multiple</CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardHeader title="Return Multiple" />
+          <CardBody>
             <div className="text-2xl font-bold">{stats?.return_multiple?.toFixed(1)}x</div>
-            <p className="text-xs text-gray-500 mt-1">Growth factor</p>
-          </CardContent>
+            <p className="text-xs text-muted mt-1">Growth factor</p>
+          </CardBody>
         </Card>
 
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">Trades</CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardHeader title="Trades" />
+          <CardBody>
             <div className="text-2xl font-bold">{stats?.trades}</div>
-            <p className="text-xs text-gray-500 mt-1">Over {stats?.paper_start?.substring(0, 10)}</p>
-          </CardContent>
+            <p className="text-xs text-muted mt-1">Over {stats?.paper_start?.substring(0, 10)}</p>
+          </CardBody>
         </Card>
 
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">Avg R</CardTitle>
-          </CardHeader>
-          <CardContent>
+          <CardHeader title="Avg R" />
+          <CardBody>
             <div className={`text-2xl font-bold ${stats?.avg_r && stats.avg_r > 0 ? "text-green-600" : "text-red-600"}`}>
               {stats?.avg_r?.toFixed(2)}R
             </div>
-            <p className="text-xs text-gray-500 mt-1">Risk-adjusted return</p>
-          </CardContent>
+            <p className="text-xs text-muted mt-1">Risk-adjusted return</p>
+          </CardBody>
         </Card>
       </div>
 
       {/* Markets Status */}
       <Card className="mb-6">
-        <CardHeader>
-          <CardTitle>Live Markets Status</CardTitle>
-        </CardHeader>
-        <CardContent>
+        <CardHeader title="Live Markets Status" />
+        <CardBody>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {stats?.markets &&
               Object.entries(stats.markets).map(([symbol, market]: [string, any]) => (
-                <div key={symbol} className="border rounded p-3 bg-gray-50">
-                  <div className="font-bold text-sm">{symbol}</div>
-                  <div className="text-xs text-gray-600 mt-1">
+                <div key={symbol} className="border border-line rounded p-3 bg-surface">
+                  <div className="font-bold text-sm text-ink">{symbol}</div>
+                  <div className="text-xs text-muted mt-1">
                     {market.status === "flat" && "⏳ Waiting for breakout"}
                     {market.status === "awaiting_retest" && "🔄 Awaiting retest"}
                     {market.status === "long" && `📈 LONG from ${market.entry?.toFixed(4)}`}
@@ -181,39 +171,37 @@ export default function CryptoTradingPage() {
                 </div>
               ))}
           </div>
-        </CardContent>
+        </CardBody>
       </Card>
 
       {/* Recent Trades */}
       <Card>
-        <CardHeader>
-          <CardTitle>Recent Closed Trades</CardTitle>
-        </CardHeader>
-        <CardContent>
+        <CardHeader title="Recent Closed Trades" />
+        <CardBody>
           {trades.length === 0 ? (
-            <p className="text-gray-600">No trades closed yet. Waiting for first breakout signal...</p>
+            <p className="text-muted">No trades closed yet. Waiting for first breakout signal...</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="bg-gray-100">
+                <thead className="bg-surface border-b border-line">
                   <tr>
-                    <th className="text-left p-2">Symbol</th>
-                    <th className="text-left p-2">Entry Time</th>
-                    <th className="text-right p-2">Entry</th>
-                    <th className="text-right p-2">Exit</th>
-                    <th className="text-left p-2">Why</th>
-                    <th className="text-right p-2">R</th>
+                    <th className="text-left p-2 text-ink font-semibold">Symbol</th>
+                    <th className="text-left p-2 text-ink font-semibold">Entry Time</th>
+                    <th className="text-right p-2 text-ink font-semibold">Entry</th>
+                    <th className="text-right p-2 text-ink font-semibold">Exit</th>
+                    <th className="text-left p-2 text-ink font-semibold">Why</th>
+                    <th className="text-right p-2 text-ink font-semibold">R</th>
                   </tr>
                 </thead>
                 <tbody>
                   {trades.slice(0, 20).map((trade, i) => (
-                    <tr key={i} className={i % 2 === 0 ? "bg-white" : "bg-gray-50"}>
-                      <td className="p-2 font-bold">{trade.symbol}</td>
-                      <td className="p-2 text-xs">{new Date(trade.entry_time).toLocaleString()}</td>
-                      <td className="p-2 text-right">{trade.entry?.toFixed(4)}</td>
-                      <td className="p-2 text-right">{trade.exit?.toFixed(4)}</td>
-                      <td className="p-2">{trade.why}</td>
-                      <td className={`p-2 text-right font-bold ${trade.r > 0 ? "text-green-600" : "text-red-600"}`}>
+                    <tr key={i} className="border-b border-line hover:bg-surface">
+                      <td className="p-2 font-bold text-ink">{trade.symbol}</td>
+                      <td className="p-2 text-xs text-muted">{new Date(trade.entry_time).toLocaleString()}</td>
+                      <td className="p-2 text-right text-ink">{trade.entry?.toFixed(4)}</td>
+                      <td className="p-2 text-right text-ink">{trade.exit?.toFixed(4)}</td>
+                      <td className="p-2 text-muted">{trade.why}</td>
+                      <td className={`p-2 text-right font-bold ${trade.r > 0 ? "text-positive" : "text-critical"}`}>
                         {trade.r?.toFixed(2)}R
                       </td>
                     </tr>
@@ -222,10 +210,10 @@ export default function CryptoTradingPage() {
               </table>
             </div>
           )}
-        </CardContent>
+        </CardBody>
       </Card>
 
-      <p className="text-xs text-gray-500 mt-4">
+      <p className="text-xs text-muted mt-4">
         Last updated: {stats?.updated} IST | Strategy: Retest entry + Dynamic leverage (3x-8x)
       </p>
     </div>
