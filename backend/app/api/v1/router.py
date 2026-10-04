@@ -7,10 +7,11 @@ page reads scanner + universes + presets.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import (backtest_routes, crypto_routes, data_routes,
-                                  forward_routes, jobs_routes, learning_routes,
-                                  market_routes, product_routes, research_routes,
-                                  scanner_routes, stocks_routes, system)
+from app.api.v1.endpoints import (backtest_routes, crypto_routes, crypto_signals,
+                                  data_routes, forward_routes, jobs_routes,
+                                  learning_routes, market_routes, product_routes,
+                                  research_routes, scanner_routes, stocks_routes,
+                                  system)
 
 api_router = APIRouter()
 api_router.include_router(system.router, tags=["system"])
@@ -25,3 +26,4 @@ api_router.include_router(backtest_routes.router, tags=["backtest"])
 api_router.include_router(data_routes.router, tags=["data"])
 api_router.include_router(research_routes.router, tags=["research"])
 api_router.include_router(crypto_routes.router, tags=["crypto"])
+api_router.include_router(crypto_signals.router, tags=["crypto-signals"])
