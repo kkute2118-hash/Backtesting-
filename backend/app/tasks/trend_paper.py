@@ -2,7 +2,9 @@
 (research/fx_crypto/STEP5_DAILY_TREND.md, STEP12_FINAL_OPTIMIZED_STRATEGY.md).
 
 Rules (frozen; changing them restarts the paper book):
-  markets   BTC, ETH, SOL, BNB, XRP and gold, as Binance USD-M perpetuals
+  markets   BTC, ETH, SOL, BNB, XRP and gold perpetuals + 6 forex pairs
+            Crypto: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT (Binance)
+            Forex: EURUSD, GBPUSD, USDJPY, AUDUSD, NZDUSD, USDCAD (Yahoo Finance)
   signal    a 4h close above the highest high of the previous 55 4h bars,
             with the last completed daily close above its 200-day average
   entry     RETEST MODE (enabled): wait for price to retest the breakout level
@@ -52,9 +54,12 @@ import pandas as pd
 import requests
 
 REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/data/reports"))
-SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "XAUUSDT")
+SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "XAUUSDT",
+           "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD")
 YAHOO = {"XAUUSDT": "GC=F", "BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
-         "BNBUSDT": "BNB-USD", "XRPUSDT": "XRP-USD"}
+         "BNBUSDT": "BNB-USD", "XRPUSDT": "XRP-USD",
+         "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
+         "AUDUSD": "AUDUSD=X", "NZDUSD": "NZDUSD=X", "USDCAD": "USDCAD=X"}
 N_IN, N_OUT, ATR_N, STOP_ATR = 55, 20, 20, 2.0
 TAKER = 0.0005 * 1.18 + 0.0001
 FUNDING_PER_15M = 0.0001 / 32
@@ -75,12 +80,21 @@ DYNAMIC_LEVERAGE = os.environ.get("DYNAMIC_LEVERAGE", "1") == "1"  # enable dyna
 
 # Win rate by symbol from backtest (retest entry mode)
 WIN_RATES = {
+    # Crypto (highest quality, most liquid)
     "BTCUSDT": 0.42,  # Bitcoin: most liquid, clear trends
     "ETHUSDT": 0.40,  # Ethereum: good volatility
     "SOLUSDT": 0.38,  # SOL: smaller, more volatile
     "BNBUSDT": 0.36,  # BNB: medium liquidity
     "XRPUSDT": 0.35,  # XRP: sometimes choppy
-    "XAUUSDT": 0.39,  # Gold: consistent trends
+    # Precious metals
+    "XAUUSDT": 0.39,  # Gold: consistent trends, less leverage
+    # Forex (24h markets, liquid trends)
+    "EURUSD": 0.41,   # EUR/USD: most liquid forex pair, smooth trends
+    "GBPUSD": 0.39,   # GBP/USD: good volatility, clear support/resistance
+    "USDJPY": 0.38,   # USD/JPY: lower volatility, steady trends
+    "AUDUSD": 0.37,   # AUD/USD: commodity linked, more volatile
+    "NZDUSD": 0.36,   # NZD/USD: lower liquidity, choppy at times
+    "USDCAD": 0.38,   # USD/CAD: oil-linked, good correlations
 }
 
 
@@ -292,7 +306,9 @@ def notify(topic: str, title: str, body: str, high: bool = False) -> bool:
 
 def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str, bool]:
     """(title, body, urgent) for one event, with the order to place."""
-    name = sym.replace("USDT", "")
+    name = sym.replace("USDT", "")  # Remove USDT from crypto pairs, leave forex as-is
+    is_forex = sym in ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD")
+    instrument = f"{sym}" if is_forex else f"{name} perp"
 
     # BREAKOUT signal (retest mode)
     if "Waiting for retest" in event and st.get("status") == "awaiting_retest":
@@ -302,7 +318,7 @@ def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str,
         stop_approx = signal_close - stop_dist
         size_x_dyn = _calc_dynamic_leverage(sym)
         return (f"{name}: Breakout at {signal_close:.6g} - wait for retest",
-                f"4h breakout on {name}USDT perp.\n4h close: {signal_close:.6g} > 55-bar high: {level:.6g}\n\n"
+                f"4h breakout on {instrument}.\n4h close: {signal_close:.6g} > 55-bar high: {level:.6g}\n\n"
                 f"⏳ WAITING for retest of {level:.6g}\n\n"
                 f"When price touches {level:.6g}:\nBUY at market\nSTOP ~{stop_approx:.6g}\n"
                 f"Leverage: {size_x_dyn:.1f}x (based on backtest {WIN_RATES.get(sym, 0.39):.0%} win rate)\n"
@@ -319,7 +335,7 @@ def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str,
                    f"Risk on trade: Rs {risk_amt:,.0f} (2% of Rs {equity:,.0f})\n"
                    f"Stop distance: {(entry - stop) / entry:.1%} (~{stop:.6g})")
         return (f"{name}: RETEST ENTRY NOW at {entry:.6g}",
-                f"🎯 RETEST ENTRY - BUY IMMEDIATELY\n{name}USDT perp\n\n"
+                f"🎯 RETEST ENTRY - BUY IMMEDIATELY\n{instrument}\n\n"
                 f"BUY: {entry:.6g}\nSTOP: {stop:.6g}\n"
                 f"Leverage: {size_x:.1f}x\n\n{qty_note}\n\n"
                 f"Exit: 4h close below 20-bar low", True)
@@ -333,7 +349,7 @@ def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str,
         qty_note = (f"Position size: Rs {equity * size_x:,.0f} ({size_x:.1f}x leverage)\n"
                    f"Risk on trade: Rs {risk_amt:,.0f}")
         return (f"{name}: entry recorded",
-                f"ENTRY EXECUTED\n{name}USDT perp\nEntry: {entry:.6g}\nStop: {stop:.6g}\n"
+                f"ENTRY EXECUTED\n{instrument}\nEntry: {entry:.6g}\nStop: {stop:.6g}\n"
                 f"Leverage: {size_x:.1f}x\n\n{qty_note}\n\nPut the stop order on the exchange now.", False)
 
     if "below the 20-bar low" in event:

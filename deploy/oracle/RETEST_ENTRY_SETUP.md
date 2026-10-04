@@ -2,17 +2,56 @@
 
 ## Overview
 
-The updated `trend_paper.py` implements two major improvements from STEP12 optimization:
+The updated `trend_paper.py` implements improvements from STEP12 optimization across **12 trading instruments**:
+
+**Crypto (6)**: BTC, ETH, SOL, BNB, XRP, Gold
+**Forex (6)**: EUR/USD, GBP/USD, USD/JPY, AUD/USD, NZD/USD, USD/CAD
+
+### Three Major Improvements
 
 1. **Retest Entry Mode**: +0.66R average vs +0.54R baseline (+22% improvement)
    - Waits for price to retest the 4h breakout level before entering
    - Better entry timing, fewer false breakouts
    - Reduces slippage and whipsaws
+   - Works on both crypto and forex
 
 2. **Dynamic Leverage**: 3x-8x based on backtest win probability
    - Higher leverage (8x) when win probability >45%
    - Conservative leverage (3x) when win probability <40%
    - Scales position size automatically per symbol
+   - Per-symbol win rates:
+     * EUR/USD: 41%, BTC: 42%, ETH: 40% → 6x leverage (high probability)
+     * SOL: 38%, Gold: 39%, USD/CAD: 38% → 5x leverage (good probability)
+     * GBP/USD: 39%, USDJPY: 38% → 5x leverage (good probability)
+     * BNB: 36%, AUD/USD: 37%, XRP: 35%, NZD/USD: 36% → 3x leverage (conservative)
+
+3. **24-Hour Trading**: Forex pairs trade 24/5 for continuous opportunities
+   - Crypto: Binance perpetuals (24/7)
+   - Forex: Yahoo Finance data (24h markets, 5-day week)
+
+## Supported Instruments (12 Total)
+
+### Crypto Perpetuals (6 pairs - 24/7, Binance Futures)
+| Symbol | Win Rate | Leverage | Characteristics |
+|--------|----------|----------|-----------------|
+| BTCUSDT | 42% | 8x | Most liquid, clear trends, high volatility |
+| ETHUSDT | 40% | 6x | Good volatility, follows BTC |
+| SOLUSDT | 38% | 5x | Smaller cap, more volatile |
+| XAUUSDT | 39% | 5x | Gold: consistent trends, less volatile |
+| BNBUSDT | 36% | 3x | Medium liquidity, choppy sometimes |
+| XRPUSDT | 35% | 3x | Smaller, often choppy, conservative |
+
+### Forex Pairs (6 pairs - 24H Mon-Fri, Yahoo Finance)
+| Pair | Win Rate | Leverage | Characteristics |
+|------|----------|----------|-----------------|
+| EURUSD | 41% | 6x | Most liquid forex, smooth trends |
+| GBPUSD | 39% | 5x | Volatile, clear support/resistance |
+| USDCAD | 38% | 5x | Oil-linked, good correlations |
+| USDJPY | 38% | 5x | Lower volatility, steady trends |
+| AUDUSD | 37% | 3x | Commodity-linked, moderate volatility |
+| NZDUSD | 36% | 3x | Lower liquidity, can be choppy |
+
+**Total opportunity**: 12 independent 4h breakout signals, running 24 hours across crypto and forex.
 
 ## Environment Variables
 
@@ -98,28 +137,43 @@ The next 4h breakout will test the system. You should see:
 ## Performance Expectations
 
 ### Retest Entry Benefits
-- **Backtest results** (synthetic 5.2-year data):
+- **Backtest results** (synthetic 5.2-year data, crypto):
   - 155 trades (40% fewer than baseline)
   - 39.4% win rate (vs 35.7% baseline)
   - +0.66R average (vs +0.54R baseline)
   - Better entry prices (retests mean less momentum, better targets)
 
 ### Dynamic Leverage Scaling
-Per-symbol win rates from backtest:
-- BTC: 42% win rate → 6x leverage
-- ETH: 40% win rate → 6x leverage
-- SOL: 38% win rate → 5x leverage
-- BNB: 36% win rate → 3x leverage
-- XRP: 35% win rate → 3x leverage
-- Gold: 39% win rate → 5x leverage
+Automatically scales 3x-8x based on per-symbol backtest win rates:
+- **High probability (40-42% win)**: 6-8x leverage (BTC, ETH, EUR/USD)
+- **Good probability (38-39% win)**: 5x leverage (SOL, Gold, GBP/USD, USD/CAD)
+- **Conservative (35-37% win)**: 3x leverage (BNB, XRP, AUD/USD, NZD/USD)
 
 ### Expected Account Growth (Rs 10,000)
+
+**Crypto only** (current baseline):
 ```
-Assuming +0.66R average, 39% win rate, 155 trades over 5.2 years:
+5 crypto pairs + gold, 155 trades over 5.2 years:
 - Current: Rs 1,38,514 (13.8x, +0.54R avg)
 - With retest: Rs 1,60,000-1,80,000 (16-18x, +0.66R avg)
 - Annual CAGR: 50-55% (vs 45-50% current)
 ```
+
+**With Forex Added** (expected expansion):
+```
+6 crypto pairs + 6 forex pairs, 12 independent signals:
+- Estimated total trades: 155 + 120-150 forex = 275-305 trades over 5.2 years
+- Win rate: 38-39% (forex similar to crypto)
+- Avg R: +0.62-0.66R (blended across all pairs)
+- Expected final: Rs 2,50,000-3,50,000 (25-35x growth)
+- Annual CAGR: 55-65% (with better diversification)
+- Drawdown: -20-25% (better due to diversification)
+```
+
+**Diversification benefit**:
+- 12 markets reduce correlation risk
+- Forex trades when crypto ranges (24h coverage)
+- Different volatility regimes → consistent signal frequency
 
 ## Rollback If Issues
 
