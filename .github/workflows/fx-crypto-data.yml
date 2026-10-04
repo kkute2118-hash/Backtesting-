@@ -1,0 +1,44 @@
+# Downloads free 5-minute forex (Dukascopy) and crypto perpetual (Binance)
+# history and publishes it as assets of the `fx-crypto-data` release, for the
+# intraday market-structure research (scripts/fetch_fx_crypto.py). No API key.
+# Never touches the database or the db-backup branch.
+name: Forex and crypto data
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First day to download (YYYY-MM-DD)"
+        required: true
+        default: "2021-01-01"
+      only:
+        description: "Only these symbols, comma-separated (blank = all)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "17 2 * * 6"   # Saturdays 07:47 IST, when forex is shut
+
+permissions:
+  contents: write          # the release assets only
+
+concurrency:
+  group: fx-crypto-data
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install "pandas>=2.0,<3" "requests>=2.31,<3"
+      - name: Download and publish
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+          START: ${{ inputs.start || '2021-01-01' }}
+          ONLY: ${{ inputs.only || '' }}
+        run: python scripts/fetch_fx_crypto.py "$RUNNER_TEMP/fxc" --start "$START" --only "$ONLY" --upload
