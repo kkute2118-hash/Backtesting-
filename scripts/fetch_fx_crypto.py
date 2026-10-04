@@ -57,6 +57,7 @@ session.headers["User-Agent"] = "Mozilla/5.0 (research data download)"
 
 
 def _get(url, tries=5):
+    last = None
     for i in range(tries):
         try:
             r = session.get(url, timeout=60)
@@ -64,10 +65,11 @@ def _get(url, tries=5):
                 return None
             if r.ok:
                 return r.content
-        except requests.RequestException:
-            pass
+            last = f"HTTP {r.status_code} {r.text[:120]!r}"
+        except requests.RequestException as exc:
+            last = f"{type(exc).__name__}: {exc}"[:200]
         time.sleep(2 ** i)
-    raise RuntimeError(f"download failed: {url}")
+    raise RuntimeError(f"download failed: {url} ({last})")
 
 
 def _months(start: date, end: date):
@@ -149,8 +151,21 @@ def forex_5m(sym, start, end):
     days = [d for d in days if d.weekday() != 5]        # nothing trades on Saturday
     out = {}
     for side in ("BID", "ASK"):
-        with ThreadPoolExecutor(8) as ex:
-            parts = [p for p in ex.map(lambda d: _duka_day(sym, side, d), days) if p is not None]
+        failed = []
+
+        def day(d):
+            try:
+                return _duka_day(sym, side, d)
+            except RuntimeError as exc:
+                failed.append(str(exc))
+                return None
+        # Dukascopy throttles parallel clients; two at a time stays under it.
+        with ThreadPoolExecutor(2) as ex:
+            parts = [p for p in ex.map(day, days) if p is not None]
+        if failed:
+            print(f"{sym} {side}: {len(failed)} of {len(days)} days failed, first: {failed[0]}", flush=True)
+        if len(failed) > 0.05 * len(days) or not parts:
+            raise RuntimeError(f"{sym} {side}: too many failed days")
         df = pd.concat(parts, ignore_index=True).set_index("time").sort_index()
         df[["open", "close", "low", "high"]] /= scale
         bad = (df.low > df[["open", "close"]].min(axis=1) + 1e-9) | (df.high < df[["open", "close"]].max(axis=1) - 1e-9)
