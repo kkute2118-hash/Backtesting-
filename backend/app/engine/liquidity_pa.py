@@ -76,6 +76,7 @@ class Params:
     entry: str = "ltf"          # "ltf" (method C) or "limit" (method A)
     pool_max_age: int = 96 * 5  # 15-minute bars a swing pool stays live (5 days)
     crypto_cost_per_side: float = CRYPTO_COST_PER_SIDE   # fee + slippage, fraction of price
+    fill_through: float = 0.0   # a limit fills only if price trades this many ATR through it
 
 
 def is_crypto(sym: str) -> bool:
@@ -301,7 +302,49 @@ class Engine:
                     continue
                 still.append(cd)
             pending = still[-50:]
+        self.final_pending, self.final_pools = pending, pools
         return setups
+
+    def pending_orders(self) -> list[dict]:
+        """After run(): liquidity runs still waiting for their first retest at
+        the end of the data, written as the limit order the strategy would
+        place now (entry, stop, targets, score) and when it expires. Call
+        run() first."""
+        p, n = self.p, len(self.c)
+        out = []
+        for cd in getattr(self, "final_pending", []):
+            if cd.get("stage") != "retest_level":
+                continue
+            bull = cd["side"] == "bsl"
+            d = 1 if bull else -1
+            a = self.atr[n - 1]
+            lvl = cd["level"]
+            entry = lvl + d * 0.1 * a
+            stop = lvl - d * p.stop_buffer * a
+            risk = (entry - stop) * d
+            side = "bsl" if d > 0 else "ssl"
+            tgts = sorted((q for q in self.final_pools if q.side == side and (q.price - entry) * d > 0),
+                          key=lambda q: (q.price - entry) * d)
+            if not tgts or risk <= 0:
+                continue
+            tp1 = tgts[0].price
+            major = [q for q in tgts[1:] if KIND_RANK[q.kind] >= 2]
+            tp2 = major[0].price if major else (tgts[1].price if len(tgts) > 1 else tp1)
+            regime, rh, rl = self.htf_read(self.t[n - 1], entry)
+            s = Setup(symbol=self.sym, family="continuation", direction=d, event_time=str(self.t[cd["i"]]),
+                      event="run", pool_kind=cd["kind"], htf_regime=regime,
+                      htf_aligned=(regime == "bull" and d > 0) or (regime == "bear" and d < 0),
+                      msb="n/a", displacement=True, fvg=False, zone="level",
+                      discount_ok=(rh is not None and rl is not None and rh > rl
+                                   and ((entry < (rh + rl) / 2) if d > 0 else (entry > (rh + rl) / 2))),
+                      ote=False, entry_method=p.entry, entry=float(entry), stop=float(stop),
+                      tp1=float(tp1), tp2=float(tp2), rr1=round((tp1 - entry) * d / risk, 2),
+                      rr2=round((tp2 - entry) * d / risk, 2))
+            s.score = score_setup(s)
+            expires = self.t[min(cd["run_i"] + p.retest_bars, n - 1)] if cd["run_i"] + p.retest_bars < n \
+                else self.t[n - 1] + pd.Timedelta(minutes=15 * (cd["run_i"] + p.retest_bars - (n - 1)))
+            out.append({**asdict(s), "expires": str(expires), "grade": grade(s.score)})
+        return out
 
     def _add_pool(self, pools, new, a):
         for q in pools:
@@ -470,8 +513,9 @@ class Engine:
         entry_k = None
         if p.entry == "limit":
             px = cd["zhi"] if d > 0 else cd["zlo"]
+            through = p.fill_through * a
             for k in range(k0, min(k0 + 3, len(self.l5c))):
-                if (d > 0 and self.l5l[k] <= px) or (d < 0 and self.l5h[k] >= px):
+                if (d > 0 and self.l5l[k] <= px - through) or (d < 0 and self.l5h[k] >= px + through):
                     entry_k, entry = k, px
                     break
         else:
