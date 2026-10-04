@@ -155,7 +155,10 @@ if [ -n "$token" ] && [[ "$repo_url" == https://github.com/* ]]; then
 else
   git fetch --quiet origin main
 fi
-if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && [ "$changed_env" = 0 ] \
+# Compared with the last commit that built and started, not with HEAD: HEAD
+# moves before the build, so a failed build would otherwise never be retried.
+DEPLOYED_FILE=/var/lib/ati-lab/deployed-commit
+if [ "$(cat "$DEPLOYED_FILE" 2>/dev/null)" = "$(git rev-parse origin/main)" ] && [ "$changed_env" = 0 ] \
    && [ "${1:-}" != "--force" ]; then
   echo "$(date -u +%FT%TZ) up to date at $(git rev-parse --short HEAD)"
   exit 0
@@ -170,4 +173,6 @@ echo "$(date -u +%FT%TZ) updating to $(git rev-parse --short HEAD)"
 "${COMPOSE[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
 # Old image layers pile up with every rebuild; the boot disk is only ~47 GB.
 docker image prune -f >/dev/null
+mkdir -p "$(dirname "$DEPLOYED_FILE")"
+git rev-parse HEAD > "$DEPLOYED_FILE"
 echo "$(date -u +%FT%TZ) running $(git rev-parse --short HEAD)"
