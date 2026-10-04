@@ -37,10 +37,12 @@ and never competes with them:
     over the last 2 years on every stored stock, by market-breadth band and as a
     Rs 1 lakh account.
 
-  - `ati-lab-trend.timer`: every 15 minutes, the 4-hour trend strategy for
+  - `ati-lab-trend.timer`: every 5 minutes, the 4-hour trend strategy for
     crypto and gold perpetuals is paper-traded live
     (`backend/app/tasks/trend_paper.py`, Binance public candles, Yahoo Finance
-    as the fallback). The book is at `/reports/trend.html`.
+    as the fallback). The book is at `/reports/trend.html`. Breakouts, fills
+    and exits are pushed to the owner's phone through the free ntfy app; the
+    private topic name is created on the server and shown only on that page.
 
   Reports are JSON files under `/reports/` on the site (same login), kept for
   30 days. Neither job writes the backup or GitHub. The daily load is also what

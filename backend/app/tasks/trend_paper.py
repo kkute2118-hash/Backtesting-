@@ -13,7 +13,7 @@ Rules (frozen; changing them restarts the paper book):
             slippage on the exit, funding 0.01% per 8 hours held
   account   Rs 10,000 paper, 1% of equity risked a trade
 
-Runs every 15 minutes (deploy/oracle/update.sh, ati-lab-trend.timer). Each
+Runs every 5 minutes (deploy/oracle/update.sh, ati-lab-trend.timer). Each
 run reads only completed candles and moves each market's state forward bar by
 bar from where the last run stopped, so a missed run catches up. Writes
 REPORT_DIR/trend-state.json (the book), trend-latest.json and trend.html
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import time
 from datetime import timezone
@@ -47,6 +48,7 @@ TAKER = 0.0005 * 1.18 + 0.0001
 FUNDING_PER_15M = 0.0001 / 32
 START_EQUITY, RISK = 10_000.0, 0.01
 UA = {"User-Agent": "Mozilla/5.0 (ATI Lab paper trading)"}
+NTFY = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 
 
 # ------------------------------------------------------------------ data
@@ -177,6 +179,44 @@ def _close(st, px, ts, why, events, sym):
         st.pop(k, None)
 
 
+# ---------------------------------------------------------- phone alerts
+def notify(topic: str, title: str, body: str, high: bool = False) -> bool:
+    """Push to the ntfy app on the owner's phone (subscribed to `topic`).
+    Never raises: a failed alert must not stop the book."""
+    try:
+        r = requests.post(f"{NTFY}/{topic}", data=body.encode("utf-8"), timeout=15, headers={
+            "Title": title.encode("ascii", "ignore").decode(), "Priority": "high" if high else "default",
+            "Tags": "chart_with_upwards_trend" if high else "information_source"})
+        return r.ok
+    except Exception:
+        return False
+
+
+def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str, bool]:
+    """(title, body, urgent) for one event, with the order to place."""
+    name = sym.replace("USDT", "")
+    if "BREAKOUT" in event and st.get("status") == "pending":
+        lvl, stop = st["level"], st["level"] - STOP_ATR * st["atr"]
+        risk_rs = equity * RISK
+        qty_note = (f"Size for Rs {equity:,.0f} at 1% risk (Rs {risk_rs:,.0f}): position value "
+                    f"{risk_rs / ((lvl - stop) / lvl):,.0f} Rs, i.e. leverage about "
+                    f"{(risk_rs / ((lvl - stop) / lvl)) / equity:.1f}x.")
+        exp = pd.Timestamp(st["expires"]).tz_convert("Asia/Kolkata").strftime("%d %b %H:%M IST")
+        return (f"{name}: BUY LIMIT {lvl:.6g}",
+                f"4h breakout on {name}USDT perp.\nPlace BUY LIMIT at {lvl:.6g}\nSTOP {stop:.6g} "
+                f"({(lvl - stop) / lvl:.1%} below)\nCancel if not filled by {exp}.\n{qty_note}\n"
+                f"Exit rule: sell after a 4h close below the 20-bar low (you will get an alert).", True)
+    if "BOUGHT" in event:
+        return f"{name}: limit FILLED", event + "\nKeep the stop order on the exchange.", True
+    if "below the 20-bar low" in event:
+        return f"{name}: SELL now", event + "\nClose the position at market now.", True
+    if "SOLD" in event:
+        return f"{name}: position closed", event, False
+    if "expired" in event:
+        return f"{name}: cancel the buy limit", event, False
+    return f"{name}", event, False
+
+
 # --------------------------------------------------------------- report
 def _equity(trades):
     eq = START_EQUITY
@@ -219,6 +259,9 @@ table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #ddd;
 <h2>4H trend strategy: paper book</h2>
 <p>Updated {ist(now)} IST. Paper start {book['start'][:10]}. Rs 10,000 paper account, 1% risk a trade, after charges.</p>
 <p class=k>Rs {eq:,.0f} &middot; {len(trades)} trades &middot; {sum(rs):+.2f}R</p>
+<p><b>Phone alerts:</b> install the free <b>ntfy</b> app, tap +, and subscribe to the topic
+<code style="font-size:16px">{book.get('ntfy_topic', '(set by NTFY_TOPIC)')}</code> (server ntfy.sh). Breakouts arrive about a
+minute after the 4h close with the exact limit, stop and size.</p>
 <h3>Markets now</h3><table><tr><th>market</th><th>state</th><th>data</th></tr>{''.join(rows)}</table>
 <h3>Latest events</h3><ul>{ev or '<li>none yet</li>'}</ul>
 <h3>Closed trades</h3><table><tr><th>entered</th><th>market</th><th>entry</th><th>exit</th><th>why</th><th>R</th></tr>{trows}</table>
@@ -233,6 +276,13 @@ def run():
     book = json.loads(path.read_text()) if path.exists() else {
         "start": pd.Timestamp.now(tz="UTC").isoformat(timespec="minutes"), "markets": {}, "events": []}
     now = pd.Timestamp.now(tz="UTC")
+    topic = os.environ.get("NTFY_TOPIC") or book.get("ntfy_topic")
+    if not topic:
+        # A private channel name, kept on the server (behind the site login), never in the repository.
+        topic = book["ntfy_topic"] = f"ati-trend-{secrets.token_hex(8)}"
+        notify(topic, "ATI trend alerts connected", "You will get breakouts, fills and exits here.")
+    trades_so_far = [t for st_ in book["markets"].values() for t in st_.get("closed", [])]
+    equity = _equity(trades_so_far)
     sources, new_events = {}, []
     for sym in SYMBOLS:
         try:
@@ -244,6 +294,8 @@ def run():
         st = book["markets"].setdefault(sym, {})
         for e in advance(st, indicators(d1, h4), m15, sym):
             new_events.append(f"{now.tz_convert('Asia/Kolkata').strftime('%d %b %H:%M')} IST {e}")
+            title, body, urgent = alert_text(sym, e, st, equity)
+            notify(topic, title, body, urgent)
         time.sleep(0.2)
     book["events"] = (book.get("events", []) + new_events)[-500:]
     path.write_text(json.dumps(book, indent=1, default=str))
