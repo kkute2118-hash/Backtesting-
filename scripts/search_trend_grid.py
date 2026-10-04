@@ -39,6 +39,7 @@ def run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side_cost, 
         stop_k, entry_mode, dirs, lim_bars):
     n = len(c)
     out_i = np.empty(n, np.int64)
+    out_e = np.empty(n, np.int64)
     out_r = np.empty(n, np.float64)
     out_g = np.empty(n, np.float64)
     k = 0
@@ -48,6 +49,7 @@ def run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side_cost, 
     pend_atr = 0.0
     pend_left = 0
     entry = stop = risk = fee_in = 0.0
+    e_i = 0
     fund_acc = 0.0
     exit_next = False
     for i in range(1, n):
@@ -56,7 +58,7 @@ def run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side_cost, 
             px = o[i]
             g = (px - entry) * pos / risk
             cost = (fee_in * entry + side_cost * px + fund_acc * entry) / risk
-            out_i[k] = i; out_r[k] = g - cost; out_g[k] = g; k += 1
+            out_i[k] = i; out_e[k] = e_i; out_r[k] = g - cost; out_g[k] = g; k += 1
             pos = 0; exit_next = False
         # 2) a pending limit may fill
         if pos == 0 and pend != 0:
@@ -66,7 +68,7 @@ def run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side_cost, 
                 entry = max(o[i], pend_lvl); pos = -1
             if pos != 0:
                 stop = entry - pos * stop_k * pend_atr; risk = stop_k * pend_atr
-                fee_in = lim_cost; fund_acc = 0.0; pend = 0
+                fee_in = lim_cost; fund_acc = 0.0; pend = 0; e_i = i
             else:
                 pend_left -= 1
                 if pend_left <= 0:
@@ -79,7 +81,7 @@ def run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side_cost, 
                 px = min(o[i], stop) if pos == 1 else max(o[i], stop)
                 g = (px - entry) * pos / risk
                 cost = (fee_in * entry + side_cost * px + fund_acc * entry) / risk
-                out_i[k] = i; out_r[k] = g - cost; out_g[k] = g; k += 1
+                out_i[k] = i; out_e[k] = e_i; out_r[k] = g - cost; out_g[k] = g; k += 1
                 pos = 0
                 continue
         # 4) at this bar's close: exit rule, then new signals
@@ -107,10 +109,10 @@ def run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side_cost, 
                 d = 1 if pend == 2 else -1
                 pos = d; entry = o[i + 1]
                 stop = entry - d * stop_k * pend_atr; risk = stop_k * pend_atr
-                fee_in = side_cost; fund_acc = 0.0
+                fee_in = side_cost; fund_acc = 0.0; e_i = i + 1
                 # the entry bar's stop/exit is processed on the next iteration
             pend = 0
-    return out_i[:k], out_r[:k], out_g[:k]
+    return out_i[:k], out_e[:k], out_r[:k], out_g[:k]
 
 
 def load(data: Path, sym: str):
@@ -172,7 +174,7 @@ def main():
                 # no trades before the 200-day warm-up, so every config starts together
                 up = up & (b.index >= pd.Timestamp("2021-08-01", tz="UTC"))
                 dn = dn & (b.index >= pd.Timestamp("2021-08-01", tz="UTC"))
-                idx, r, g = run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side, lim,
+                idx, _, r, g = run(o, h, l, c, atr, hh_in, ll_in, ll_out, hh_out, up, dn, fund, side, lim,
                                 stop_k, em, dr, lim_bars)
                 cfg = f"{tf}|{n_in}/{n_out}|stop{stop_k}|sma{t}|{'limit' if em else 'market'}|{'ls' if dr == 2 else 'long'}"
                 if len(r) == 0:
