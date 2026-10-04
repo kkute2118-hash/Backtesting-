@@ -1,205 +1,162 @@
 "use client";
 
-import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from "lightweight-charts";
+import {
+  createChart, type IChartApi, type IPriceLine, type ISeriesApi, type UTCTimestamp,
+} from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
+import { api, errorMessage } from "@/lib/api";
 
-interface PriceTick {
-  time: UTCTimestamp;
-  price: number;
-  volume: number;
+export type MarketStatus =
+  | "flat" | "enter_next" | "awaiting_retest" | "long" | "exit_next" | "pending";
+
+interface Candle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
 }
 
-interface TradeMarker {
-  time: UTCTimestamp;
-  price: number;
-  type: "entry" | "exit" | "stop_loss";
-  color: string;
-  text: string;
+interface CandleResponse {
+  symbol: string;
+  source: string;
+  candles: Candle[];
+  stale?: boolean;
 }
+
+const STATUS_LABEL: Record<MarketStatus, string> = {
+  flat: "Waiting",
+  enter_next: "Breakout",
+  awaiting_retest: "Awaiting retest",
+  long: "Long",
+  exit_next: "Exit next open",
+  pending: "Pending",
+};
+
+const STATUS_CLASS: Record<MarketStatus, string> = {
+  flat: "bg-surface text-muted",
+  enter_next: "bg-warn-soft text-warn",
+  awaiting_retest: "bg-warn-soft text-warn",
+  long: "bg-up-soft text-up",
+  exit_next: "bg-down-soft text-down",
+  pending: "bg-surface text-muted",
+};
+
+const REFRESH_MS = 5 * 60 * 1000;
 
 export function TradingPairChart({
   symbol,
-  entry,
-  exit,
-  stopLoss,
+  name,
   status,
-  height = 300,
+  entry,
+  stopLoss,
+  level,
+  height = 260,
 }: {
   symbol: string;
+  name: string;
+  status: MarketStatus;
   entry?: number;
-  exit?: number;
   stopLoss?: number;
-  status: "flat" | "awaiting_retest" | "long" | "exit_next";
+  level?: number;
   height?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const lineRef = useRef<ISeriesApi<"Line"> | null>(null);
-  const [priceHistory, setPriceHistory] = useState<PriceTick[]>([]);
+  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const linesRef = useRef<IPriceLine[]>([]);
+  const [data, setData] = useState<CandleResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme !== "light";
 
-  // Initialize chart
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      api.get<CandleResponse>(`/crypto/candles/${symbol}`, { bars: 120 })
+        .then((res) => { if (!cancelled) { setData(res); setError(null); } })
+        .catch((err) => { if (!cancelled) setError(errorMessage(err)); });
+    load();
+    const timer = setInterval(load, REFRESH_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [symbol]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-
-    const ink = isDark ? "#e8edf4" : "#171f2e";
     const grid = isDark ? "#2a3242" : "#e3e8ef";
-    const surfaceBg = isDark ? "#131820" : "#f9fafb";
-
     const chart = createChart(container, {
       height,
+      width: container.clientWidth,
       layout: {
-        background: { color: surfaceBg },
+        background: { color: "transparent" },
         textColor: isDark ? "#9aa5b6" : "#5b6474",
-        fontFamily: "var(--font-sans)",
         fontSize: 10,
       },
-      grid: {
-        vertLines: { color: grid, style: 1 },
-        horzLines: { color: grid, style: 1 },
-      },
-      rightPriceScale: { borderColor: grid, scaleMargins: { top: 0.1, bottom: 0.1 } },
-      timeScale: { borderColor: grid, rightOffset: 2, lockRange: false },
-      crosshair: {
-        mode: 1,
-        vertLine: { color: ink, width: 1, style: 2 },
-        horzLine: { color: ink, width: 1, style: 2 },
-      },
+      grid: { vertLines: { color: grid }, horzLines: { color: grid } },
+      rightPriceScale: { borderColor: grid },
+      timeScale: { borderColor: grid, timeVisible: true, rightOffset: 2 },
     });
-
-    const line = chart.addLineSeries({
-      color: "#3b82f6",
-      lineWidth: 2,
+    const series = chart.addCandlestickSeries({
+      upColor: "#16a34a", downColor: "#dc2626", borderVisible: false,
+      wickUpColor: "#16a34a", wickDownColor: "#dc2626",
     });
-
     chartRef.current = chart;
-    lineRef.current = line;
-
-    // Set initial data
-    if (priceHistory.length > 0) {
-      line.setData(priceHistory);
-      chart.timeScale().fitContent();
-    }
-
-    const handleResize = () => {
-      if (container.clientWidth) {
-        chart.applyOptions({ width: container.clientWidth });
-      }
-    };
-
-    window.addEventListener("resize", handleResize);
+    seriesRef.current = series;
+    linesRef.current = [];
+    const observer = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth }));
+    observer.observe(container);
     return () => {
-      window.removeEventListener("resize", handleResize);
+      observer.disconnect();
       chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
     };
   }, [isDark, height]);
 
-  // Update chart with new prices
   useEffect(() => {
-    if (lineRef.current && priceHistory.length > 0) {
-      lineRef.current.setData(priceHistory);
-      if (chartRef.current) {
-        chartRef.current.timeScale().fitContent();
+    const series = seriesRef.current;
+    if (!series || !data) return;
+    series.setData(data.candles.map((c) => ({ ...c, time: c.time as UTCTimestamp })));
+    linesRef.current.forEach((line) => series.removePriceLine(line));
+    const lines: IPriceLine[] = [];
+    const add = (price: number | undefined, color: string, title: string) => {
+      if (price && Number.isFinite(price)) {
+        lines.push(series.createPriceLine({ price, color, lineWidth: 1, lineStyle: 2, title, axisLabelVisible: true }));
       }
+    };
+    if (status === "long" || status === "exit_next") {
+      add(entry, "#16a34a", "Entry");
+      add(stopLoss, "#dc2626", "Stop");
+    } else if (status === "awaiting_retest" || status === "enter_next") {
+      add(level, "#d97706", "Retest level");
     }
-  }, [priceHistory]);
+    linesRef.current = lines;
+    chartRef.current?.timeScale().fitContent();
+  }, [data, status, entry, stopLoss, level, isDark, height]);
 
-  // Add trade markers
-  useEffect(() => {
-    if (!chartRef.current || !lineRef.current) return;
-
-    const markers: TradeMarker[] = [];
-
-    if (entry && priceHistory.length > 0) {
-      const lastTime = priceHistory[priceHistory.length - 1].time;
-      markers.push({
-        time: lastTime,
-        price: entry,
-        type: "entry",
-        color: "#22c55e",
-        text: "E",
-      });
-    }
-
-    if (stopLoss && priceHistory.length > 0) {
-      const lastTime = priceHistory[priceHistory.length - 1].time;
-      markers.push({
-        time: lastTime,
-        price: stopLoss,
-        type: "stop_loss",
-        color: "#ef4444",
-        text: "SL",
-      });
-    }
-
-    if (exit && priceHistory.length > 0) {
-      const lastTime = priceHistory[priceHistory.length - 1].time;
-      markers.push({
-        time: lastTime,
-        price: exit,
-        type: "exit",
-        color: "#f59e0b",
-        text: "X",
-      });
-    }
-
-    lineRef.current.setMarkers(
-      markers.map((m) => ({
-        time: m.time,
-        position: "inBar" as const,
-        color: m.color,
-        shape: "circle" as const,
-        text: m.text,
-        size: 2,
-      }))
-    );
-  }, [entry, exit, stopLoss, priceHistory]);
-
-  // Simulate live price updates (in production, connect to WebSocket)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setPriceHistory((prev) => {
-        const newPrice = prev.length > 0 ? prev[prev.length - 1].price * (0.9995 + Math.random() * 0.001) : 100;
-        const newTime = (Math.floor(Date.now() / 1000) + Math.random() * 10) as UTCTimestamp;
-        const newTick: PriceTick = {
-          time: newTime,
-          price: newPrice,
-          volume: Math.random() * 1000,
-        };
-        return [...prev.slice(-500), newTick]; // Keep last 500 bars
-      });
-    }, 5000); // Update every 5 seconds
-
-    return () => clearInterval(interval);
-  }, []);
+  const last = data?.candles.at(-1)?.close;
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between px-2">
-        <h3 className="font-semibold text-ink">{symbol}</h3>
-        <div
-          className={`text-xs px-2 py-1 rounded ${
-            status === "long"
-              ? "bg-positive text-white"
-              : status === "awaiting_retest"
-                ? "bg-warning text-ink"
-                : "bg-surface text-muted"
-          }`}
-        >
-          {status === "flat"
-            ? "⏳ Waiting"
-            : status === "awaiting_retest"
-              ? "🔄 Awaiting"
-              : status === "long"
-                ? "📈 LONG"
-                : "📉 Exit"}
+    <div className="space-y-2 min-w-0">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <div className="min-w-0">
+          <div className="font-semibold text-ink">{symbol}</div>
+          <div className="text-xs text-muted truncate">
+            {name}{last !== undefined ? ` · ${last.toLocaleString("en-IN", { maximumSignificantDigits: 6 })}` : ""}
+          </div>
         </div>
+        <span className={`text-xs px-2 py-1 rounded shrink-0 ${STATUS_CLASS[status] ?? STATUS_CLASS.flat}`}>
+          {STATUS_LABEL[status] ?? status}
+        </span>
       </div>
       <div ref={containerRef} style={{ width: "100%", height }} />
+      <div className="text-[11px] text-muted px-1">
+        {error ? <span title={error}>Prices unavailable right now</span>
+          : data ? `4h candles · ${data.source}${data.stale ? " (cached)" : ""}` : "Loading prices…"}
+      </div>
     </div>
   );
 }

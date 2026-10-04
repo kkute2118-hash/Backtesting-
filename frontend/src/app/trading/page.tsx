@@ -2,28 +2,29 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardHeader, CardBody } from "@/components/ui/Card";
-import { TradingPairChart } from "@/components/charts/TradingPairChart";
+import { TradingPairChart, type MarketStatus } from "@/components/charts/TradingPairChart";
+import { api, ApiError, errorMessage } from "@/lib/api";
 
-interface TradeAlert {
-  id: string;
-  symbol: string;
-  type: "entry" | "exit" | "breakout" | "retest";
-  message: string;
-  timestamp: string;
-  read: boolean;
-}
-
-interface MarketData {
-  symbol: string;
-  status: "flat" | "awaiting_retest" | "long" | "exit_next";
+interface MarketState {
+  status?: MarketStatus;
   entry?: number;
-  exit?: number;
-  stopLoss?: number;
-  currentPrice?: number;
-  leverage?: number;
+  stop?: number;
+  level?: number;
+  size_x?: number;
 }
 
-const TRADING_SYMBOLS = [
+interface TrendLatest {
+  updated: string;
+  paper_start: string;
+  equity: number;
+  trades: number;
+  total_r: number;
+  markets: Record<string, MarketState>;
+  recent_events: string[];
+  sources: Record<string, string>;
+}
+
+const MARKETS = [
   { symbol: "BTCUSDT", name: "Bitcoin" },
   { symbol: "ETHUSDT", name: "Ethereum" },
   { symbol: "SOLUSDT", name: "Solana" },
@@ -35,194 +36,113 @@ const TRADING_SYMBOLS = [
   { symbol: "AUDUSD", name: "AUD/USD" },
 ];
 
+const REFRESH_MS = 60 * 1000;
+
+function istTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 export default function TradingPage() {
-  const [marketData, setMarketData] = useState<Record<string, MarketData>>({});
-  const [alerts, setAlerts] = useState<TradeAlert[]>([]);
-  const [showAlerts, setShowAlerts] = useState(true);
-  const [unreadCount, setUnreadCount] = useState(0);
+  const [latest, setLatest] = useState<TrendLatest | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // Fetch initial market data
   useEffect(() => {
-    const fetchMarketData = async () => {
-      try {
-        const res = await fetch("/api/v1/crypto/stats");
-        const stats = await res.json();
-
-        const newMarketData: Record<string, MarketData> = {};
-        TRADING_SYMBOLS.forEach((sym) => {
-          const market = stats.markets?.[sym.symbol];
-          newMarketData[sym.symbol] = {
-            symbol: sym.symbol,
-            status: market?.status || "flat",
-            entry: market?.entry,
-            leverage: market?.leverage,
-            stopLoss: market?.entry && market?.entry * 0.98, // Simplified: 2% stop loss
-          };
+    let cancelled = false;
+    const load = () =>
+      api.get<TrendLatest>("/crypto/trend-latest")
+        .then((res) => { if (!cancelled) { setLatest(res); setError(null); } })
+        .catch((err) => {
+          if (cancelled) return;
+          setError(err instanceof ApiError && err.isNotFound
+            ? "The paper book has not run yet. It runs every 5 minutes on the server."
+            : errorMessage(err));
         });
-
-        setMarketData(newMarketData);
-      } catch (error) {
-        console.error("Failed to fetch market data:", error);
-      }
-    };
-
-    fetchMarketData();
+    load();
+    const timer = setInterval(load, REFRESH_MS);
+    return () => { cancelled = true; clearInterval(timer); };
   }, []);
 
-  // Request notification permission
-  useEffect(() => {
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-  }, []);
-
-  // Simulate receiving trade alerts from backend
-  useEffect(() => {
-    const simulateAlerts = () => {
-      // In production, this would be a WebSocket connection to the backend
-      const symbols = TRADING_SYMBOLS.map((s) => s.symbol);
-      const randomSymbol = symbols[Math.floor(Math.random() * symbols.length)];
-      const alertTypes: Array<"entry" | "exit" | "breakout" | "retest"> = ["breakout", "retest", "entry"];
-      const randomType = alertTypes[Math.floor(Math.random() * alertTypes.length)];
-
-      if (Math.random() > 0.9) {
-        // 10% chance to generate an alert every poll
-        const newAlert: TradeAlert = {
-          id: `${Date.now()}`,
-          symbol: randomSymbol,
-          type: randomType,
-          message:
-            randomType === "breakout"
-              ? `${randomSymbol}: Breakout detected - wait for retest`
-              : randomType === "retest"
-                ? `${randomSymbol}: RETEST ENTRY NOW - Market entry ready`
-                : `${randomSymbol}: Entry confirmed - position opened`,
-          timestamp: new Date().toLocaleTimeString("en-IN"),
-          read: false,
-        };
-
-        setAlerts((prev) => [newAlert, ...prev.slice(0, 19)]);
-        setUnreadCount((prev) => prev + 1);
-
-        // Browser notification
-        if (Notification.permission === "granted") {
-          new Notification(`⚠️ ${randomSymbol} Signal`, {
-            body: newAlert.message,
-            badge: "/icon.svg",
-            tag: randomSymbol,
-            requireInteraction: randomType === "entry",
-          });
-        }
-
-        // Update market data to reflect new signal
-        setMarketData((prev) => ({
-          ...prev,
-          [randomSymbol]: {
-            ...prev[randomSymbol],
-            status: randomType === "entry" ? "long" : "awaiting_retest",
-          },
-        }));
-      }
-    };
-
-    const interval = setInterval(simulateAlerts, 30000); // Check every 30 seconds
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleAlertRead = () => {
-    setAlerts((prev) => prev.map((a) => ({ ...a, read: true })));
-    setUnreadCount(0);
-  };
+  const markets = latest?.markets ?? {};
+  const count = (s: MarketStatus[]) =>
+    Object.values(markets).filter((m) => m.status && s.includes(m.status)).length;
+  const events = [...(latest?.recent_events ?? [])].reverse().slice(0, 25);
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4 border-b border-line pb-4">
-        <div>
-          <h1 className="text-3xl font-bold text-ink">📊 Live Trading Signals</h1>
-          <p className="text-muted mt-1">9 Pairs • Retest Entry + Dynamic Leverage • Real-time Charts</p>
-        </div>
-        <button
-          onClick={() => setShowAlerts(!showAlerts)}
-          className={`px-4 py-2 rounded font-medium text-sm ${
-            showAlerts ? "bg-positive text-white" : "bg-surface text-ink"
-          }`}
-        >
-          🔔 Alerts {unreadCount > 0 && <span className="ml-2 badge">{unreadCount}</span>}
-        </button>
+      <div className="border-b border-line pb-4">
+        <h1 className="text-2xl font-semibold text-ink">Live Signals</h1>
+        <p className="text-muted mt-1 text-sm">
+          4h breakout, retest entry · 4 crypto + 5 forex · paper book
+          {latest ? ` · updated ${istTime(latest.updated)} IST` : ""}
+        </p>
       </div>
 
-      {/* Alerts Panel */}
-      {showAlerts && alerts.length > 0 && (
-        <Card>
-          <CardHeader title="Recent Signals" action={<button onClick={handleAlertRead}>Mark read</button>} />
-          <CardBody>
-            <div className="space-y-2 max-h-60 overflow-y-auto">
-              {alerts.map((alert) => (
-                <div
-                  key={alert.id}
-                  className={`p-3 rounded border ${
-                    alert.read
-                      ? "border-line bg-surface text-muted"
-                      : "border-positive bg-positive/10 text-ink font-medium"
-                  }`}
-                >
-                  <div className="flex justify-between items-start gap-2">
-                    <div className="flex-1">
-                      <div className="font-semibold">{alert.symbol}</div>
-                      <div className="text-sm mt-1">{alert.message}</div>
-                    </div>
-                    <div className="text-xs text-muted shrink-0">{alert.timestamp}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardBody>
-        </Card>
-      )}
+      {error ? (
+        <Card><CardBody><p className="text-down text-sm">{error}</p></CardBody></Card>
+      ) : null}
 
-      {/* Live Charts Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {[
+          { label: "Long", value: count(["long", "exit_next"]), tone: "text-up" },
+          { label: "Awaiting retest", value: count(["awaiting_retest", "enter_next"]), tone: "text-warn" },
+          { label: "Closed trades", value: latest?.trades ?? "–", tone: "text-ink" },
+          {
+            label: "Paper equity",
+            value: latest ? `Rs ${latest.equity.toLocaleString("en-IN", { maximumFractionDigits: 0 })}` : "–",
+            tone: "text-ink",
+          },
+        ].map((s) => (
+          <div key={s.label} className="p-3 rounded-card border border-line bg-surface">
+            <div className={`text-xl font-semibold tabular-nums ${s.tone}`}>{s.value}</div>
+            <div className="text-xs text-muted mt-1">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
       <Card>
-        <CardHeader title="Live Price Charts (4H Timeframe)" />
+        <CardHeader title="Markets (4h candles)" />
         <CardBody>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {TRADING_SYMBOLS.map((sym) => (
-              <TradingPairChart
-                key={sym.symbol}
-                symbol={sym.symbol}
-                status={marketData[sym.symbol]?.status || "flat"}
-                entry={marketData[sym.symbol]?.entry}
-                stopLoss={marketData[sym.symbol]?.stopLoss}
-                height={250}
-              />
-            ))}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {MARKETS.map((m) => {
+              const st = markets[m.symbol] ?? {};
+              return (
+                <TradingPairChart
+                  key={m.symbol}
+                  symbol={m.symbol}
+                  name={m.name}
+                  status={st.status ?? "flat"}
+                  entry={st.entry}
+                  stopLoss={st.stop}
+                  level={st.level}
+                />
+              );
+            })}
           </div>
         </CardBody>
       </Card>
 
-      {/* Stats Footer */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-        <div className="p-3 rounded border border-line">
-          <div className="text-2xl font-bold text-positive">
-            {Object.values(marketData).filter((m) => m.status === "long").length}
-          </div>
-          <div className="text-xs text-muted mt-1">Active Positions</div>
-        </div>
-        <div className="p-3 rounded border border-line">
-          <div className="text-2xl font-bold text-warning">
-            {Object.values(marketData).filter((m) => m.status === "awaiting_retest").length}
-          </div>
-          <div className="text-xs text-muted mt-1">Awaiting Retest</div>
-        </div>
-        <div className="p-3 rounded border border-line">
-          <div className="text-2xl font-bold text-ink">{alerts.length}</div>
-          <div className="text-xs text-muted mt-1">Signals Today</div>
-        </div>
-        <div className="p-3 rounded border border-line">
-          <div className="text-2xl font-bold text-critical">{unreadCount}</div>
-          <div className="text-xs text-muted mt-1">Unread Alerts</div>
-        </div>
-      </div>
+      <Card>
+        <CardHeader title="Recent signals" />
+        <CardBody>
+          {events.length === 0 ? (
+            <p className="text-sm text-muted">No signals yet. Breakouts, retest entries and exits appear here.</p>
+          ) : (
+            <ul className="space-y-2 text-sm">
+              {events.map((e, i) => (
+                <li key={i} className="border-b border-line pb-2 text-ink">{e}</li>
+              ))}
+            </ul>
+          )}
+          <p className="text-xs text-muted mt-4">
+            Phone alerts: the ntfy topic is on the{" "}
+            <a className="underline" href="/reports/trend.html">paper book page</a>.
+          </p>
+        </CardBody>
+      </Card>
     </div>
   );
 }

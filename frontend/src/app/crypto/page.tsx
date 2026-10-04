@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardHeader, CardBody } from "@/components/ui/Card";
+import { api, ApiError, errorMessage } from "@/lib/api";
 
 interface TrendStats {
   equity: number;
@@ -33,7 +34,7 @@ interface Trade {
 export default function CryptoTradingPage() {
   const [stats, setStats] = useState<TrendStats | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
-  const [equipty, setEquity] = useState<EquityCurve[]>([]);
+  const [, setEquity] = useState<EquityCurve[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -41,26 +42,24 @@ export default function CryptoTradingPage() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [statsRes, tradesRes, equityRes] = await Promise.all([
-          fetch("/api/v1/crypto/stats"),
-          fetch("/api/v1/crypto/trades"),
-          fetch("/api/v1/crypto/equity"),
+        const empty = (err: unknown) => {
+          if (err instanceof ApiError && err.isNotFound) return null;
+          throw err;
+        };
+        const [statsData, tradesData, equityData] = await Promise.all([
+          api.get<TrendStats>("/crypto/stats"),
+          api.get<{ trades: Trade[] }>("/crypto/trades").catch(empty),
+          api.get<{ curve: EquityCurve[] }>("/crypto/equity").catch(empty),
         ]);
 
-        if (!statsRes.ok || !tradesRes.ok || !equityRes.ok) {
-          throw new Error("Failed to fetch crypto data");
-        }
-
-        const statsData = await statsRes.json();
-        const tradesData = await tradesRes.json();
-        const equityData = await equityRes.json();
-
         setStats(statsData);
-        setTrades(tradesData.trades || []);
-        setEquity(equityData.curve || []);
+        setTrades(tradesData?.trades ?? []);
+        setEquity(equityData?.curve ?? []);
         setError(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error");
+        setError(err instanceof ApiError && err.isNotFound
+          ? "The paper book has not run yet. It runs every 5 minutes on the server."
+          : errorMessage(err));
       } finally {
         setLoading(false);
       }
@@ -89,16 +88,15 @@ export default function CryptoTradingPage() {
         <h1 className="text-3xl font-bold mb-4">🚀 Crypto Trading (4H Retest Entry)</h1>
         <Card>
           <CardBody>
-            <p className="text-red-800">⚠️ {error}</p>
-            <p className="text-sm text-red-600 mt-2">The trend_paper.py job may not have run yet. Check Oracle logs.</p>
-          </CardBody>
+            <p className="text-down">⚠️ {error}</p>
+                      </CardBody>
         </Card>
       </div>
     );
   }
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
+    <div className="space-y-0">
       <div className="flex justify-between items-start mb-6">
         <div>
           <h1 className="text-3xl font-bold text-ink">🚀 Crypto Trading (4H Retest Entry)</h1>
@@ -109,7 +107,7 @@ export default function CryptoTradingPage() {
         <button
           onClick={() => setAutoRefresh(!autoRefresh)}
           className={`px-4 py-2 rounded ${
-            autoRefresh ? "bg-positive text-white" : "bg-surface text-ink"
+            autoRefresh ? "bg-accent text-white" : "bg-surface text-ink border border-line"
           }`}
         >
           {autoRefresh ? "🔄 Auto-refresh ON" : "⏸️ Auto-refresh OFF"}
@@ -138,14 +136,14 @@ export default function CryptoTradingPage() {
           <CardHeader title="Trades" />
           <CardBody>
             <div className="text-2xl font-bold">{stats?.trades}</div>
-            <p className="text-xs text-muted mt-1">Over {stats?.paper_start?.substring(0, 10)}</p>
+            <p className="text-xs text-muted mt-1">Since {stats?.paper_start?.substring(0, 10)}</p>
           </CardBody>
         </Card>
 
         <Card>
           <CardHeader title="Avg R" />
           <CardBody>
-            <div className={`text-2xl font-bold ${stats?.avg_r && stats.avg_r > 0 ? "text-green-600" : "text-red-600"}`}>
+            <div className={`text-2xl font-bold ${stats?.avg_r && stats.avg_r > 0 ? "text-up" : "text-down"}`}>
               {stats?.avg_r?.toFixed(2)}R
             </div>
             <p className="text-xs text-muted mt-1">Risk-adjusted return</p>
@@ -164,8 +162,8 @@ export default function CryptoTradingPage() {
                   <div className="font-bold text-sm text-ink">{symbol}</div>
                   <div className="text-xs text-muted mt-1">
                     {market.status === "flat" && "⏳ Waiting for breakout"}
-                    {market.status === "awaiting_retest" && "🔄 Awaiting retest"}
-                    {market.status === "long" && `📈 LONG from ${market.entry?.toFixed(4)}`}
+                    {(market.status === "awaiting_retest" || market.status === "enter_next") && `🔄 Awaiting retest of ${market.level?.toFixed(4) ?? "breakout"}`}
+                    {market.status === "long" && `📈 LONG from ${market.entry?.toFixed(4)}${market.stop ? `, stop ${market.stop.toFixed(4)}` : ""}`}
                     {market.status === "exit_next" && "📉 Selling at next open"}
                   </div>
                 </div>
@@ -201,7 +199,7 @@ export default function CryptoTradingPage() {
                       <td className="p-2 text-right text-ink">{trade.entry?.toFixed(4)}</td>
                       <td className="p-2 text-right text-ink">{trade.exit?.toFixed(4)}</td>
                       <td className="p-2 text-muted">{trade.why}</td>
-                      <td className={`p-2 text-right font-bold ${trade.r > 0 ? "text-positive" : "text-critical"}`}>
+                      <td className={`p-2 text-right font-bold ${trade.r > 0 ? "text-up" : "text-down"}`}>
                         {trade.r?.toFixed(2)}R
                       </td>
                     </tr>
@@ -214,7 +212,7 @@ export default function CryptoTradingPage() {
       </Card>
 
       <p className="text-xs text-muted mt-4">
-        Last updated: {stats?.updated} IST | Strategy: Retest entry + Dynamic leverage (3x-8x)
+        Last updated: {stats?.updated && !Number.isNaN(Date.parse(stats.updated)) ? new Date(stats.updated).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : (stats?.updated ?? "–")} IST | Strategy: 4h breakout, retest entry, dynamic position size
       </p>
     </div>
   );

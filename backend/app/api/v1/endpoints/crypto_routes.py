@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,32 @@ from fastapi import APIRouter, HTTPException
 router = APIRouter()
 
 REPORTS_DIR = Path("/data/reports")
+CANDLE_TTL_SECONDS = 300
+_candle_cache: dict[str, tuple[float, dict]] = {}
+
+
+@router.get("/crypto/candles/{symbol}")
+def get_candles(symbol: str, bars: int = 120):
+    """Completed 4h candles from the same sources the paper book trades on."""
+    from app.tasks import trend_paper
+
+    symbol = symbol.upper()
+    if symbol not in trend_paper.SYMBOLS:
+        raise HTTPException(status_code=404, detail=f"Unknown market {symbol}")
+    cached = _candle_cache.get(symbol)
+    if not cached or time.time() - cached[0] > CANDLE_TTL_SECONDS:
+        try:
+            _, h4, _, source = trend_paper.fetch(symbol)
+        except Exception as exc:
+            if cached:
+                return cached[1] | {"stale": True}
+            raise HTTPException(status_code=502, detail=f"No price data for {symbol}: {exc}"[:300])
+        payload = {"symbol": symbol, "source": source, "candles": [
+            {"time": int(ts.timestamp()), "open": r.open, "high": r.high, "low": r.low, "close": r.close}
+            for ts, r in h4.tail(300).iterrows()]}
+        cached = _candle_cache[symbol] = (time.time(), payload)
+    data = cached[1]
+    return data | {"candles": data["candles"][-max(20, min(bars, 300)):]}
 
 
 @router.get("/crypto/trend-report")
