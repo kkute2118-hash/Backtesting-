@@ -57,6 +57,7 @@ session.headers["User-Agent"] = "Mozilla/5.0 (research data download)"
 
 
 def _get(url, tries=5):
+    last = None
     for i in range(tries):
         try:
             r = session.get(url, timeout=60)
@@ -64,10 +65,11 @@ def _get(url, tries=5):
                 return None
             if r.ok:
                 return r.content
-        except requests.RequestException:
-            pass
+            last = f"HTTP {r.status_code} {r.text[:120]!r}"
+        except requests.RequestException as exc:
+            last = f"{type(exc).__name__}: {exc}"[:200]
         time.sleep(2 ** i)
-    raise RuntimeError(f"download failed: {url}")
+    raise RuntimeError(f"download failed: {url} ({last})")
 
 
 def _months(start: date, end: date):
@@ -149,8 +151,21 @@ def forex_5m(sym, start, end):
     days = [d for d in days if d.weekday() != 5]        # nothing trades on Saturday
     out = {}
     for side in ("BID", "ASK"):
-        with ThreadPoolExecutor(8) as ex:
-            parts = [p for p in ex.map(lambda d: _duka_day(sym, side, d), days) if p is not None]
+        failed = []
+
+        def day(d):
+            try:
+                return _duka_day(sym, side, d)
+            except RuntimeError as exc:
+                failed.append(str(exc))
+                return None
+        # Dukascopy throttles parallel clients; two at a time stays under it.
+        with ThreadPoolExecutor(2) as ex:
+            parts = [p for p in ex.map(day, days) if p is not None]
+        if failed:
+            print(f"{sym} {side}: {len(failed)} of {len(days)} days failed, first: {failed[0]}", flush=True)
+        if len(failed) > 0.05 * len(days) or not parts:
+            raise RuntimeError(f"{sym} {side}: too many failed days")
         df = pd.concat(parts, ignore_index=True).set_index("time").sort_index()
         df[["open", "close", "low", "high"]] /= scale
         bad = (df.low > df[["open", "close"]].min(axis=1) + 1e-9) | (df.high < df[["open", "close"]].max(axis=1) - 1e-9)
@@ -195,17 +210,32 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--start", default="2021-01-01")
+    ap.add_argument("--end", default="", help="first day NOT downloaded (default today)")
     ap.add_argument("--only", default="", help="comma-separated symbols")
+    ap.add_argument("--part", default="", help="write <SYM>_5m.<part>.csv.gz, for --merge later")
+    ap.add_argument("--merge", default="", help="directory of part files to join into <SYM>_5m.csv.gz")
     ap.add_argument("--upload", action="store_true")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     start = date.fromisoformat(a.start)
-    end = datetime.now(timezone.utc).date()
+    today = datetime.now(timezone.utc).date()
+    end = min(date.fromisoformat(a.end), today) if a.end else today
     only = {s for s in a.only.split(",") if s}
     written = []
+    if a.merge:
+        # Dukascopy throttles each client, so the workflow fetches forex as one
+        # job per symbol and year; join those parts here.
+        parts = sorted(Path(a.merge).rglob("*_5m.*.csv.gz"))
+        for sym in sorted({p.name.split("_5m.")[0] for p in parts}):
+            mine = [p for p in parts if p.name.startswith(f"{sym}_5m.")]
+            df = pd.concat([pd.read_csv(p) for p in mine], ignore_index=True)
+            df = df.drop_duplicates("time").sort_values("time")
+            df.to_csv(out / f"{sym}_5m.csv.gz", index=False)
+            written.append(out / f"{sym}_5m.csv.gz")
+            print(f"{sym}: {len(df):,} bars from {len(mine)} parts, {df.time.iloc[0]} to {df.time.iloc[-1]}", flush=True)
     for sym in CRYPTO:
-        if only and sym not in only:
+        if (only and sym not in only) or a.part:
             continue
         t = time.time()
         k = crypto_klines(sym, start, end)
@@ -214,12 +244,15 @@ def main():
         written += [out / f"{sym}_5m.csv.gz", out / f"{sym}_funding.csv.gz"]
         print(f"{sym}: {len(k):,} bars {k.time.iloc[0]} to {k.time.iloc[-1]} ({time.time() - t:.0f}s)", flush=True)
     for sym in FOREX:
-        if only and sym not in only:
+        if (only and sym not in only) or a.merge:
+            continue
+        if start >= end:
             continue
         t = time.time()
         b = forex_5m(sym, start, end)
-        b.to_csv(out / f"{sym}_5m.csv.gz", index=False)
-        written.append(out / f"{sym}_5m.csv.gz")
+        name = f"{sym}_5m.{a.part}.csv.gz" if a.part else f"{sym}_5m.csv.gz"
+        b.to_csv(out / name, index=False)
+        written.append(out / name)
         print(f"{sym}: {len(b):,} bars {b.time.iloc[0]} to {b.time.iloc[-1]}, "
               f"median spread {b.spread.median():.5g} ({time.time() - t:.0f}s)", flush=True)
     if a.upload:

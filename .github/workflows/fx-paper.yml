@@ -1,0 +1,61 @@
+# Paper-trades liquidity strategy B (scripts/fx_paper.py) on forex and gold:
+# every 15 minutes through the London and New York sessions it replays the
+# frozen rules on fresh Twelve Data candles, keeps the book on the `fx-paper`
+# branch, and posts new pending orders and closed trades as comments on the
+# "FX paper trading" issue (GitHub emails and notifies the owner).
+# Needs the repository secret TWELVEDATA_API_KEY. No real orders, no database.
+name: FX paper trading
+
+on:
+  schedule:
+    - cron: "*/15 5-16 * * 1-5"     # 10:30-22:30 IST, Monday to Friday
+  workflow_dispatch:
+
+permissions:
+  contents: write                   # the fx-paper branch only
+  issues: write
+
+concurrency:
+  group: fx-paper
+  cancel-in-progress: false
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install "pandas>=2.0,<3" "requests>=2.31,<3" "numpy"
+      - name: Check out the paper book
+        run: |
+          if git fetch -q origin fx-paper; then
+            git worktree add --detach "$RUNNER_TEMP/book" origin/fx-paper
+          else
+            git worktree add --detach "$RUNNER_TEMP/book" HEAD
+            cd "$RUNNER_TEMP/book" && git checkout -q --orphan fx-paper-new && git rm -rfq .
+          fi
+      - name: Replay the rules on fresh candles
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          ALERTS_FILE: ${{ runner.temp }}/alerts.md
+        run: python scripts/fx_paper.py "$RUNNER_TEMP/book"
+      - name: Save the book
+        run: |
+          cd "$RUNNER_TEMP/book"
+          git add -A
+          git -c user.name="fx-paper bot" -c user.email="actions@users.noreply.github.com" \
+            commit -qm "Paper book $(date -u +%FT%H:%MZ)" || exit 0
+          git push origin HEAD:refs/heads/fx-paper
+      - name: Post alerts
+        if: hashFiles(format('{0}/alerts.md', runner.temp)) != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh issue list --state open --search "FX paper trading in:title" --json number -q '.[0].number')
+          [ -n "$n" ] || n=$(gh issue create --title "FX paper trading" \
+            --body "Alerts from .github/workflows/fx-paper.yml (paper only, no real orders). Book: branch fx-paper." | grep -o '[0-9]*$')
+          gh issue comment "$n" --body-file "$RUNNER_TEMP/alerts.md"
