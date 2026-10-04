@@ -2,9 +2,9 @@
 (research/fx_crypto/STEP5_DAILY_TREND.md, STEP12_FINAL_OPTIMIZED_STRATEGY.md).
 
 Rules (frozen; changing them restarts the paper book):
-  markets   BTC, ETH, SOL, BNB, XRP and gold perpetuals + 6 forex pairs
-            Crypto: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT (Binance)
-            Forex: EURUSD, GBPUSD, USDJPY, AUDUSD, NZDUSD, USDCAD (Yahoo Finance)
+  markets   4 crypto (BTC, ETH, SOL, Gold) + 5 forex (EUR/GBP/CAD/JPY/AUD)
+            Crypto: BTCUSDT, ETHUSDT, SOLUSDT, XAUUSDT (Binance, 24/7)
+            Forex: EURUSD, GBPUSD, USDCAD, USDJPY, AUDUSD (Yahoo Finance, 24h Mon-Fri)
   signal    a 4h close above the highest high of the previous 55 4h bars,
             with the last completed daily close above its 200-day average
   entry     RETEST MODE (enabled): wait for price to retest the breakout level
@@ -54,8 +54,9 @@ import pandas as pd
 import requests
 
 REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/data/reports"))
-SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "XAUUSDT",
-           "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD")
+# OPTIMIZED SETUP: 4 crypto (top quality) + 5 forex (top liquidity)
+SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XAUUSDT",
+           "EURUSD", "GBPUSD", "USDCAD", "USDJPY", "AUDUSD")
 YAHOO = {"XAUUSDT": "GC=F", "BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
          "BNBUSDT": "BNB-USD", "XRPUSDT": "XRP-USD",
          "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
@@ -79,22 +80,19 @@ RETEST_LOOKBACK_BARS = 10  # candles to look back for retest
 DYNAMIC_LEVERAGE = os.environ.get("DYNAMIC_LEVERAGE", "1") == "1"  # enable dynamic leverage scaling
 
 # Win rate by symbol from backtest (retest entry mode)
+# OPTIMIZED SET: 4 crypto (highest quality) + 5 forex (top liquidity)
 WIN_RATES = {
-    # Crypto (highest quality, most liquid)
-    "BTCUSDT": 0.42,  # Bitcoin: most liquid, clear trends
-    "ETHUSDT": 0.40,  # Ethereum: good volatility
-    "SOLUSDT": 0.38,  # SOL: smaller, more volatile
-    "BNBUSDT": 0.36,  # BNB: medium liquidity
-    "XRPUSDT": 0.35,  # XRP: sometimes choppy
-    # Precious metals
-    "XAUUSDT": 0.39,  # Gold: consistent trends, less leverage
-    # Forex (24h markets, liquid trends)
-    "EURUSD": 0.41,   # EUR/USD: most liquid forex pair, smooth trends
-    "GBPUSD": 0.39,   # GBP/USD: good volatility, clear support/resistance
-    "USDJPY": 0.38,   # USD/JPY: lower volatility, steady trends
-    "AUDUSD": 0.37,   # AUD/USD: commodity linked, more volatile
-    "NZDUSD": 0.36,   # NZD/USD: lower liquidity, choppy at times
-    "USDCAD": 0.38,   # USD/CAD: oil-linked, good correlations
+    # Crypto (4 pairs - highest quality)
+    "BTCUSDT": 0.42,  # Bitcoin: most liquid, clear trends, 8x leverage
+    "ETHUSDT": 0.40,  # Ethereum: good volatility, follows BTC, 6x leverage
+    "SOLUSDT": 0.38,  # SOL: smaller, more volatile, 5x leverage
+    "XAUUSDT": 0.39,  # Gold: consistent trends, safe haven, 5x leverage
+    # Forex (5 pairs - top liquidity, 24h trading)
+    "EURUSD": 0.41,   # EUR/USD: most liquid forex, smooth trends, 6x leverage
+    "GBPUSD": 0.39,   # GBP/USD: volatile, clear support/resistance, 5x leverage
+    "USDCAD": 0.38,   # USD/CAD: oil-linked, good correlations, 5x leverage
+    "USDJPY": 0.38,   # USD/JPY: lower volatility, steady trends, 5x leverage
+    "AUDUSD": 0.37,   # AUD/USD: commodity linked, more volatile, 3x leverage
 }
 
 

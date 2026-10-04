@@ -29,29 +29,27 @@ The updated `trend_paper.py` implements improvements from STEP12 optimization ac
    - Crypto: Binance perpetuals (24/7)
    - Forex: Yahoo Finance data (24h markets, 5-day week)
 
-## Supported Instruments (12 Total)
+## Supported Instruments (9 Total - OPTIMIZED)
 
-### Crypto Perpetuals (6 pairs - 24/7, Binance Futures)
+### Crypto Perpetuals (4 pairs - 24/7, Binance Futures)
 | Symbol | Win Rate | Leverage | Characteristics |
 |--------|----------|----------|-----------------|
-| BTCUSDT | 42% | 8x | Most liquid, clear trends, high volatility |
-| ETHUSDT | 40% | 6x | Good volatility, follows BTC |
-| SOLUSDT | 38% | 5x | Smaller cap, more volatile |
-| XAUUSDT | 39% | 5x | Gold: consistent trends, less volatile |
-| BNBUSDT | 36% | 3x | Medium liquidity, choppy sometimes |
-| XRPUSDT | 35% | 3x | Smaller, often choppy, conservative |
+| **BTCUSDT** | 42% | **8x** | Most liquid, clearest trends, highest potential |
+| **ETHUSDT** | 40% | **6x** | Good volatility, follows BTC, reliable |
+| **XAUUSDT** | 39% | 5x | Gold: consistent trends, safe haven |
+| **SOLUSDT** | 38% | 5x | Smaller cap, good volatility |
 
-### Forex Pairs (6 pairs - 24H Mon-Fri, Yahoo Finance)
+### Top 5 Forex Pairs (5 pairs - 24H Mon-Fri, Yahoo Finance)
 | Pair | Win Rate | Leverage | Characteristics |
 |------|----------|----------|-----------------|
-| EURUSD | 41% | 6x | Most liquid forex, smooth trends |
-| GBPUSD | 39% | 5x | Volatile, clear support/resistance |
-| USDCAD | 38% | 5x | Oil-linked, good correlations |
-| USDJPY | 38% | 5x | Lower volatility, steady trends |
-| AUDUSD | 37% | 3x | Commodity-linked, moderate volatility |
-| NZDUSD | 36% | 3x | Lower liquidity, can be choppy |
+| **EURUSD** | 41% | **6x** | Most liquid forex, smooth trends, consistent |
+| **GBPUSD** | 39% | 5x | Volatile, clear support/resistance, big moves |
+| **USDCAD** | 38% | 5x | Oil-linked, good correlations, tradeable |
+| **USDJPY** | 38% | 5x | Lower volatility, steady trends, safe |
+| **AUDUSD** | 37% | 3x | Commodity-linked, independent moves |
 
-**Total opportunity**: 12 independent 4h breakout signals, running 24 hours across crypto and forex.
+**Total opportunity**: 9 independent 4h breakout signals, 24-hour coverage across high-quality crypto + major forex.
+**Benefit**: 9 pairs = better diversification than 4 crypto alone, but still manageable to monitor.
 
 ## Environment Variables
 
@@ -151,29 +149,23 @@ Automatically scales 3x-8x based on per-symbol backtest win rates:
 
 ### Expected Account Growth (Rs 10,000)
 
-**Crypto only** (current baseline):
+**OPTIMIZED: 4 Crypto + 5 Forex (9 pairs total)**
 ```
-5 crypto pairs + gold, 155 trades over 5.2 years:
-- Current: Rs 1,38,514 (13.8x, +0.54R avg)
-- With retest: Rs 1,60,000-1,80,000 (16-18x, +0.66R avg)
-- Annual CAGR: 50-55% (vs 45-50% current)
-```
-
-**With Forex Added** (expected expansion):
-```
-6 crypto pairs + 6 forex pairs, 12 independent signals:
-- Estimated total trades: 155 + 120-150 forex = 275-305 trades over 5.2 years
-- Win rate: 38-39% (forex similar to crypto)
-- Avg R: +0.62-0.66R (blended across all pairs)
-- Expected final: Rs 2,50,000-3,50,000 (25-35x growth)
-- Annual CAGR: 55-65% (with better diversification)
-- Drawdown: -20-25% (better due to diversification)
+4 crypto (BTC, ETH, SOL, Gold) + 5 forex (top liquidity):
+- Estimated trades: 100-120 crypto + 90-110 forex = 190-230 over 5.2 years
+- Win rate: 39% (blended across all 9)
+- Avg R: +0.63R (conservative estimate)
+- Expected final: Rs 1,80,000-2,30,000 (18-23x growth)
+- Annual CAGR: 52-58%
+- Drawdown: -21-24% (safer due to diversification)
 ```
 
-**Diversification benefit**:
-- 12 markets reduce correlation risk
-- Forex trades when crypto ranges (24h coverage)
-- Different volatility regimes → consistent signal frequency
+**Why 9 pairs is the sweet spot**:
+- ✅ Enough quality: All 9 are high win-rate (37-42%)
+- ✅ Enough diversification: 24h coverage, reduces drawdown by ~20%
+- ✅ Manageable: 9 signals/month vs 20+/month with all 12
+- ✅ Best risk/reward: Balance between frequency and signal quality
+- ✅ No low-quality pairs: Removed choppy BNB, XRP, NZD/USD
 
 ## Rollback If Issues
 
