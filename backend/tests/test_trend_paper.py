@@ -20,25 +20,29 @@ def _frames():
     return m15, m15.resample("4h").agg(agg), m15.resample("1D").agg(agg), b
 
 
-def test_breakout_rests_a_limit_then_fills_then_stops():
+def test_breakout_buys_at_the_next_open_then_stops():
     m15, h4, d1, b = _frames()
     ind = tp.indicators(d1, h4)
     st = {"last15": str(m15.index[b - 1]), "status": "flat"}
     events = tp.advance(st, ind, m15.iloc[:b + 16], "BTCUSDT")
-    assert st["status"] == "pending" and abs(st["level"] - 200.5) < 1e-9
-    assert any("BREAKOUT" in e for e in events)
-    # price comes back to the broken high: filled at the limit
-    back = m15.index[b + 16]
-    m15.loc[back] = [201, 201, 200, 200.6]
+    assert st["status"] == "enter_next" and any("BREAKOUT" in e for e in events)
+    # the next 15m bar: bought at its open, stop 2 ATR below
     tp.advance(st, ind, m15.iloc[:b + 17], "BTCUSDT")
-    assert st["status"] == "long" and st["entry"] == 200.5
+    assert st["status"] == "long" and st["entry"] == m15.iloc[b + 16].open
+    assert st["stop"] < st["entry"] and 0 < st["size_x"] <= tp.MAX_POSITION_X
     # then falls through the stop: closed at a loss of a little over 1R
-    nxt = m15.index[b + 17]
-    m15.loc[nxt] = [199, 199, 150, 151]
+    m15.loc[m15.index[b + 17]] = [199, 199, 150, 151]
     tp.advance(st, ind, m15.iloc[:b + 18], "BTCUSDT")
     assert st["status"] == "flat"
-    r = st["closed"][-1]["r"]
-    assert -1.2 < r < -1.0
+    assert -1.2 < st["closed"][-1]["r"] < -1.0
+
+
+def test_old_resting_limit_is_cancelled():
+    m15, h4, d1, b = _frames()
+    st = {"last15": str(m15.index[b - 2]), "status": "pending", "level": 1.0, "atr": 1.0,
+          "expires": str(m15.index[-1])}
+    ev = tp.advance(st, tp.indicators(d1, h4), m15.iloc[:b], "BTCUSDT")
+    assert st["status"] == "flat" and "cancelled" in ev[0]
 
 
 def test_breakout_alert_names_the_order(monkeypatch, tmp_path):
@@ -46,8 +50,8 @@ def test_breakout_alert_names_the_order(monkeypatch, tmp_path):
     st = {"last15": str(m15.index[b - 1]), "status": "flat"}
     ev = [e for e in tp.advance(st, tp.indicators(d1, h4), m15.iloc[:b + 16], "BTCUSDT") if "BREAKOUT" in e][0]
     title, body, urgent = tp.alert_text("BTCUSDT", ev, st, 10_000.0)
-    assert urgent and title == "BTC: BUY LIMIT 200.5"
-    assert "STOP" in body and "Cancel if not filled" in body and "leverage" in body
+    assert urgent and title.startswith("BTC: BUY NOW at market")
+    assert "STOP" in body and "leverage" in body
 
 
 def test_run_sends_alerts_and_never_fails_on_them(monkeypatch, tmp_path):

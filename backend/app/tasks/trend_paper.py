@@ -5,13 +5,16 @@ Rules (frozen; changing them restarts the paper book):
   markets   BTC, ETH, SOL, BNB, XRP and gold, as Binance USD-M perpetuals
   signal    a 4h close above the highest high of the previous 55 4h bars,
             with the last completed daily close above its 200-day average
-  entry     limit buy at that broken high (the retest), valid 24 hours
+  entry     market buy at the next 15-minute open after the 4h close (switched
+            from a limit at the broken high on 5 Oct 2026, at the owner's
+            request: +0.83R / +0.57R a trade against +0.96R / +0.38R)
   stop      2 ATR(4h, 20) below the entry
   exit      a 4h close below the lowest low of the previous 20 4h bars, at the
             next 15-minute open; or the stop
-  charges   maker 0.02% + 18% GST on the entry, taker 0.05% + GST + 0.01%
-            slippage on the exit, funding 0.01% per 8 hours held
-  account   Rs 10,000 paper, 1% of equity risked a trade
+  charges   taker 0.05% + 18% GST + 0.01% slippage on the entry and the exit,
+            funding 0.01% per 8 hours held
+  account   Rs 10,000 paper, compounding: 2% of equity risked a trade,
+            position at most 5x equity (research/fx_crypto/STEP9_SIZING.md)
 
 Runs every 5 minutes (deploy/oracle/update.sh, ati-lab-trend.timer). Each
 run reads only completed candles and moves each market's state forward bar by
@@ -42,11 +45,10 @@ REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/data/reports"))
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "XAUUSDT")
 YAHOO = {"XAUUSDT": "GC=F", "BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
          "BNBUSDT": "BNB-USD", "XRPUSDT": "XRP-USD"}
-N_IN, N_OUT, ATR_N, STOP_ATR, VALID_H = 55, 20, 20, 2.0, 24
-MAKER = 0.0002 * 1.18
+N_IN, N_OUT, ATR_N, STOP_ATR = 55, 20, 20, 2.0
 TAKER = 0.0005 * 1.18 + 0.0001
 FUNDING_PER_15M = 0.0001 / 32
-START_EQUITY, RISK = 10_000.0, 0.01
+START_EQUITY, RISK, MAX_POSITION_X = 10_000.0, 0.02, 5.0
 UA = {"User-Agent": "Mozilla/5.0 (ATI Lab paper trading)"}
 NTFY = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 
@@ -134,14 +136,15 @@ def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[st
         if status == "exit_next":
             _close(st, b.open, ts, "trend exit", events, sym)
             status = st["status"]
-        if status == "pending":
-            if ts >= pd.Timestamp(st["expires"]):
-                events.append(f"{sym}: buy limit {st['level']:.6g} expired unfilled")
-                st.update(status="flat")
-            elif b.low <= st["level"]:
-                entry = min(b.open, st["level"])
-                st.update(status="long", entry=entry, stop=entry - STOP_ATR * st["atr"], entry_time=str(ts), held15=0)
-                events.append(f"{sym}: BOUGHT at {entry:.6g} (limit filled), stop {st['stop']:.6g}")
+        if status == "pending":                      # a resting limit from before the switch
+            events.append(f"{sym}: buy limit {st['level']:.6g} cancelled (strategy now enters at market)")
+            st.update(status="flat")
+        if status == "enter_next":
+            entry = float(b.open)
+            stop = entry - STOP_ATR * st["atr"]
+            st.update(status="long", entry=entry, stop=stop, entry_time=str(ts), held15=0,
+                      size_x=round(min(RISK / ((entry - stop) / entry), MAX_POSITION_X), 3))
+            events.append(f"{sym}: BOUGHT at {entry:.6g} (market), stop {stop:.6g}")
         if st.get("status") == "long":
             st["held15"] = st.get("held15", 0) + 1
             if b.low <= st["stop"]:
@@ -155,13 +158,12 @@ def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[st
                 if st.get("status") == "long" and np.isfinite(r.ll) and r.close < r.ll:
                     st["status"] = "exit_next"
                     events.append(f"{sym}: 4h close {r.close:.6g} below the 20-bar low {r.ll:.6g}: sell at the next open")
-                elif (st.get("status") in ("flat", "pending") and r.trend and np.isfinite(r.hh)
+                elif (st.get("status") == "flat" and r.trend and np.isfinite(r.hh)
                       and np.isfinite(r.atr) and r.close > r.hh):
-                    # a new breakout refreshes a resting order to the new high, as in the backtest
-                    st.update(status="pending", level=float(r.hh), atr=float(r.atr), signal_time=str(j),
-                              expires=str(end + pd.Timedelta(hours=VALID_H)))
+                    st.update(status="enter_next", level=float(r.hh), atr=float(r.atr), signal_time=str(j),
+                              signal_close=float(r.close))
                     events.append(f"{sym}: BREAKOUT, 4h close {r.close:.6g} above the 55-bar high {r.hh:.6g}. "
-                                  f"Buy limit {r.hh:.6g}, stop {r.hh - STOP_ATR * r.atr:.6g}, valid 24h")
+                                  f"Buy at market now, stop about {r.close - STOP_ATR * r.atr:.6g}")
         st["last15"] = str(ts)
     return events
 
@@ -169,13 +171,16 @@ def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[st
 def _close(st, px, ts, why, events, sym):
     entry, stop = st["entry"], st["stop"]
     risk = entry - stop
-    cost = MAKER * entry + TAKER * px + FUNDING_PER_15M * st.get("held15", 0) * entry
+    cost = TAKER * entry + TAKER * px + FUNDING_PER_15M * st.get("held15", 0) * entry
     r = (px - entry - cost) / risk
     st.setdefault("closed", []).append({"symbol": sym, "entry_time": st["entry_time"], "exit_time": str(ts),
-                                        "entry": entry, "stop": stop, "exit": float(px), "why": why, "r": round(r, 3)})
+                                        "entry": entry, "stop": stop, "exit": float(px), "why": why, "r": round(r, 3),
+                                        "ret": round((px - entry - cost) / entry, 6),
+                                        "size_x": st.get("size_x", min(RISK / (risk / entry), MAX_POSITION_X))})
     events.append(f"{sym}: SOLD at {px:.6g} ({why}), {r:+.2f}R after charges")
     st.update(status="flat")
-    for k in ("entry", "stop", "entry_time", "held15", "level", "atr", "expires", "signal_time"):
+    for k in ("entry", "stop", "entry_time", "held15", "level", "atr", "expires", "signal_time",
+              "signal_close", "size_x"):
         st.pop(k, None)
 
 
@@ -195,19 +200,19 @@ def notify(topic: str, title: str, body: str, high: bool = False) -> bool:
 def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str, bool]:
     """(title, body, urgent) for one event, with the order to place."""
     name = sym.replace("USDT", "")
-    if "BREAKOUT" in event and st.get("status") == "pending":
-        lvl, stop = st["level"], st["level"] - STOP_ATR * st["atr"]
-        risk_rs = equity * RISK
-        qty_note = (f"Size for Rs {equity:,.0f} at 1% risk (Rs {risk_rs:,.0f}): position value "
-                    f"{risk_rs / ((lvl - stop) / lvl):,.0f} Rs, i.e. leverage about "
-                    f"{(risk_rs / ((lvl - stop) / lvl)) / equity:.1f}x.")
-        exp = pd.Timestamp(st["expires"]).tz_convert("Asia/Kolkata").strftime("%d %b %H:%M IST")
-        return (f"{name}: BUY LIMIT {lvl:.6g}",
-                f"4h breakout on {name}USDT perp.\nPlace BUY LIMIT at {lvl:.6g}\nSTOP {stop:.6g} "
-                f"({(lvl - stop) / lvl:.1%} below)\nCancel if not filled by {exp}.\n{qty_note}\n"
+    if "BREAKOUT" in event and st.get("status") in ("enter_next", "long"):
+        px = st.get("entry", st.get("signal_close"))
+        stop_dist = STOP_ATR * st["atr"]
+        stop = px - stop_dist
+        size_x = min(RISK / (stop_dist / px), MAX_POSITION_X)
+        qty_note = (f"Size for Rs {equity:,.0f} (2% risk = Rs {equity * RISK:,.0f}): position value "
+                    f"Rs {equity * size_x:,.0f}, leverage {size_x:.1f}x.")
+        return (f"{name}: BUY NOW at market ~{px:.6g}",
+                f"4h breakout on {name}USDT perp.\nBUY AT MARKET now (about {px:.6g})\nSTOP {stop:.6g} "
+                f"({stop_dist / px:.1%} below)\n{qty_note}\n"
                 f"Exit rule: sell after a 4h close below the 20-bar low (you will get an alert).", True)
     if "BOUGHT" in event:
-        return f"{name}: limit FILLED", event + "\nKeep the stop order on the exchange.", True
+        return f"{name}: entry recorded", event + "\nPut the stop order on the exchange now.", False
     if "below the 20-bar low" in event:
         return f"{name}: SELL now", event + "\nClose the position at market now.", True
     if "SOLD" in event:
@@ -221,7 +226,10 @@ def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str,
 def _equity(trades):
     eq = START_EQUITY
     for t in sorted(trades, key=lambda t: t["exit_time"]):
-        eq += eq * RISK * t["r"]
+        if "ret" in t:                      # position of size_x times equity, return after charges
+            eq += eq * t["size_x"] * t["ret"]
+        else:                               # trades from before the switch: 1% risk
+            eq += eq * 0.01 * t["r"]
     return eq
 
 
@@ -241,8 +249,8 @@ def write_report(book, now, events, sources):
         st = s.get("status", "flat")
         if st == "long":
             info = f"LONG from {s['entry']:.6g}, stop {s['stop']:.6g}, since {ist(s['entry_time'])}"
-        elif st == "pending":
-            info = f"BUY LIMIT {s['level']:.6g}, stop {s['level'] - STOP_ATR * s['atr']:.6g}, until {ist(s['expires'])}"
+        elif st == "enter_next":
+            info = f"BUY at the next open (breakout above {s['level']:.6g})"
         elif st == "exit_next":
             info = "selling at the next open"
         else:
@@ -257,16 +265,17 @@ def write_report(book, now, events, sources):
 table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #ddd;padding:6px;text-align:left}}
 .k{{font-size:28px;font-weight:600}}</style>
 <h2>4H trend strategy: paper book</h2>
-<p>Updated {ist(now)} IST. Paper start {book['start'][:10]}. Rs 10,000 paper account, 1% risk a trade, after charges.</p>
+<p>Updated {ist(now)} IST. Paper start {book['start'][:10]}. Rs 10,000 paper account, compounding, 2% risk a trade (position at most 5x), after charges.</p>
 <p class=k>Rs {eq:,.0f} &middot; {len(trades)} trades &middot; {sum(rs):+.2f}R</p>
 <p><b>Phone alerts:</b> install the free <b>ntfy</b> app, tap +, and subscribe to the topic
 <code style="font-size:16px">{book.get('ntfy_topic', '(set by NTFY_TOPIC)')}</code> (server ntfy.sh). Breakouts arrive about a
-minute after the 4h close with the exact limit, stop and size.</p>
+minute after the 4h close: buy at market, with the stop and size.</p>
 <h3>Markets now</h3><table><tr><th>market</th><th>state</th><th>data</th></tr>{''.join(rows)}</table>
 <h3>Latest events</h3><ul>{ev or '<li>none yet</li>'}</ul>
 <h3>Closed trades</h3><table><tr><th>entered</th><th>market</th><th>entry</th><th>exit</th><th>why</th><th>R</th></tr>{trows}</table>
-<p>Rules: 4h close above the 55-bar high with the daily close above its 200-day average; limit buy at the
-broken high for 24h; stop 2 ATR; exit on a 4h close below the 20-bar low. Backtest 2025-26: +0.38R a trade.</p>"""
+<p>Rules: 4h close above the 55-bar high with the daily close above its 200-day average; buy at market at the
+next open; stop 2 ATR; exit on a 4h close below the 20-bar low. Backtest after charges: +0.83R a trade in
+2021-24, +0.57R in 2025-26.</p>"""
     (REPORT_DIR / "trend.html").write_text(html)
 
 
