@@ -2,21 +2,18 @@
 # history and publishes it as assets of the `fx-crypto-data` release, for the
 # intraday market-structure research (scripts/fetch_fx_crypto.py). No API key.
 # Never touches the database or the db-backup branch.
+#
+# Dukascopy throttles each client hard (about 15 s a file), so forex is fetched
+# as one job per symbol and year, in parallel, and joined in `publish`.
 name: Forex and crypto data
 
 on:
   workflow_dispatch:
     inputs:
       start:
-        description: "First day to download (YYYY-MM-DD)"
+        description: "First day of crypto history (YYYY-MM-DD)"
         required: true
         default: "2021-01-01"
-      only:
-        description: "Only these symbols, comma-separated (blank = all)"
-        required: false
-        default: ""
-  schedule:
-    - cron: "17 2 * * 6"   # Saturdays 07:47 IST, when forex is shut
 
 permissions:
   contents: write          # the release assets only
@@ -26,19 +23,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fetch:
+  forex:
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        symbol: [EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD]
+        year: [2021, 2022, 2023, 2024, 2025, 2026]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
       - run: pip install "pandas>=2.0,<3" "requests>=2.31,<3"
-      - name: Download and publish
+      - name: Download ${{ matrix.symbol }} ${{ matrix.year }}
+        run: |
+          python scripts/fetch_fx_crypto.py "$RUNNER_TEMP/part" --only ${{ matrix.symbol }} \
+            --start ${{ matrix.year }}-01-01 --end $(( ${{ matrix.year }} + 1 ))-01-01 --part ${{ matrix.year }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fx-${{ matrix.symbol }}-${{ matrix.year }}
+          path: ${{ runner.temp }}/part/*.csv.gz
+          retention-days: 3
+
+  publish:
+    needs: forex
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "pandas>=2.0,<3" "requests>=2.31,<3"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fx-*
+          path: ${{ runner.temp }}/parts
+          merge-multiple: true
+      - name: Crypto, join forex, publish
         env:
           GH_PUSH_TOKEN: ${{ github.token }}
           START: ${{ inputs.start || '2021-01-01' }}
-          ONLY: ${{ inputs.only || '' }}
-        run: python scripts/fetch_fx_crypto.py "$RUNNER_TEMP/fxc" --start "$START" --only "$ONLY" --upload
+        run: python scripts/fetch_fx_crypto.py "$RUNNER_TEMP/out" --start "$START" --merge "$RUNNER_TEMP/parts" --upload

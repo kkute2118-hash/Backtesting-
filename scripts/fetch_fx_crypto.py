@@ -210,17 +210,32 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--start", default="2021-01-01")
+    ap.add_argument("--end", default="", help="first day NOT downloaded (default today)")
     ap.add_argument("--only", default="", help="comma-separated symbols")
+    ap.add_argument("--part", default="", help="write <SYM>_5m.<part>.csv.gz, for --merge later")
+    ap.add_argument("--merge", default="", help="directory of part files to join into <SYM>_5m.csv.gz")
     ap.add_argument("--upload", action="store_true")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     start = date.fromisoformat(a.start)
-    end = datetime.now(timezone.utc).date()
+    today = datetime.now(timezone.utc).date()
+    end = min(date.fromisoformat(a.end), today) if a.end else today
     only = {s for s in a.only.split(",") if s}
     written = []
+    if a.merge:
+        # Dukascopy throttles each client, so the workflow fetches forex as one
+        # job per symbol and year; join those parts here.
+        parts = sorted(Path(a.merge).rglob("*_5m.*.csv.gz"))
+        for sym in sorted({p.name.split("_5m.")[0] for p in parts}):
+            mine = [p for p in parts if p.name.startswith(f"{sym}_5m.")]
+            df = pd.concat([pd.read_csv(p) for p in mine], ignore_index=True)
+            df = df.drop_duplicates("time").sort_values("time")
+            df.to_csv(out / f"{sym}_5m.csv.gz", index=False)
+            written.append(out / f"{sym}_5m.csv.gz")
+            print(f"{sym}: {len(df):,} bars from {len(mine)} parts, {df.time.iloc[0]} to {df.time.iloc[-1]}", flush=True)
     for sym in CRYPTO:
-        if only and sym not in only:
+        if (only and sym not in only) or a.part:
             continue
         t = time.time()
         k = crypto_klines(sym, start, end)
@@ -229,12 +244,15 @@ def main():
         written += [out / f"{sym}_5m.csv.gz", out / f"{sym}_funding.csv.gz"]
         print(f"{sym}: {len(k):,} bars {k.time.iloc[0]} to {k.time.iloc[-1]} ({time.time() - t:.0f}s)", flush=True)
     for sym in FOREX:
-        if only and sym not in only:
+        if (only and sym not in only) or a.merge:
+            continue
+        if start >= end:
             continue
         t = time.time()
         b = forex_5m(sym, start, end)
-        b.to_csv(out / f"{sym}_5m.csv.gz", index=False)
-        written.append(out / f"{sym}_5m.csv.gz")
+        name = f"{sym}_5m.{a.part}.csv.gz" if a.part else f"{sym}_5m.csv.gz"
+        b.to_csv(out / name, index=False)
+        written.append(out / name)
         print(f"{sym}: {len(b):,} bars {b.time.iloc[0]} to {b.time.iloc[-1]}, "
               f"median spread {b.spread.median():.5g} ({time.time() - t:.0f}s)", flush=True)
     if a.upload:
