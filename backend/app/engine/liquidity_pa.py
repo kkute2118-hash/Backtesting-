@@ -75,6 +75,7 @@ class Params:
     max_hold: int = 144         # 12 hours of 5-minute bars
     entry: str = "ltf"          # "ltf" (method C) or "limit" (method A)
     pool_max_age: int = 96 * 5  # 15-minute bars a swing pool stays live (5 days)
+    crypto_cost_per_side: float = CRYPTO_COST_PER_SIDE   # fee + slippage, fraction of price
 
 
 def is_crypto(sym: str) -> bool:
@@ -190,7 +191,7 @@ class Engine:
         self.l5t = df5.index
         self.l5sh, self.l5sl = _swings(self.l5h, self.l5l, self.p.ltf_swing_n)
         if is_crypto(symbol):
-            self.cost5 = df5["close"].to_numpy() * 2 * CRYPTO_COST_PER_SIDE
+            self.cost5 = df5["close"].to_numpy() * 2 * self.p.crypto_cost_per_side
         else:
             sp = df5["spread"].fillna(df5["spread"].median())
             self.cost5 = sp.to_numpy()
@@ -280,7 +281,8 @@ class Engine:
                     ev = "run"
                 else:
                     ev = "break"            # decided over the next sweep_bars bars
-                pending.append({"stage": "event", "side": side, "level": lvl, "kind": main.kind,
+                pending.append({"body_atr": body / a, "beyond_atr": beyond / a,
+                                "stage": "event", "side": side, "level": lvl, "kind": main.kind,
                                 "event": ev, "i": i, "extreme": h[i] if side == "bsl" else l[i],
                                 "ref_sh": last_sh_idx, "ref_sl": last_sl_idx})
 
@@ -524,7 +526,12 @@ class Engine:
         s.rr2 = round((tp2 - entry) * d / risk, 2)
         s.entry_time = str(self.l5t[entry_k])
         s.score = score_setup(s)
-        s.extras = {"grade": grade(s.score), "target_kind": tgts[0].kind}
+        s.extras = {"grade": grade(s.score), "target_kind": tgts[0].kind,
+                    "event_body_atr": round(cd.get("body_atr", 0.0), 2),
+                    "event_beyond_atr": round(cd.get("beyond_atr", 0.0), 2),
+                    "retest_bars": int(i15 - (cd.get("run_i") or cd.get("msb_i") or i15)),
+                    "risk_atr": round(risk / a, 2), "tp1_atr": round(abs(tp1 - entry) / a, 2),
+                    "hour_utc": int(self.l5t[entry_k].hour), "weekday": int(self.l5t[entry_k].weekday())}
         if s.rr1 < p.min_rr:
             s.decision, s.reject_reason = "NO TRADE", "TP1 below minimum R:R"
             return
