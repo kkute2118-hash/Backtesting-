@@ -39,3 +39,24 @@ def test_breakout_rests_a_limit_then_fills_then_stops():
     assert st["status"] == "flat"
     r = st["closed"][-1]["r"]
     assert -1.2 < r < -1.0
+
+
+def test_breakout_alert_names_the_order(monkeypatch, tmp_path):
+    m15, h4, d1, b = _frames()
+    st = {"last15": str(m15.index[b - 1]), "status": "flat"}
+    ev = [e for e in tp.advance(st, tp.indicators(d1, h4), m15.iloc[:b + 16], "BTCUSDT") if "BREAKOUT" in e][0]
+    title, body, urgent = tp.alert_text("BTCUSDT", ev, st, 10_000.0)
+    assert urgent and title == "BTC: BUY LIMIT 200.5"
+    assert "STOP" in body and "Cancel if not filled" in body and "leverage" in body
+
+
+def test_run_sends_alerts_and_never_fails_on_them(monkeypatch, tmp_path):
+    m15, h4, d1, b = _frames()
+    sent = []
+    monkeypatch.setattr(tp, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(tp, "SYMBOLS", ("BTCUSDT",))
+    monkeypatch.setattr(tp, "notify", lambda topic, title, body, high=False: sent.append(title) or True)
+    monkeypatch.setattr(tp, "fetch", lambda sym: (d1, h4, m15.iloc[:b + 16], "test"))
+    tp.run()                                    # first run: creates the topic and says hello
+    assert sent[0] == "ATI trend alerts connected"
+    assert (tmp_path / "trend.html").read_text().count("ati-trend-") == 1

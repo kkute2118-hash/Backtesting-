@@ -111,10 +111,10 @@ Persistent=true
 WantedBy=timers.target"
   local trend_timer
   trend_timer="[Unit]
-Description=4h trend paper book (crypto and gold perpetuals), every 15 minutes
+Description=4h trend paper book and phone alerts (crypto and gold perpetuals), every 5 minutes
 
 [Timer]
-OnCalendar=*-*-* *:01/15:00 UTC
+OnCalendar=*-*-* *:01/5:00 UTC
 
 [Install]
 WantedBy=timers.target"
