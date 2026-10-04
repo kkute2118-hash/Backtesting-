@@ -203,7 +203,7 @@ class Engine:
             ny = self.t.tz_convert("America/New_York")
             day = (ny + pd.Timedelta(hours=7)).floor("1D").tz_localize(None)
         day = pd.Index(day)
-        week = pd.Index(pd.to_datetime(day).to_period("W-SUN").astype(str))
+        week = pd.Index(pd.to_datetime(day).tz_localize(None).to_period("W-SUN").astype(str)) if getattr(pd.to_datetime(day), "tz", None) else pd.Index(pd.to_datetime(day).to_period("W-SUN").astype(str))
         return day, week
 
     # ------------------------------------------------------------------ HTF
@@ -432,10 +432,13 @@ class Engine:
         if not touched:
             return cd
         run_i = cd["run_i"]
+        # Invalidation from bars already closed: the pullback extreme before
+        # this bar, but never closer than the broken level itself.
+        prev_lo, prev_hi = min(l[run_i:i]), max(h[run_i:i])
         cd.update(msb="n/a", disp=True, fvg=False, zone="level",
                   zlo=lvl - 0.1 * a, zhi=lvl + 0.1 * a,
-                  extreme=(min(l[run_i:i + 1]) if bull else max(h[run_i:i + 1])),
-                  leg_hi=max(h[run_i:i + 1]), leg_lo=min(l[run_i:i + 1]))
+                  extreme=(min(prev_lo, lvl) if bull else max(prev_hi, lvl)),
+                  leg_hi=prev_hi, leg_lo=prev_lo)
         return self._make_setup(cd, i, pools, "continuation")
 
     def _make_setup(self, cd, i, pools, family):
@@ -539,7 +542,15 @@ class Engine:
         end = min(k + 1 + p.max_hold, len(C))
         exit_k = end - 1
         outcome = "time"
-        for j in range(k + 1, end):
+        # A limit fill can be stopped inside its own bar: count it as a loss.
+        first = k if p.entry == "limit" else k + 1
+        for j in range(first, end):
+            if j == k:
+                if (L[j] <= cur_stop) if d > 0 else (H[j] >= cur_stop):
+                    realized, exit_k, outcome = (cur_stop - entry) * d / risk, j, "stop"
+                    mae = -1.0
+                    break
+                continue
             mfe = max(mfe, (H[j] - entry if d > 0 else entry - L[j]) / risk)
             mae = min(mae, (L[j] - entry if d > 0 else entry - H[j]) / risk)
             hit_stop = L[j] <= cur_stop if d > 0 else H[j] >= cur_stop
