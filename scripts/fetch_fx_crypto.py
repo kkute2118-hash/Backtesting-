@@ -103,6 +103,8 @@ def crypto_klines(sym, start, end):
     with ThreadPoolExecutor(8) as ex:
         blobs = list(ex.map(_get, urls))
     frames = []
+    if not any(blobs):
+        return None                                  # not listed on Binance USD-M
     for blob in blobs:
         if blob:
             df = _zip_csv(blob, KLINE_COLS)
@@ -234,11 +236,16 @@ def main():
             df.to_csv(out / f"{sym}_5m.csv.gz", index=False)
             written.append(out / f"{sym}_5m.csv.gz")
             print(f"{sym}: {len(df):,} bars from {len(mine)} parts, {df.time.iloc[0]} to {df.time.iloc[-1]}", flush=True)
-    for sym in CRYPTO:
+    # Any *USDT symbol named in --only is fetched too (e.g. the gold perpetuals).
+    crypto = list(CRYPTO) + sorted(s for s in only if s.endswith("USDT") and s not in CRYPTO)
+    for sym in crypto:
         if (only and sym not in only) or a.part:
             continue
         t = time.time()
         k = crypto_klines(sym, start, end)
+        if k is None:
+            print(f"{sym}: not available on Binance USD-M futures", flush=True)
+            continue
         k.to_csv(out / f"{sym}_5m.csv.gz", index=False)
         crypto_funding(sym, start, end).to_csv(out / f"{sym}_funding.csv.gz", index=False)
         written += [out / f"{sym}_5m.csv.gz", out / f"{sym}_funding.csv.gz"]
