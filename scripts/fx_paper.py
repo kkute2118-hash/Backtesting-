@@ -78,7 +78,9 @@ def main():
     state_dir.mkdir(parents=True, exist_ok=True)
     key = os.environ.get("TWELVEDATA_API_KEY", "")
     if not key:
-        sys.exit("TWELVEDATA_API_KEY is not set: add it as a repository secret")
+        # Skip quietly rather than fail: a failing schedule would email the owner every 15 minutes.
+        print("::warning title=FX paper trading paused::add the repository secret TWELVEDATA_API_KEY")
+        return
     start = pd.Timestamp(os.environ.get("PAPER_START", "2026-10-05"), tz="UTC")
     state_file = state_dir / "state.json"
     state = json.loads(state_file.read_text()) if state_file.exists() else {"alerted": [], "trades": {}}
