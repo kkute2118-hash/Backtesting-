@@ -77,6 +77,15 @@ class Params:
     pool_max_age: int = 96 * 5  # 15-minute bars a swing pool stays live (5 days)
     crypto_cost_per_side: float = CRYPTO_COST_PER_SIDE   # fee + slippage, fraction of price
     fill_through: float = 0.0   # a limit fills only if price trades this many ATR through it
+    # Timeframes. Intraday (default): 1h / 15m / 5m. Swing mode: 4h / 1h / 15m,
+    # where every bar count above is in bars of the new timeframes.
+    htf: str = "1h"
+    mtf: str = "15min"
+    ltf: str = "5min"
+    # "auto": crypto pays percentage fees + funding, forex/gold its recorded
+    # spread. "perp": percentage fees + funding for any symbol (gold traded as
+    # a crypto-exchange perpetual).
+    fee_mode: str = "auto"
 
 
 def is_crypto(sym: str) -> bool:
@@ -172,27 +181,36 @@ def grade(score: int) -> str:
 class Engine:
     def __init__(self, df5: pd.DataFrame, symbol: str, p: Params | None = None):
         self.sym, self.p = symbol, p or Params()
+        p = self.p
+        if p.ltf != "5min":
+            agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+            if "spread" in df5:
+                agg["spread"] = "mean"
+            df5 = df5.resample(p.ltf, label="left", closed="left").agg(agg).dropna(subset=["open"])
         self.m5 = df5
-        self.m15 = _resample(df5, "15min")
-        self.h1 = _resample(df5, "1h")
+        self.m15 = _resample(df5, p.mtf)
+        self.h1 = _resample(df5, p.htf)
+        self.mtf_delta = pd.Timedelta(p.mtf)
+        self.ltf_per_mtf = max(int(self.mtf_delta / pd.Timedelta(p.ltf)), 1)
         m, h = self.m15, self.h1
         self.h, self.l, self.o, self.c = (m[k].to_numpy() for k in ("high", "low", "open", "close"))
         self.t = m.index
         self.atr = _atr(self.h, self.l, self.c)
-        self.sh, self.sl = _swings(self.h, self.l, self.p.swing_n)
-        # HTF swings, usable from the close of the confirming hour
+        self.sh, self.sl = _swings(self.h, self.l, p.swing_n)
+        # HTF swings, usable from the close of the confirming HTF bar
         hh, hl = h.high.to_numpy(), h.low.to_numpy()
-        hsh, hsl = _swings(hh, hl, self.p.htf_swing_n)
-        n = self.p.htf_swing_n
-        conf_t = h.index + pd.Timedelta(hours=n + 1)
+        hsh, hsl = _swings(hh, hl, p.htf_swing_n)
+        n = p.htf_swing_n
+        conf_t = h.index + pd.Timedelta(p.htf) * (n + 1)
         self.htf_highs = pd.Series(np.where(hsh, hh, np.nan), index=conf_t).dropna()
         self.htf_lows = pd.Series(np.where(hsl, hl, np.nan), index=conf_t).dropna()
         # LTF
         self.l5h, self.l5l, self.l5c = (df5[k].to_numpy() for k in ("high", "low", "close"))
         self.l5t = df5.index
-        self.l5sh, self.l5sl = _swings(self.l5h, self.l5l, self.p.ltf_swing_n)
-        if is_crypto(symbol):
-            self.cost5 = df5["close"].to_numpy() * 2 * self.p.crypto_cost_per_side
+        self.l5sh, self.l5sl = _swings(self.l5h, self.l5l, p.ltf_swing_n)
+        self.pays_pct = is_crypto(symbol) or p.fee_mode == "perp"
+        if self.pays_pct:
+            self.cost5 = df5["close"].to_numpy() * 2 * p.crypto_cost_per_side
         else:
             sp = df5["spread"].fillna(df5["spread"].median())
             self.cost5 = sp.to_numpy()
@@ -320,7 +338,11 @@ class Engine:
             a = self.atr[n - 1]
             lvl = cd["level"]
             entry = lvl + d * 0.1 * a
-            stop = lvl - d * p.stop_buffer * a
+            # Same invalidation as the backtest: beyond the broken level and
+            # every bar since the run (the run candle included).
+            seg = slice(cd["run_i"], n)
+            base = min(lvl, self.l[seg].min()) if bull else max(lvl, self.h[seg].max())
+            stop = base - d * p.stop_buffer * a
             risk = (entry - stop) * d
             side = "bsl" if d > 0 else "ssl"
             tgts = sorted((q for q in self.final_pools if q.side == side and (q.price - entry) * d > 0),
@@ -342,7 +364,7 @@ class Engine:
                       rr2=round((tp2 - entry) * d / risk, 2))
             s.score = score_setup(s)
             expires = self.t[min(cd["run_i"] + p.retest_bars, n - 1)] if cd["run_i"] + p.retest_bars < n \
-                else self.t[n - 1] + pd.Timedelta(minutes=15 * (cd["run_i"] + p.retest_bars - (n - 1)))
+                else self.t[n - 1] + self.mtf_delta * (cd["run_i"] + p.retest_bars - (n - 1))
             out.append({**asdict(s), "expires": str(expires), "grade": grade(s.score)})
         return out
 
@@ -480,9 +502,12 @@ class Engine:
         # Invalidation from bars already closed: the pullback extreme before
         # this bar, but never closer than the broken level itself.
         prev_lo, prev_hi = min(l[run_i:i]), max(h[run_i:i])
+        # prev_lo/prev_hi start at the run bar, so this is beyond the run
+        # candle's origin as well (framework section 19).
+        ext = min(prev_lo, lvl) if bull else max(prev_hi, lvl)
         cd.update(msb="n/a", disp=True, fvg=False, zone="level",
                   zlo=lvl - 0.1 * a, zhi=lvl + 0.1 * a,
-                  extreme=(min(prev_lo, lvl) if bull else max(prev_hi, lvl)),
+                  extreme=ext,
                   leg_hi=prev_hi, leg_lo=prev_lo)
         return self._make_setup(cd, i, pools, "continuation")
 
@@ -509,12 +534,12 @@ class Engine:
         bar_start = self.t[i15]
         # 5-minute bars of the touching 15-minute bar onward
         k0 = self.l5t.searchsorted(bar_start)
-        k_end = min(k0 + 3 + p.ltf_confirm_bars, len(self.l5c))
+        k_end = min(k0 + self.ltf_per_mtf + p.ltf_confirm_bars, len(self.l5c))
         entry_k = None
         if p.entry == "limit":
             px = cd["zhi"] if d > 0 else cd["zlo"]
             through = p.fill_through * a
-            for k in range(k0, min(k0 + 3, len(self.l5c))):
+            for k in range(k0, min(k0 + self.ltf_per_mtf, len(self.l5c))):
                 if (d > 0 and self.l5l[k] <= px - through) or (d < 0 and self.l5h[k] >= px + through):
                     entry_k, entry = k, px
                     break
@@ -628,7 +653,7 @@ class Engine:
             outcome = "tp1+time" if half_done else "time"
         held_min = int((self.l5t[exit_k] - self.l5t[k]).total_seconds() // 60)
         cost_px = cost
-        if is_crypto(self.sym):
+        if self.pays_pct:
             cost_px += entry * CRYPTO_FUNDING_PER_8H * (held_min / 480)
         s.cost_r = round(cost_px / risk, 3)
         s.r = round(realized - s.cost_r, 3)

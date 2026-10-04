@@ -14,6 +14,14 @@ on:
         description: "First day of crypto history (YYYY-MM-DD)"
         required: true
         default: "2021-01-01"
+      only:
+        description: "Only these symbols, comma-separated (blank = all; any *USDT name is fetched from Binance)"
+        required: false
+        default: ""
+      forex:
+        description: "Also re-download forex and gold from Dukascopy (slow)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write          # the release assets only
@@ -24,6 +32,7 @@ concurrency:
 
 jobs:
   forex:
+    if: ${{ inputs.forex != false }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
@@ -50,6 +59,7 @@ jobs:
 
   publish:
     needs: forex
+    if: ${{ !cancelled() && needs.forex.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -59,6 +69,7 @@ jobs:
           python-version: "3.11"
       - run: pip install "pandas>=2.0,<3" "requests>=2.31,<3"
       - uses: actions/download-artifact@v4
+        continue-on-error: true            # nothing to join when forex was skipped
         with:
           pattern: fx-*
           path: ${{ runner.temp }}/parts
@@ -67,4 +78,7 @@ jobs:
         env:
           GH_PUSH_TOKEN: ${{ github.token }}
           START: ${{ inputs.start || '2021-01-01' }}
-        run: python scripts/fetch_fx_crypto.py "$RUNNER_TEMP/out" --start "$START" --merge "$RUNNER_TEMP/parts" --upload
+          ONLY: ${{ inputs.only || '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/parts"
+          python scripts/fetch_fx_crypto.py "$RUNNER_TEMP/out" --start "$START" --only "$ONLY" --merge "$RUNNER_TEMP/parts" --upload
