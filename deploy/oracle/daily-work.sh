@@ -12,7 +12,7 @@
 # Always Free server from being reclaimed as idle.
 set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/ati-lab}"
-job="${1:?usage: daily-work.sh scan|research}"
+job="${1:?usage: daily-work.sh scan|research|trend}"
 docker compose -f "$APP_DIR/deploy/oracle/docker-compose.yml" \
   --env-file "$APP_DIR/deploy/oracle/.env" \
   exec -T api nice -n 15 python -m app.tasks.oracle_daily "$job"

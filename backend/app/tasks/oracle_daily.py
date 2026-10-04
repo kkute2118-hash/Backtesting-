@@ -157,6 +157,10 @@ def _research(started):
 
 if __name__ == "__main__":
     job = sys.argv[1] if len(sys.argv) > 1 else ""
+    if job == "trend":                       # 4h trend paper book, every 15 minutes
+        from app.tasks import trend_paper
+        print(f"trend: wrote {trend_paper.run()}", flush=True)
+        sys.exit(0)
     if job not in ("scan", "research"):
-        sys.exit("usage: python -m app.tasks.oracle_daily scan|research")
+        sys.exit("usage: python -m app.tasks.oracle_daily scan|research|trend")
     print(f"{job}: wrote {globals()[job]()}", flush=True)

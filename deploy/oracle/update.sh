@@ -75,7 +75,7 @@ install_snapshot_timer || echo "$(date -u +%FT%TZ) could not install the snapsho
 # every night at 02:00 IST. Reports at /reports/. Written only when changed.
 install_daily_work_timers() {
   local changed=0 name want
-  for name in scan research; do
+  for name in scan research trend; do
     want="[Unit]
 Description=ATI Lab daily work: $name
 After=docker.service
@@ -109,6 +109,18 @@ Persistent=true
 
 [Install]
 WantedBy=timers.target"
+  local trend_timer
+  trend_timer="[Unit]
+Description=4h trend paper book (crypto and gold perpetuals), every 15 minutes
+
+[Timer]
+OnCalendar=*-*-* *:01/15:00 UTC
+
+[Install]
+WantedBy=timers.target"
+  if [ "$(cat /etc/systemd/system/ati-lab-trend.timer 2>/dev/null)" != "$trend_timer" ]; then
+    printf '%s\n' "$trend_timer" > /etc/systemd/system/ati-lab-trend.timer; changed=1
+  fi
   if [ "$(cat /etc/systemd/system/ati-lab-scan.timer 2>/dev/null)" != "$scan_timer" ]; then
     printf '%s\n' "$scan_timer" > /etc/systemd/system/ati-lab-scan.timer; changed=1
   fi
@@ -118,7 +130,7 @@ WantedBy=timers.target"
   if [ "$changed" = 1 ]; then
     chmod +x "$APP_DIR/deploy/oracle/daily-work.sh"
     systemctl daemon-reload
-    systemctl enable --now ati-lab-scan.timer ati-lab-research.timer
+    systemctl enable --now ati-lab-scan.timer ati-lab-research.timer ati-lab-trend.timer
     echo "$(date -u +%FT%TZ) daily work timers installed"
   fi
 }

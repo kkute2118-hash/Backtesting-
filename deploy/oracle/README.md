@@ -37,6 +37,11 @@ and never competes with them:
     over the last 2 years on every stored stock, by market-breadth band and as a
     Rs 1 lakh account.
 
+  - `ati-lab-trend.timer`: every 15 minutes, the 4-hour trend strategy for
+    crypto and gold perpetuals is paper-traded live
+    (`backend/app/tasks/trend_paper.py`, Binance public candles, Yahoo Finance
+    as the fallback). The book is at `/reports/trend.html`.
+
   Reports are JSON files under `/reports/` on the site (same login), kept for
   30 days. Neither job writes the backup or GitHub. The daily load is also what
   keeps Oracle from reclaiming the server as idle (below).
