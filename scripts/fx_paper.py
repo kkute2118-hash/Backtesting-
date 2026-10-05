@@ -76,7 +76,8 @@ def trade_id(row) -> str:
 def main():
     state_dir = Path(sys.argv[1])
     state_dir.mkdir(parents=True, exist_ok=True)
-    key = os.environ.get("TWELVEDATA_API_KEY", "")
+    # Tolerate a pasted "NAME=value", quotes or a trailing newline: keys are plain alphanumerics.
+    key = os.environ.get("TWELVEDATA_API_KEY", "").strip().strip("='\" ").rpartition("=")[2].strip("='\" \n")
     if not key:
         # Skip quietly rather than fail: a failing schedule would email the owner every 15 minutes.
         print("::warning title=FX paper trading paused::add the repository secret TWELVEDATA_API_KEY")
