@@ -10,6 +10,11 @@ on:
   schedule:
     - cron: "*/15 5-16 * * 1-5"     # 10:30-22:30 IST, Monday to Friday
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Also send a test message to the phone (NTFY_TOPIC)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write                   # the fx-paper branch only
@@ -66,6 +71,12 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          [ -n "$NTFY_TOPIC" ] && [ -s "$RUNNER_TEMP/alerts.md" ] || exit 0
+          [ -n "$NTFY_TOPIC" ] || { echo "::warning title=No phone alerts::secret NTFY_TOPIC is not set"; exit 0; }
+          if [ "${{ inputs.test_alert }}" = "true" ]; then
+            curl -fsS -m 20 -H "Title: FX paper trading: test" \
+              -d "Forex alerts are connected. Paper trades from liquidity strategy B will arrive here." \
+              "https://ntfy.sh/$NTFY_TOPIC" >/dev/null && echo "test message sent"
+          fi
+          [ -s "$RUNNER_TEMP/alerts.md" ] || exit 0
           curl -fsS -m 20 -H "Title: FX paper trading (liquidity B)" -H "Priority: high" \
             --data-binary @"$RUNNER_TEMP/alerts.md" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true
