@@ -1,8 +1,11 @@
 # Liquidity strategy B: paper trading
 
-Updated 05 Oct 22:55 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
+Updated 05 Oct 22:59 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
 
-Closed trades: **0**, total **+0.00R**, average +0.00R, wins 0. Backtest expectation: about +0.3R a trade, 36% wins, ~80 trades a year.
+Closed trades: **1**, total **-1.04R**, average -1.04R, wins 0. Backtest expectation: about +0.3R a trade, 36% wins, ~80 trades a year.
 
+## Trades
 
-Data errors this run: EURUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ; GBPUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ; USDJPY: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ; AUDUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ; XAUUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything 
+| entered | symbol | side | entry | stop | TP1 | status | outcome | R |
+|---|---|---|---|---|---|---|---|---|
+| 05 Oct 19:30 IST | EURUSD | short | 1.1195 | 1.1203 | 1.1171 | closed | stop | -1.04 |

@@ -1,13 +1,25 @@
 {
  "alerted": [],
- "trades": {},
- "updated": "2026-10-05T17:25+00:00",
- "errors": [
-  "EURUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
-  "GBPUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
-  "USDJPY: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
-  "AUDUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
-  "XAUUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything "
- ],
+ "trades": {
+  "EURUSD|2026-10-05 13:30:00+00:00|-1": {
+   "symbol": "EURUSD",
+   "direction": -1,
+   "event_time": "2026-10-05 13:30:00+00:00",
+   "entry_time": "2026-10-05 14:00:00+00:00",
+   "entry": 1.119500142857143,
+   "stop": 1.1202898571428572,
+   "tp1": 1.11713,
+   "tp2": 1.11617,
+   "rr1": 3.0,
+   "score": 71,
+   "exit_time": "2026-10-05 14:45:00+00:00",
+   "outcome": "stop",
+   "r": -1.038,
+   "cost_r": 0.038,
+   "status": "closed"
+  }
+ },
+ "updated": "2026-10-05T17:29+00:00",
+ "errors": [],
  "pending": []
 }
