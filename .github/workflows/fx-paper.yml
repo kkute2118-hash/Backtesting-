@@ -2,7 +2,8 @@
 # every 15 minutes through the London and New York sessions it replays the
 # frozen rules on fresh Twelve Data candles, keeps the book on the `fx-paper`
 # branch, and posts new pending orders and closed trades as comments on the
-# "FX paper trading" issue (GitHub emails and notifies the owner).
+# "FX paper trading" issue (GitHub emails and notifies the owner). The Oracle
+# server relays the same events to the owner's phone (trend_paper.relay_fx).
 # Needs the repository secret TWELVEDATA_API_KEY. No real orders, no database.
 name: FX paper trading
 
@@ -10,11 +11,6 @@ on:
   schedule:
     - cron: "*/15 5-16 * * 1-5"     # 10:30-22:30 IST, Monday to Friday
   workflow_dispatch:
-    inputs:
-      test_alert:
-        description: "Also send a test message to the phone (NTFY_TOPIC)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write                   # the fx-paper branch only
@@ -65,18 +61,3 @@ jobs:
           [ -n "$n" ] || n=$(gh issue create --title "FX paper trading" \
             --body "Alerts from .github/workflows/fx-paper.yml (paper only, no real orders). Book: branch fx-paper." | grep -o '[0-9]*$')
           gh issue comment "$n" --body-file "$RUNNER_TEMP/alerts.md"
-      # Optional: the same alerts to the owner's phone, on the ntfy topic shown at
-      # /reports/trend.html on the Oracle server (repository secret NTFY_TOPIC).
-      - name: Phone alert
-        env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: |
-          [ -n "$NTFY_TOPIC" ] || { echo "::warning title=No phone alerts::secret NTFY_TOPIC is not set"; exit 0; }
-          if [ "${{ inputs.test_alert }}" = "true" ]; then
-            curl -fsS -m 20 -H "Title: FX paper trading: test" \
-              -d "Forex alerts are connected. Paper trades from liquidity strategy B will arrive here." \
-              "https://ntfy.sh/$NTFY_TOPIC" >/dev/null && echo "test message sent"
-          fi
-          [ -s "$RUNNER_TEMP/alerts.md" ] || exit 0
-          curl -fsS -m 20 -H "Title: FX paper trading (liquidity B)" -H "Priority: high" \
-            --data-binary @"$RUNNER_TEMP/alerts.md" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true

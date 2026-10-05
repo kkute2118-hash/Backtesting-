@@ -4,8 +4,17 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.tasks import trend_paper as tp
+
+
+@pytest.fixture(autouse=True)
+def no_forex_book(monkeypatch):
+    """No network in tests: the forex relay sees an unreachable book."""
+    def boom(*a, **k):
+        raise OSError("offline")
+    monkeypatch.setattr(tp.requests, "get", boom)
 
 
 def _frames():
@@ -98,3 +107,31 @@ def test_new_rules_restart_the_book_and_keep_the_topic(monkeypatch, tmp_path):
     assert len(list(tmp_path.glob("trend-state-before-*.json"))) == 1
     tp.run()                                    # same rules: kept, no second restart
     assert len(list(tmp_path.glob("trend-state-before-*.json"))) == 1
+
+
+FX_STATE = {"pending": [{"id": "GBPUSD|x", "symbol": "GBPUSD", "direction": 1, "entry": 1.25, "stop": 1.248,
+                         "tp1": 1.256, "tp2": 1.26, "rr1": 3.0, "score": 70,
+                         "expires": "2026-10-06T16:00:00+00:00"}],
+            "trades": {"EURUSD|t": {"symbol": "EURUSD", "direction": -1, "entry": 1.1195, "stop": 1.1203,
+                                    "tp1": 1.1171, "tp2": 1.1162, "entry_time": "2026-10-05 14:00:00+00:00",
+                                    "status": "closed", "outcome": "stop", "r": -1.04}}}
+
+
+def test_forex_relay_sends_each_event_once(monkeypatch):
+    sent = []
+    monkeypatch.setattr(tp.requests, "get", lambda *a, **k: type("R", (), {"json": lambda self: FX_STATE})())
+    monkeypatch.setattr(tp, "notify", lambda topic, title, body, high=False: sent.append((title, high)) or True)
+    book = {}
+    tp.relay_fx(book, "t")
+    assert sent[0][0] == "Forex alerts connected"
+    assert ("GBPUSD: BUY LIMIT 1.25", True) in sent
+    assert ("EURUSD: forex trade closed -1.04R", False) in sent
+    n = len(sent)
+    tp.relay_fx(book, "t")                      # nothing new: nothing sent
+    assert len(sent) == n
+
+
+def test_forex_relay_survives_an_unreachable_book():
+    book = {}
+    tp.relay_fx(book, "t")                      # the autouse fixture makes the fetch fail
+    assert "fx_seen" not in book

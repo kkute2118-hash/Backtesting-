@@ -51,6 +51,8 @@ FUNDING_PER_15M = 0.0001 / 32
 START_EQUITY, RISK, MAX_POSITION_X = 10_000.0, 0.01, 5.0
 UA = {"User-Agent": "Mozilla/5.0 (ATI Lab paper trading)"}
 NTFY = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+FX_BOOK_URL = os.environ.get(
+    "FX_BOOK_URL", "https://raw.githubusercontent.com/kkute2118-hash/Backtesting-/fx-paper/state.json")
 
 
 # ------------------------------------------------------------------ data
@@ -282,6 +284,54 @@ held-out 2025-26: +0.72R; about 1 trade in 4 wins.</p>"""
     (REPORT_DIR / "trend.html").write_text(html)
 
 
+def fx_alerts(state: dict, seen: set) -> list[tuple[str, str, str, bool]]:
+    """(key, title, body, urgent) for forex book events not yet relayed: new
+    pending limit orders, fills and closes (scripts/fx_paper.py's state)."""
+    ist = lambda x: pd.Timestamp(x).tz_convert("Asia/Kolkata").strftime("%d %b %H:%M IST")  # noqa: E731
+    out = []
+    for o in state.get("pending", []):
+        key = f"p:{o['id']}"
+        if key in seen:
+            continue
+        side = "BUY" if o["direction"] > 0 else "SELL"
+        out.append((key, f"{o['symbol']}: {side} LIMIT {o['entry']:.5g}",
+                    f"Forex (liquidity B) order to place:\n{side} LIMIT {o['entry']:.5g}\nSTOP {o['stop']:.5g}\n"
+                    f"TP1 {o['tp1']:.5g} ({o['rr1']:.1f}R), TP2 {o['tp2']:.5g}\nScore {o['score']}\n"
+                    f"Fills only 11:30-13:30 or 17:30-21:30 IST. Cancel at {ist(o['expires'])}.", True))
+    for tid, t in state.get("trades", {}).items():
+        key = f"t:{tid}:{t['status']}"
+        if key in seen:
+            continue
+        side = "long" if t["direction"] > 0 else "short"
+        if t["status"] == "open":
+            out.append((key, f"{t['symbol']}: forex {side} filled at {t['entry']:.5g}",
+                        f"Paper {side} {t['symbol']} at {t['entry']:.5g} ({ist(t['entry_time'])}).\n"
+                        f"Stop {t['stop']:.5g}, TP1 {t['tp1']:.5g}, TP2 {t['tp2']:.5g}.", False))
+        else:
+            out.append((key, f"{t['symbol']}: forex trade closed {t['r']:+.2f}R",
+                        f"{side} {t['symbol']} from {t['entry']:.5g} ({ist(t['entry_time'])}): "
+                        f"{t['outcome']}, {t['r']:+.2f}R after costs.", False))
+    return out
+
+
+def relay_fx(book: dict, topic: str) -> None:
+    """Forward the forex paper book's events (GitHub branch fx-paper) to the
+    same phone topic, so both strategies alert in one place. Never raises."""
+    try:
+        state = requests.get(FX_BOOK_URL, headers=UA, timeout=20).json()
+    except Exception:
+        return
+    first = "fx_seen" not in book
+    seen_list = book.setdefault("fx_seen", [])
+    if first:
+        notify(topic, "Forex alerts connected",
+               "Liquidity strategy B (forex and gold): limit orders to place, fills and closes will arrive here.")
+    for key, title, body, urgent in fx_alerts(state, set(seen_list)):
+        notify(topic, title, body, urgent)
+        seen_list.append(key)
+    book["fx_seen"] = seen_list[-1000:]
+
+
 def _start_book(old: dict | None, now: pd.Timestamp) -> dict:
     """A fresh book under RULES; an older book is kept beside it, and so is the
     phone topic, so the owner's subscription carries on."""
@@ -326,6 +376,7 @@ def run():
             title, body, urgent = alert_text(sym, e, st, equity)
             notify(topic, title, body, urgent)
         time.sleep(0.2)
+    relay_fx(book, topic)
     book["events"] = (book.get("events", []) + new_events)[-500:]
     path.write_text(json.dumps(book, indent=1, default=str))
     write_report(book, now, new_events, sources)
