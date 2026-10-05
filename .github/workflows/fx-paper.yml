@@ -51,10 +51,11 @@ jobs:
             commit -qm "Paper book $(date -u +%FT%H:%MZ)" || exit 0
           git push origin HEAD:refs/heads/fx-paper
       - name: Post alerts
-        if: hashFiles(format('{0}/alerts.md', runner.temp)) != ''
         env:
           GH_TOKEN: ${{ github.token }}
+        # hashFiles() only sees the workspace, so test for the alerts file here.
         run: |
+          [ -s "$RUNNER_TEMP/alerts.md" ] || exit 0
           n=$(gh issue list --state open --search "FX paper trading in:title" --json number -q '.[0].number')
           [ -n "$n" ] || n=$(gh issue create --title "FX paper trading" \
             --body "Alerts from .github/workflows/fx-paper.yml (paper only, no real orders). Book: branch fx-paper." | grep -o '[0-9]*$')
@@ -62,10 +63,9 @@ jobs:
       # Optional: the same alerts to the owner's phone, on the ntfy topic shown at
       # /reports/trend.html on the Oracle server (repository secret NTFY_TOPIC).
       - name: Phone alert
-        if: hashFiles(format('{0}/alerts.md', runner.temp)) != ''
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          [ -n "$NTFY_TOPIC" ] || exit 0
+          [ -n "$NTFY_TOPIC" ] && [ -s "$RUNNER_TEMP/alerts.md" ] || exit 0
           curl -fsS -m 20 -H "Title: FX paper trading (liquidity B)" -H "Priority: high" \
             --data-binary @"$RUNNER_TEMP/alerts.md" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true
