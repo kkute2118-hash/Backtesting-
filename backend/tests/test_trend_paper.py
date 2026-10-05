@@ -1,4 +1,6 @@
-"""The Oracle 4h trend paper book: breakout -> resting limit -> fill -> stop."""
+"""The Oracle 4h trend paper book: breakout -> market entry -> stop or exit."""
+
+import json
 
 import numpy as np
 import pandas as pd
@@ -26,10 +28,11 @@ def test_breakout_buys_at_the_next_open_then_stops():
     st = {"last15": str(m15.index[b - 1]), "status": "flat"}
     events = tp.advance(st, ind, m15.iloc[:b + 16], "BTCUSDT")
     assert st["status"] == "enter_next" and any("BREAKOUT" in e for e in events)
-    # the next 15m bar: bought at its open, stop 2 ATR below
+    # the next 15m bar: bought at its open, stop 1.5 ATR below, sized for 1% risk
     tp.advance(st, ind, m15.iloc[:b + 17], "BTCUSDT")
     assert st["status"] == "long" and st["entry"] == m15.iloc[b + 16].open
-    assert st["stop"] < st["entry"] and 0 < st["size_x"] <= tp.MAX_POSITION_X
+    assert abs((st["entry"] - st["stop"]) - tp.STOP_ATR * st["atr"]) < 1e-9
+    assert st["size_x"] == min(round(0.01 / ((st["entry"] - st["stop"]) / st["entry"]), 3), tp.MAX_POSITION_X)
     # then falls through the stop: closed at a loss of a little over 1R
     m15.loc[m15.index[b + 17]] = [199, 199, 150, 151]
     tp.advance(st, ind, m15.iloc[:b + 18], "BTCUSDT")
@@ -37,21 +40,32 @@ def test_breakout_buys_at_the_next_open_then_stops():
     assert -1.2 < st["closed"][-1]["r"] < -1.0
 
 
-def test_old_resting_limit_is_cancelled():
+def test_no_daily_trend_filter():
+    # a breakout after a long fall still triggers: step 14 dropped the 200-day filter
     m15, h4, d1, b = _frames()
-    st = {"last15": str(m15.index[b - 2]), "status": "pending", "level": 1.0, "atr": 1.0,
-          "expires": str(m15.index[-1])}
+    m15[["open", "high", "low", "close"]] = m15[["open", "high", "low", "close"]].iloc[::-1].to_numpy()
+    m15.iloc[b:b + 16, :] = [[260, 261, 259, 260]] * 16
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    st = {"last15": str(m15.index[b - 1]), "status": "flat"}
+    tp.advance(st, tp.indicators(m15.resample("1D").agg(agg), m15.resample("4h").agg(agg)),
+               m15.iloc[:b + 16], "BTCUSDT")
+    assert st["status"] == "enter_next"
+
+
+def test_order_from_old_rules_is_cancelled():
+    m15, h4, d1, b = _frames()
+    st = {"last15": str(m15.index[b - 2]), "status": "awaiting_retest", "level": 1.0, "atr": 1.0}
     ev = tp.advance(st, tp.indicators(d1, h4), m15.iloc[:b], "BTCUSDT")
     assert st["status"] == "flat" and "cancelled" in ev[0]
 
 
-def test_breakout_alert_names_the_order(monkeypatch, tmp_path):
+def test_breakout_alert_names_the_order():
     m15, h4, d1, b = _frames()
     st = {"last15": str(m15.index[b - 1]), "status": "flat"}
     ev = [e for e in tp.advance(st, tp.indicators(d1, h4), m15.iloc[:b + 16], "BTCUSDT") if "BREAKOUT" in e][0]
     title, body, urgent = tp.alert_text("BTCUSDT", ev, st, 10_000.0)
     assert urgent and title.startswith("BTC: BUY NOW at market")
-    assert "STOP" in body and "leverage" in body
+    assert "STOP-LOSS" in body and "Rs 100 (1%)" in body
 
 
 def test_run_sends_alerts_and_never_fails_on_them(monkeypatch, tmp_path):
@@ -64,3 +78,23 @@ def test_run_sends_alerts_and_never_fails_on_them(monkeypatch, tmp_path):
     tp.run()                                    # first run: creates the topic and says hello
     assert sent[0] == "ATI trend alerts connected"
     assert (tmp_path / "trend.html").read_text().count("ati-trend-") == 1
+
+
+def test_new_rules_restart_the_book_and_keep_the_topic(monkeypatch, tmp_path):
+    m15, h4, d1, b = _frames()
+    old = {"start": "2026-10-04T07:00+00:00", "ntfy_topic": "ati-trend-abc", "events": ["x"],
+           "markets": {"EURUSD": {"status": "long", "closed": [{"r": -1.0}]}}}
+    (tmp_path / "trend-state.json").write_text(json.dumps(old))
+    sent = []
+    monkeypatch.setattr(tp, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(tp, "SYMBOLS", ("BTCUSDT",))
+    monkeypatch.setattr(tp, "notify", lambda topic, title, body, high=False: sent.append((topic, title)) or True)
+    monkeypatch.setattr(tp, "fetch", lambda sym: (d1, h4, m15.iloc[:b + 16], "test"))
+    tp.run()
+    book = json.loads((tmp_path / "trend-state.json").read_text())
+    assert book["rules"] == tp.RULES and book["ntfy_topic"] == "ati-trend-abc"
+    assert list(book["markets"]) == ["BTCUSDT"]
+    assert sent[0] == ("ati-trend-abc", "Trend book: new rules")
+    assert len(list(tmp_path.glob("trend-state-before-*.json"))) == 1
+    tp.run()                                    # same rules: kept, no second restart
+    assert len(list(tmp_path.glob("trend-state-before-*.json"))) == 1

@@ -59,3 +59,27 @@ where hours and costs differ from this test. Not adopted for live trading.
 Caveats: best of 50,718 candidates, so 2021-24 figures flatter it; judge it by
 2025-26. Long only: it lost in the 2022 bear market. Account returns assume
 fills at the next 4h open and no exchange outage.
+
+## Adopted on the Oracle paper book (5 Oct 2026)
+
+`backend/app/tasks/trend_paper.py` now runs T1 on BTC, ETH, SOL and the
+XAUUSDT perpetual at 1% risk; forex and the leverage tiers are gone, and the
+book restarted (the old one is kept as `trend-state-before-*.json`).
+`scripts/trend_live_check.py` replays that live code over the same history.
+On the coins it matches the grid (same trade counts, averages within 0.03R).
+Gold differs because the live book pays perpetual fees, GST and funding on a
+0.7% stop instead of the spot spread the grid used: +0.08R (2021-24) and
++2.00R (2025-26) a trade. With the live costs, Rs 10,000 at 1% risk:
+
+| markets | 2021-24 | 2025-26 | whole period | max drawdown |
+|---|---|---|---|---|
+| BTC, ETH, SOL, gold perp | Rs 64,532 | Rs 18,065 | Rs 1,16,578 (61%/yr) | 32% |
+| BTC, ETH, SOL only | Rs 66,261 | Rs 11,989 | Rs 79,440 (49%/yr) | 33% |
+
+Gold is neutral in 2021-24 and helps in 2025-26, so it stays. These live-cost
+figures, not the spot-spread ones above, are what to expect.
+
+The liquidity framework's version B (score >= 65, `scripts/fx_paper.py`,
+GitHub workflow `fx-paper.yml`) is the second strategy kept: in the same
+recorded setups it made +0.36R a trade (455 trades), Rs 10,000 to Rs 45,727
+at 1% risk with a 17% worst fall, against L1's 51%.

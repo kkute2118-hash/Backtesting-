@@ -29,11 +29,6 @@ const MARKETS = [
   { symbol: "ETHUSDT", name: "Ethereum" },
   { symbol: "SOLUSDT", name: "Solana" },
   { symbol: "XAUUSDT", name: "Gold" },
-  { symbol: "EURUSD", name: "EUR/USD" },
-  { symbol: "GBPUSD", name: "GBP/USD" },
-  { symbol: "USDCAD", name: "USD/CAD" },
-  { symbol: "USDJPY", name: "USD/JPY" },
-  { symbol: "AUDUSD", name: "AUD/USD" },
 ];
 
 const REFRESH_MS = 60 * 1000;
@@ -76,7 +71,7 @@ export default function TradingPage() {
       <div className="border-b border-line pb-4">
         <h1 className="text-2xl font-semibold text-ink">Live Signals</h1>
         <p className="text-muted mt-1 text-sm">
-          4h breakout, retest entry · 4 crypto + 5 forex · paper book
+          4h breakout 40/30 · 1.5 ATR stop · 1% risk · BTC, ETH, SOL, gold · paper book
           {latest ? ` · updated ${istTime(latest.updated)} IST` : ""}
         </p>
       </div>
@@ -88,7 +83,7 @@ export default function TradingPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
           { label: "Long", value: count(["long", "exit_next"]), tone: "text-up" },
-          { label: "Awaiting retest", value: count(["awaiting_retest", "enter_next"]), tone: "text-warn" },
+          { label: "Buying at next open", value: count(["enter_next"]), tone: "text-warn" },
           { label: "Closed trades", value: latest?.trades ?? "–", tone: "text-ink" },
           {
             label: "Paper equity",
@@ -106,7 +101,7 @@ export default function TradingPage() {
       <Card>
         <CardHeader title="Markets (4h candles)" />
         <CardBody>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {MARKETS.map((m) => {
               const st = markets[m.symbol] ?? {};
               return (
@@ -129,7 +124,7 @@ export default function TradingPage() {
         <CardHeader title="Recent signals" />
         <CardBody>
           {events.length === 0 ? (
-            <p className="text-sm text-muted">No signals yet. Breakouts, retest entries and exits appear here.</p>
+            <p className="text-sm text-muted">No signals yet. Breakouts, entries and exits appear here.</p>
           ) : (
             <ul className="space-y-2 text-sm">
               {events.map((e, i) => (

@@ -90,7 +90,7 @@ def main():
         yearly = t.groupby(t.exit_time.dt.year).r.agg(["size", "mean", "sum"]).round(2)
         print(f"\n{name}: {len(t)} trades, avg {t.r.mean():+.2f}R, win {100 * (t.r > 0).mean():.0f}%")
         print("  by year (trades, avg R, total R):",
-              ", ".join(f"{y}: {int(s["size"])}/{s['mean']:+.2f}/{s['sum']:+.0f}" for y, s in yearly.iterrows()))
+              ", ".join(f"{y}: {int(s['size'])}/{s['mean']:+.2f}/{s['sum']:+.0f}" for y, s in yearly.iterrows()))
         for risk in (0.01, 0.02):
             for label, part in (("2021-24", t[t.exit_time < SPLIT]), ("2025-26", t[t.exit_time >= SPLIT]), ("all", t)):
                 rows.append({"system": name, "risk_pct": risk * 100, "period": label, "trades": len(part),

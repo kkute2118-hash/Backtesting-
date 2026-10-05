@@ -46,9 +46,9 @@ export const NAV: NavGroup[] = [
       { href: "/forward", label: "Forward Tests", icon: Activity,
         description: "Live P/L on recorded signals" },
       { href: "/trading", label: "Live Signals", icon: Zap,
-        description: "Real-time charts & instant alerts for all 9 pairs" },
+        description: "4h charts and signals for BTC, ETH, SOL and gold" },
       { href: "/crypto", label: "Crypto Trading", icon: TrendingUp,
-        description: "4h retest entry + dynamic leverage paper trading" },
+        description: "4h breakout paper book: equity and trades" },
     ],
   },
   {

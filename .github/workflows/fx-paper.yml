@@ -59,3 +59,13 @@ jobs:
           [ -n "$n" ] || n=$(gh issue create --title "FX paper trading" \
             --body "Alerts from .github/workflows/fx-paper.yml (paper only, no real orders). Book: branch fx-paper." | grep -o '[0-9]*$')
           gh issue comment "$n" --body-file "$RUNNER_TEMP/alerts.md"
+      # Optional: the same alerts to the owner's phone, on the ntfy topic shown at
+      # /reports/trend.html on the Oracle server (repository secret NTFY_TOPIC).
+      - name: Phone alert
+        if: hashFiles(format('{0}/alerts.md', runner.temp)) != ''
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          [ -n "$NTFY_TOPIC" ] || exit 0
+          curl -fsS -m 20 -H "Title: FX paper trading (liquidity B)" -H "Priority: high" \
+            --data-binary @"$RUNNER_TEMP/alerts.md" "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true

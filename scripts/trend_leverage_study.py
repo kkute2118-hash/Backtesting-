@@ -11,6 +11,11 @@ as trend_paper._equity does.
 
 Selection period 2021-08 to 2024-12, hold-out 2025-01 to 2026-10.
 
+Written for the book's rules before 5 Oct 2026 (commit 628d155: 55/20, retest
+entry, 2 ATR, leverage tiers); the tiers and assumed win rates are copied here
+so it still reproduces research/fx_crypto/STEP13_LEVERAGE_REAL_DATA.md, but
+trend_paper now runs the step 14 rules, so its signals differ.
+
 Usage: python scripts/trend_leverage_study.py DATA_DIR OUT_PREFIX
 """
 
@@ -31,7 +36,17 @@ MARKETS = {"BTCUSDT": "BTCUSDT", "ETHUSDT": "ETHUSDT", "SOLUSDT": "SOLUSDT", "XA
            "EURUSD": "EURUSD", "GBPUSD": "GBPUSD", "USDJPY": "USDJPY", "AUDUSD": "AUDUSD"}
 START = pd.Timestamp("2021-08-01", tz="UTC")
 SPLIT = pd.Timestamp("2025-01-01", tz="UTC")
-LIVE_CAPS = {s: tp._calc_dynamic_leverage(s) for s in tp.SYMBOLS}
+WIN_RATES = {"BTCUSDT": 0.42, "ETHUSDT": 0.40, "SOLUSDT": 0.38, "XAUUSDT": 0.39, "EURUSD": 0.41,
+             "GBPUSD": 0.39, "USDCAD": 0.38, "USDJPY": 0.38, "AUDUSD": 0.37}
+RISK = 0.02
+
+
+def tier(sym: str, win_rate: float | None = None) -> float:
+    w = WIN_RATES.get(sym, 0.39) if win_rate is None else win_rate
+    return 8.0 if w > 0.45 else 6.0 if w > 0.40 else 5.0 if w > 0.37 else 3.0
+
+
+LIVE_CAPS = {s: tier(s) for s in WIN_RATES}
 
 
 def load(data: Path, file_sym: str):
@@ -53,7 +68,7 @@ def trades_for(sym: str, data: Path) -> list[dict]:
 
 
 def size_x(t: dict, cap: float) -> float:
-    return min(tp.RISK / t["stop_pct"], cap)
+    return min(RISK / t["stop_pct"], cap)
 
 
 def simulate(trades: list[dict], caps: dict[str, float]) -> dict:
@@ -88,10 +103,10 @@ def per_symbol(trades: list[dict]) -> pd.DataFrame:
     out = pd.DataFrame({"trades": g.size(), "win_pct": (g.win.mean() * 100).round(1),
                         "avg_r": g.r.mean().round(2), "sum_r": g.r.sum().round(1),
                         "median_stop_pct": (g.stop_pct.median() * 100).round(2)}).reset_index()
-    out["assumed_win_pct"] = out.symbol.map(lambda s: round(tp.WIN_RATES[s] * 100, 1))
+    out["assumed_win_pct"] = out.symbol.map(lambda s: round(WIN_RATES[s] * 100, 1))
     out["live_cap_x"] = out.symbol.map(LIVE_CAPS)
     out["cap_binds_pct"] = [
-        round(100 * float((tp.RISK / df[(df.symbol == s) & (df.period == p)].stop_pct > LIVE_CAPS[s]).mean()), 1)
+        round(100 * float((RISK / df[(df.symbol == s) & (df.period == p)].stop_pct > LIVE_CAPS[s]).mean()), 1)
         for s, p in zip(out.symbol, out.period)]
     return out
 
@@ -112,7 +127,7 @@ def main():
     hold = [t for t in trades if pd.Timestamp(t["exit_time"]) >= SPLIT]
     # the live tiering rule, fed real 2021-24 win rates instead of the assumed ones
     real_wr = {s: float(np.mean([t["r"] > 0 for t in sel if t["symbol"] == s])) for s in MARKETS}
-    tiers_real = {s: tp._calc_dynamic_leverage(s, real_wr[s]) for s in MARKETS}
+    tiers_real = {s: tier(s, real_wr[s]) for s in MARKETS}
     policies = {"live tiers (assumed win rates)": LIVE_CAPS,
                 "tiers from real 2021-24 win rates": tiers_real,
                 **{f"flat cap {c}x": {s: float(c) for s in MARKETS} for c in (1, 2, 3, 5)},

@@ -27,7 +27,7 @@ interface CandleResponse {
 
 const STATUS_LABEL: Record<MarketStatus, string> = {
   flat: "Waiting",
-  enter_next: "Breakout",
+  enter_next: "Buy at next open",
   awaiting_retest: "Awaiting retest",
   long: "Long",
   exit_next: "Exit next open",
@@ -131,7 +131,7 @@ export function TradingPairChart({
       add(entry, "#16a34a", "Entry");
       add(stopLoss, "#dc2626", "Stop");
     } else if (status === "awaiting_retest" || status === "enter_next") {
-      add(level, "#d97706", "Retest level");
+      add(level, "#d97706", "Breakout level");
     }
     linesRef.current = lines;
     chartRef.current?.timeScale().fitContent();

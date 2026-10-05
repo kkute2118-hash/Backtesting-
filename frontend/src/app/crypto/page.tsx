@@ -76,7 +76,7 @@ export default function CryptoTradingPage() {
   if (loading) {
     return (
       <div className="p-8">
-        <h1 className="text-3xl font-bold mb-4">🚀 Crypto Trading (4H Retest Entry)</h1>
+        <h1 className="text-3xl font-bold mb-4">Crypto Trading (4h breakout)</h1>
         <div className="text-lg text-muted">Loading trading data...</div>
       </div>
     );
@@ -85,7 +85,7 @@ export default function CryptoTradingPage() {
   if (error) {
     return (
       <div className="p-8">
-        <h1 className="text-3xl font-bold mb-4">🚀 Crypto Trading (4H Retest Entry)</h1>
+        <h1 className="text-3xl font-bold mb-4">Crypto Trading (4h breakout)</h1>
         <Card>
           <CardBody>
             <p className="text-down">⚠️ {error}</p>
@@ -99,9 +99,9 @@ export default function CryptoTradingPage() {
     <div className="space-y-0">
       <div className="flex justify-between items-start mb-6">
         <div>
-          <h1 className="text-3xl font-bold text-ink">🚀 Crypto Trading (4H Retest Entry)</h1>
+          <h1 className="text-3xl font-bold text-ink">Crypto Trading (4h breakout)</h1>
           <p className="text-muted mt-2">
-            Retest entry + Dynamic leverage on 9 pairs (4 crypto + 5 forex)
+            4h breakout 40/30, 1.5 ATR stop, 1% risk a trade, on BTC, ETH, SOL and gold perpetuals
           </p>
         </div>
         <button
@@ -162,7 +162,7 @@ export default function CryptoTradingPage() {
                   <div className="font-bold text-sm text-ink">{symbol}</div>
                   <div className="text-xs text-muted mt-1">
                     {market.status === "flat" && "⏳ Waiting for breakout"}
-                    {(market.status === "awaiting_retest" || market.status === "enter_next") && `🔄 Awaiting retest of ${market.level?.toFixed(4) ?? "breakout"}`}
+                    {market.status === "enter_next" && `🔄 Buying at the next open (broke ${market.level?.toFixed(4) ?? "the 40-bar high"})`}
                     {market.status === "long" && `📈 LONG from ${market.entry?.toFixed(4)}${market.stop ? `, stop ${market.stop.toFixed(4)}` : ""}`}
                     {market.status === "exit_next" && "📉 Selling at next open"}
                   </div>
@@ -212,7 +212,7 @@ export default function CryptoTradingPage() {
       </Card>
 
       <p className="text-xs text-muted mt-4">
-        Last updated: {stats?.updated && !Number.isNaN(Date.parse(stats.updated)) ? new Date(stats.updated).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : (stats?.updated ?? "–")} IST | Strategy: 4h breakout, retest entry, dynamic position size
+        Last updated: {stats?.updated && !Number.isNaN(Date.parse(stats.updated)) ? new Date(stats.updated).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : (stats?.updated ?? "–")} IST | Strategy: 4h breakout 40/30, 1.5 ATR stop, 1% risk
       </p>
     </div>
   );

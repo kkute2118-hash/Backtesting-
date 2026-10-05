@@ -89,7 +89,7 @@ async def websocket_signals(websocket: WebSocket):
 
 @router.get("/crypto/signals")
 async def get_trading_signals():
-    """Get current trading signals for all 9 pairs.
+    """Get current trading signals for every market in the paper book.
 
     Returns market state, entry/exit levels, and recent signal history.
     """
