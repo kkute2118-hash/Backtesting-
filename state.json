@@ -1,0 +1,13 @@
+{
+ "alerted": [],
+ "trades": {},
+ "updated": "2026-10-05T17:20+00:00",
+ "errors": [
+  "EURUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
+  "GBPUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
+  "USDJPY: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
+  "AUDUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything ",
+  "XAUUSD: Twelve Data 401 **apikey** parameter is incorrect or not specified. You can get your free API key instantly following this link: https://twelvedata.com/pricing. If you believe that everything "
+ ],
+ "pending": []
+}
