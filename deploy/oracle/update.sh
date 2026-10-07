@@ -196,8 +196,15 @@ if [ "$(cat "$DEPLOYED_FILE" 2>/dev/null)" = "$(git rev-parse origin/main)" ] &&
   exit 0
 fi
 
+before="$(git rev-parse --verify -q HEAD:deploy/oracle/update.sh || true)"
 git checkout --quiet -B main origin/main
 git reset --quiet --hard origin/main
+# This script just changed: run the new copy, so its timers and settings apply
+# now and not one (formerly 6-hour) cycle later. Once only.
+if [ -z "${ATI_UPDATE_REEXEC:-}" ] && [ "$before" != "$(git rev-parse HEAD:deploy/oracle/update.sh)" ]; then
+  echo "$(date -u +%FT%TZ) update.sh changed, running the new copy"
+  ATI_UPDATE_REEXEC=1 exec bash "$APP_DIR/deploy/oracle/update.sh" "$@"
+fi
 echo "$(date -u +%FT%TZ) updating to $(git rev-parse --short HEAD)"
 "${COMPOSE[@]}" up -d --build
 # The Caddyfile is a mounted file: a change to it alone does not recreate the
