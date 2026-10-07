@@ -182,6 +182,16 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
     <div class="panel tbl" id="closedBody"></div>
   </section>
 
+  <section id="papers">
+    <div class="sec-head"><h2>Crypto and forex paper books</h2>
+      <p>Two more strategies on paper, outside NSE. <b>Crypto</b>: the 4h trend breakout on BTC, ETH, SOL and gold perpetuals, run every 5 minutes on the Oracle server (Rs 10,000 paper, 1% risk). <b>Forex</b>: the liquidity framework, version B, on forex and gold, run every 15 minutes by a GitHub job. Each needs a few weeks of trades before its numbers mean much.</p></div>
+    <div class="cards" id="paperCards"></div>
+    <h3>Open positions and orders</h3>
+    <div class="panel tbl" id="paperOpen"></div>
+    <h3>Closed paper trades</h3>
+    <div class="panel tbl" id="paperClosed"></div>
+  </section>
+
   <section id="journal">
     <div class="sec-head"><h2>My trades</h2>
       <p>Your real orders, next to the paper trade for the same stock and strategy. Slippage is your fill against the paper entry; the gap between the two results is what execution costs you.</p></div>
@@ -424,12 +434,75 @@ footer code{font-family:var(--mono);background:hsl(var(--elevated));padding:1px 
       {key:"holding_bars",label:"Days",right:true,fmt:r=>num(r.holding_bars,0)},
     ], closed, {key:"closed_at",dir:-1});
 
+    papers(d);
     journal(d);
 
     $("foot").innerHTML = `<span>Built from the database backup the GitHub job updates at 09:00, 16:50 and 19:00 IST on trading days. ${esc(s.live?.reason||"")}.</span>
       <span>Refresh or change it from any Claude Code session on this repository: <code>/scan</code>, or ask, for example "scan S6 on Nifty 50".</span>
       <span>${d.results_calendar?.fetched_at ? `Results dates from NSE board meetings, fetched ${esc(date(d.results_calendar.fetched_at))}; a "results" tag means a meeting within ${d.results_calendar.window_days} days. It flags event risk and filters nothing.` : "Results calendar not fetched yet: the GitHub job fills it on its next run."}</span>
       <span>Position size: capital × risk ÷ (entry − stop), capped at 25% of capital. Backtests, not advice.</span>`;
+  }
+
+  // ----------------------------------------------------------- paper books
+  function papers(d){
+    const pb = d.paper_books || {}, cr = pb.crypto, fx = pb.forex;
+    const ago = s => { if(!s) return "never"; const t = new Date(String(s).replace(" ", "T")); if (isNaN(t)) return esc(s);
+      const h = (Date.now() - t) / 36e5; return h < 1 ? `${Math.max(1, Math.round(h*60))} min ago` : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h/24)} days ago`; };
+    const px = v => v==null ? "–" : Number(v).toLocaleString("en-IN",{maximumSignificantDigits:6});
+    const side = dir => dir > 0 ? "long" : "short";
+    const cryptoCard = cr ? `
+      <div class="card"><div class="top"><span class="strat">Crypto · 4h breakout</span><span class="pill ${cr.trades?"acc":"mut"}">${cr.trades||0} closed</span></div>
+        <div class="kv">
+          <div><span class="k">Paper equity</span><span class="val">${inr(cr.equity,0)}</span></div>
+          <div><span class="k">Total R</span><span class="val ${cls(cr.total_r)}">${num(cr.total_r,2)}</span></div>
+          <div><span class="k">Updated</span><span class="val" style="font-size:12px">${ago(cr.updated)}</span></div>
+        </div><div class="faint" style="font-size:11px">Since ${esc(String(cr.paper_start||"").slice(0,10))} · ${esc(cr.rules||"")}</div></div>`
+      : `<div class="card"><div class="top"><span class="strat">Crypto · 4h breakout</span><span class="pill warn">no data yet</span></div>
+        <p class="faint" style="font-size:12px">${esc(pb.crypto_error || "The Oracle server has not shared its book yet. It appears here after the server runs the latest code and the next forex job copies it.")}</p></div>`;
+    const fxCard = fx ? `
+      <div class="card"><div class="top"><span class="strat">Forex · liquidity B</span><span class="pill ${fx.closed.length?"acc":"mut"}">${fx.closed.length} closed</span></div>
+        <div class="kv">
+          <div><span class="k">Total R</span><span class="val ${cls(fx.total_r)}">${num(fx.total_r,2)}</span></div>
+          <div><span class="k">Wins</span><span class="val">${fx.wins}/${fx.closed.length}</span></div>
+          <div><span class="k">Updated</span><span class="val" style="font-size:12px">${ago(fx.updated)}</span></div>
+        </div>${fx.errors?.length ? `<div class="hl"><span class="pill dn">data error</span> <span class="faint">${esc(fx.errors[0].slice(0,90))}</span></div>` : ""}</div>`
+      : `<div class="card"><div class="top"><span class="strat">Forex · liquidity B</span><span class="pill warn">no data</span></div><p class="faint" style="font-size:12px">${esc(pb.forex_error || "No forex book yet.")}</p></div>`;
+    $("paperCards").innerHTML = cryptoCard + fxCard;
+
+    const open = [];
+    if (cr) Object.entries(cr.markets || {}).forEach(([sym, m]) => {
+      if (m.status === "long" || m.status === "exit_next") open.push({book:"Crypto", sym, what: m.status === "exit_next" ? "long, selling at next open" : "long", entry:m.entry, stop:m.stop, since:m.entry_time});
+      else if (m.status === "enter_next") open.push({book:"Crypto", sym, what:"buying at next open", entry:null, stop:null, since:null});
+    });
+    if (fx) {
+      fx.open.forEach(t => open.push({book:"Forex", sym:t.symbol, what:side(t.direction), entry:t.entry, stop:t.stop, since:t.entry_time}));
+      fx.pending.forEach(o => open.push({book:"Forex", sym:o.symbol, what:`${o.direction>0?"BUY":"SELL"} LIMIT, cancel ${date(o.expires)}`, entry:o.entry, stop:o.stop, since:null}));
+    }
+    if (!open.length) $("paperOpen").innerHTML = `<div class="empty"><b>Nothing open</b><p>Waiting for a 4h breakout (crypto) or a liquidity run and retest (forex).</p></div>`;
+    else table($("paperOpen"), [
+      {key:"book",label:"Book",fmt:r=>`<span class="strat">${esc(r.book)}</span>`},
+      {key:"sym",label:"Market",fmt:r=>`<span class="tk">${esc(r.sym)}</span>`},
+      {key:"what",label:"Position",fmt:r=>esc(r.what)},
+      {key:"entry",label:"Entry",right:true,fmt:r=>px(r.entry)},
+      {key:"stop",label:"Stop",right:true,fmt:r=>px(r.stop)},
+      {key:"since",label:"Since",fmt:r=>r.since?date(r.since):"–"},
+    ], open);
+
+    const closed = [
+      ...(cr?.closed || []).map(t => ({book:"Crypto", sym:t.symbol, side:"long", entry:t.entry, exit:t.exit, why:t.why, r:t.r, at:t.exit_time})),
+      ...(fx?.closed || []).map(t => ({book:"Forex", sym:t.symbol, side:side(t.direction), entry:t.entry, exit:null, why:t.outcome, r:t.r, at:t.exit_time})),
+    ];
+    if (!closed.length) $("paperClosed").innerHTML = `<div class="empty"><b>No closed paper trades yet</b></div>`;
+    else table($("paperClosed"), [
+      {key:"book",label:"Book",fmt:r=>`<span class="strat">${esc(r.book)}</span>`},
+      {key:"sym",label:"Market",fmt:r=>`<span class="tk">${esc(r.sym)}</span>`},
+      {key:"side",label:"Side",fmt:r=>esc(r.side)},
+      {key:"entry",label:"Entry",right:true,fmt:r=>px(r.entry)},
+      {key:"exit",label:"Exit",right:true,fmt:r=>px(r.exit)},
+      {key:"why",label:"Why",fmt:r=>`<span class="muted">${esc(r.why)}</span>`},
+      {key:"r",label:"R",right:true,cls:r=>cls(r.r),fmt:r=>num(r.r,2)},
+      {key:"at",label:"Closed",sort:r=>String(r.at||""),fmt:r=>date(r.at)},
+    ], closed, {key:"at",dir:-1});
   }
 
   // ---------------------------------------------------------------- journal

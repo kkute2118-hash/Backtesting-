@@ -52,6 +52,7 @@ os.environ.setdefault("DB_BACKUP_BRANCH", "db-backup")
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import requests  # noqa: E402
 
 from app.engine import core  # noqa: E402
 
@@ -393,6 +394,51 @@ def health() -> list[dict]:
     return out
 
 
+PAPER_BOOK_BRANCH = "fx-paper"
+
+
+def _book_file(name: str):
+    """A JSON file of the paper-book branch, or None when it is not there yet."""
+    repo = core._github_setting("GITHUB_REPO")
+    r = requests.get(f"https://api.github.com/repos/{repo}/contents/{name}", params={"ref": PAPER_BOOK_BRANCH},
+                     headers=core._github_raw_headers(), timeout=30)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.json()
+
+
+def paper_books() -> dict:
+    """The forex book (scripts/fx_paper.py) and the Oracle crypto book
+    (trend_paper.py, copied to the branch by the fx-paper workflow). Never
+    fails the page: a missing book is reported, not raised."""
+    out: dict = {}
+    try:
+        fx = _book_file("state.json")
+    except Exception as exc:
+        fx, out["forex_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
+    if fx:
+        trades = list(fx.get("trades", {}).values())
+        closed = sorted((t for t in trades if t.get("status") == "closed"),
+                        key=lambda t: t.get("exit_time", ""), reverse=True)
+        out["forex"] = {"updated": fx.get("updated"), "errors": fx.get("errors", []),
+                        "pending": fx.get("pending", []),
+                        "open": [t for t in trades if t.get("status") == "open"], "closed": closed,
+                        "total_r": round(sum(t.get("r", 0) for t in closed), 2),
+                        "wins": sum(1 for t in closed if t.get("r", 0) > 0)}
+    try:
+        cr = _book_file("crypto-trend.json")
+    except Exception as exc:
+        cr, out["crypto_error"] = None, f"{type(exc).__name__}: {exc}"[:200]
+    if cr:
+        out["crypto"] = {k: cr.get(k) for k in ("updated", "paper_start", "rules", "equity", "trades", "total_r")}
+        out["crypto"]["markets"] = {sym: {k: m.get(k) for k in ("status", "entry", "stop", "entry_time", "level", "size_x")}
+                                    for sym, m in (cr.get("markets") or {}).items()}
+        out["crypto"]["closed"] = cr.get("closed", [])
+        out["crypto"]["events"] = (cr.get("recent_events") or [])[-10:]
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("out", help="where to write the dashboard JSON")
@@ -413,6 +459,7 @@ def main() -> None:
         "breadth": breadth(),
         "forward": forward(),
         "health": health(),
+        "paper_books": paper_books(),
     }
     # Results within the next RESULTS_EVENT_WINDOW_DAYS for every name the page
     # shows. A flag, not a filter: see core's corporate results calendar.

@@ -33,7 +33,7 @@ and never competes with them:
   - `ati-lab-scan.timer`: S1-S6 over the stored NSE Top 2000 at 09:20, 12:30
     and 15:10 IST on weekdays, with live Dhan prices while the market is open
     (about 2 minutes each);
-  - `ati-lab-research.timer`: at 02:00 IST every night, every strategy backtested
+  - `ati-lab-research.timer`: at 02:00, 08:00, 14:00 and 20:00 IST, every strategy backtested
     over the last 2 years on every stored stock, by market-breadth band and as a
     Rs 1 lakh account.
 

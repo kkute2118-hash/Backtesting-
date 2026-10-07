@@ -23,7 +23,7 @@
 
 (app) {
 	encode gzip
-	@private not path /health /health/api
+	@private not path /health /health/api /public/trend.json
 	basic_auth @private {
 		krushna21 $2a$14$ZsyVGW8YFc8rE3tqlKECs.1QO5Cvo3K18WKVluoKK/1XymGUsPG6W
 	}
@@ -34,6 +34,14 @@
 	handle /health/api {
 		rewrite * /health
 		reverse_proxy api:8000
+	}
+	# The crypto paper book's summary (no topic, no keys), open so the
+	# fx-paper GitHub workflow can copy it beside the forex book for the
+	# Claude dashboard page. Read-only, one file.
+	handle /public/trend.json {
+		rewrite * /reports/trend-latest.json
+		root * /srv/data
+		file_server
 	}
 	# The server's daily work (backend/app/tasks/oracle_daily.py): scan and
 	# backtest reports as JSON files, behind the same login.

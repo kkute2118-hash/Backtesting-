@@ -100,11 +100,18 @@ OnCalendar=Mon..Fri *-*-* 09:40:00 UTC
 
 [Install]
 WantedBy=timers.target"
+  # Four runs a day, not one: Oracle reclaims an Always Free server whose
+  # 95th-percentile CPU stays under 20% for 7 days, and one ~35-minute nightly
+  # run (plus 6 minutes of scans) is under 5% of the time. Four put the server
+  # at real work about 10% of the day, at the lowest priority.
   research_timer="[Unit]
-Description=Two-year backtest of every strategy, nightly at 02:00 IST
+Description=Two-year backtest of every strategy at 02:00, 08:00, 14:00 and 20:00 IST
 
 [Timer]
 OnCalendar=*-*-* 20:30:00 UTC
+OnCalendar=*-*-* 02:30:00 UTC
+OnCalendar=*-*-* 08:30:00 UTC
+OnCalendar=*-*-* 14:30:00 UTC
 Persistent=true
 
 [Install]

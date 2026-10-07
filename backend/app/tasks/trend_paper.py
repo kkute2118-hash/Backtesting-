@@ -246,7 +246,8 @@ def write_report(book, now, events, sources):
     summary = {"updated": now.isoformat(timespec="minutes"), "paper_start": book["start"], "rules": RULES,
                "equity": round(eq, 2), "trades": len(trades), "total_r": round(sum(rs), 2),
                "markets": {k: {kk: v for kk, v in s.items() if kk != "closed"} for k, s in book["markets"].items()},
-               "recent_events": book.get("events", [])[-40:], "sources": sources}
+               "recent_events": book.get("events", [])[-40:], "sources": sources,
+               "closed": sorted(trades, key=lambda t: t["exit_time"], reverse=True)[:50]}
     (REPORT_DIR / "trend-latest.json").write_text(json.dumps(summary, indent=1, default=str))
     ist = lambda x: pd.Timestamp(x).tz_convert("Asia/Kolkata").strftime("%d %b %H:%M")  # noqa: E731
     rows = []

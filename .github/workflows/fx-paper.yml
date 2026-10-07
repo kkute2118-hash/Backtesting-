@@ -44,6 +44,18 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           ALERTS_FILE: ${{ runner.temp }}/alerts.md
         run: python scripts/fx_paper.py "$RUNNER_TEMP/book"
+      # The Oracle crypto book's public summary, kept beside the forex book so
+      # the Claude dashboard page can show both (scripts/claude_dashboard.py).
+      - name: Copy the crypto paper book from the Oracle server
+        env:
+          IP: ${{ vars.ORACLE_IP || '132.226.191.194' }}
+        run: |
+          if curl -fsS -m 20 "http://$IP/public/trend.json" -o "$RUNNER_TEMP/crypto.json" \
+             && python -c "import json,sys; json.load(open(sys.argv[1]))" "$RUNNER_TEMP/crypto.json"; then
+            mv "$RUNNER_TEMP/crypto.json" "$RUNNER_TEMP/book/crypto-trend.json"
+          else
+            echo "::warning title=Crypto book unavailable::http://$IP/public/trend.json did not answer with JSON"
+          fi
       - name: Save the book
         run: |
           cd "$RUNNER_TEMP/book"
