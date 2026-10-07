@@ -1,5 +1,7 @@
 {
- "alerted": [],
+ "alerted": [
+  "USDJPY|2026-10-06 23:45:00+00:00|1"
+ ],
  "trades": {
   "EURUSD|2026-10-05 13:30:00+00:00|-1": {
    "symbol": "EURUSD",
@@ -19,7 +21,46 @@
    "status": "closed"
   }
  },
- "updated": "2026-10-06T18:12+00:00",
+ "updated": "2026-10-07T05:12+00:00",
  "errors": [],
- "pending": []
+ "pending": [
+  {
+   "symbol": "USDJPY",
+   "family": "continuation",
+   "direction": 1,
+   "event_time": "2026-10-06 23:45:00+00:00",
+   "event": "run",
+   "pool_kind": "equal",
+   "htf_regime": "bull",
+   "htf_aligned": true,
+   "msb": "n/a",
+   "displacement": true,
+   "fvg": false,
+   "zone": "level",
+   "discount_ok": "False",
+   "ote": false,
+   "entry_method": "limit",
+   "entry_time": "",
+   "entry": 158.30308171428572,
+   "stop": 158.2456682857143,
+   "tp1": 158.4724,
+   "tp2": 158.47967,
+   "rr1": 2.95,
+   "rr2": 3.08,
+   "score": 68,
+   "decision": "",
+   "reject_reason": "",
+   "exit_time": "",
+   "outcome": "",
+   "r": 0.0,
+   "mae_r": 0.0,
+   "mfe_r": 0.0,
+   "hold_minutes": 0,
+   "cost_r": 0.0,
+   "extras": {},
+   "expires": "2026-10-07 05:45:00+00:00",
+   "grade": "watchlist",
+   "id": "USDJPY|2026-10-06 23:45:00+00:00|1"
+  }
+ ]
 }
