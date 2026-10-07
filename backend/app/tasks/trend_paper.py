@@ -215,6 +215,13 @@ def _close(st, px, ts, why, events, sym):
 
 
 # ---------------------------------------------------------- phone alerts
+# Every push this run, with ntfy's answer: kept in the book and shown (without
+# the topic) in trend-latest.json, so a missing phone alert can be traced.
+SENT_LOG: list[dict] = []
+# Change this to send the owner one test message after the next deploy.
+TEST_ALERT = "2026-10-07"
+
+
 def notify(topic: str, title: str, body: str, high: bool = False) -> bool:
     """Push to the ntfy app on the owner's phone (subscribed to `topic`).
     Never raises: a failed alert must not stop the book."""
@@ -222,9 +229,12 @@ def notify(topic: str, title: str, body: str, high: bool = False) -> bool:
         r = requests.post(f"{NTFY}/{topic}", data=body.encode("utf-8"), timeout=15, headers={
             "Title": title.encode("ascii", "ignore").decode(), "Priority": "high" if high else "default",
             "Tags": "chart_with_upwards_trend" if high else "information_source"})
-        return r.ok
-    except Exception:
-        return False
+        ok, status = r.ok, str(r.status_code)
+    except Exception as exc:
+        ok, status = False, type(exc).__name__
+    SENT_LOG.append({"time": pd.Timestamp.now(tz="UTC").isoformat(timespec="seconds"),
+                     "title": title, "ok": ok, "status": status})
+    return ok
 
 
 def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str, bool]:
@@ -271,7 +281,11 @@ def write_report(book, now, events, sources):
                "equity": round(eq, 2), "trades": len(trades), "total_r": round(sum(rs), 2),
                "markets": {k: {kk: v for kk, v in s.items() if kk != "closed"} for k, s in book["markets"].items()},
                "recent_events": book.get("events", [])[-40:], "sources": sources,
-               "closed": sorted(trades, key=lambda t: t["exit_time"], reverse=True)[:50]}
+               "closed": sorted(trades, key=lambda t: t["exit_time"], reverse=True)[:50],
+               # the topic itself stays private; its last 4 characters let the owner
+               # check the ntfy app is subscribed to the right one
+               "alerts": {"topic_ends_with": str(book.get("ntfy_topic", ""))[-4:],
+                          "log": book.get("alerts_log", [])[-20:]}}
     (REPORT_DIR / "trend-latest.json").write_text(json.dumps(summary, indent=1, default=str))
     ist = lambda x: pd.Timestamp(x).tz_convert("Asia/Kolkata").strftime("%d %b %H:%M")  # noqa: E731
     rows = []
@@ -371,6 +385,7 @@ def _start_book(old: dict | None, now: pd.Timestamp) -> dict:
 
 
 def run():
+    SENT_LOG.clear()
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / "trend-state.json"
     now = pd.Timestamp.now(tz="UTC")
@@ -380,8 +395,10 @@ def run():
     if not topic:
         # A private channel name, kept on the server (behind the site login), never in the repository.
         topic = book["ntfy_topic"] = f"ati-trend-{secrets.token_hex(8)}"
+        book["test_alert"] = TEST_ALERT
         notify(topic, "ATI trend alerts connected", "You will get breakouts, fills and exits here.")
     elif book is not old:
+        book["test_alert"] = TEST_ALERT
         notify(topic, "Trend book: new rules",
                "Paper book restarted: BTC, ETH, SOL, gold. 4h 40-bar breakout, 1.5 ATR stop, "
                "30-bar exit, 1% risk. Forex and leverage tiers removed.")
@@ -404,7 +421,13 @@ def run():
         st.update(price=float(m15.close.iloc[-1]), price_time=str(m15.index[-1] + pd.Timedelta("15min")),
                   buy_above=float(h4.high.iloc[-N_IN:].max()), sell_below=float(h4.low.iloc[-N_OUT:].min()))
         time.sleep(0.2)
+    if book.get("test_alert") != TEST_ALERT:
+        book["test_alert"] = TEST_ALERT
+        notify(topic, "ATI test alert: phone alerts work",
+               "Crypto (BTC, ETH, SOL, gold): a BUY NOW alert when a 4h candle closes above its 40-bar high, "
+               "then fills and exits. Forex: limit orders and closed trades. Nothing to do now.")
     relay_fx(book, topic)
+    book["alerts_log"] = (book.get("alerts_log", []) + SENT_LOG)[-50:]
     book["events"] = (book.get("events", []) + new_events)[-500:]
     path.write_text(json.dumps(book, indent=1, default=str))
     write_report(book, now, new_events, sources)

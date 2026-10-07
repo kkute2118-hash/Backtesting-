@@ -151,3 +151,26 @@ def test_live_prices_endpoint(monkeypatch):
     out = cr.get_live_prices()
     assert out["BTCUSDT"]["price"] == 100.0 and "error" in out["SOLUSDT"]
     assert set(out) == set(tp.SYMBOLS)
+
+
+def test_test_alert_once_and_delivery_log(monkeypatch, tmp_path):
+    m15, h4, d1, b = _frames()
+    book = {"start": "2026-10-05T05:51+00:00", "rules": tp.RULES, "ntfy_topic": "ati-trend-abcd1234",
+            "markets": {}, "events": []}
+    (tmp_path / "trend-state.json").write_text(json.dumps(book))
+    posts = []
+
+    def post(url, data=None, timeout=None, headers=None):
+        posts.append((url, headers["Title"]))
+        return type("R", (), {"ok": True, "status_code": 200})()
+    monkeypatch.setattr(tp.requests, "post", post)
+    monkeypatch.setattr(tp, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(tp, "SYMBOLS", ("BTCUSDT",))
+    monkeypatch.setattr(tp, "fetch", lambda sym: (d1, h4, m15.iloc[:b], "test"))
+    tp.run()
+    assert posts == [("https://ntfy.sh/ati-trend-abcd1234", "ATI test alert: phone alerts work")]
+    tp.run()                                    # sent once per TEST_ALERT value
+    assert len(posts) == 1
+    latest = json.loads((tmp_path / "trend-latest.json").read_text())
+    assert latest["alerts"]["topic_ends_with"] == "1234"
+    assert latest["alerts"]["log"][0]["ok"] and "abcd" not in json.dumps(latest)
