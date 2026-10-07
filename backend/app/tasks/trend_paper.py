@@ -107,6 +107,30 @@ def fetch(sym):
     raise RuntimeError("; ".join(errors))
 
 
+def live_price(sym):
+    """(last traded price, source) right now, for the app's live view. Same
+    order of sources as fetch()."""
+    errors = []
+    hosts = [("binance futures", "https://fapi.binance.com/fapi/v1/ticker/price")]
+    if sym != "XAUUSDT":
+        hosts.append(("binance spot", "https://data-api.binance.vision/api/v3/ticker/price"))
+    for name, url in hosts:
+        try:
+            r = requests.get(url, params={"symbol": sym}, headers=UA, timeout=10)
+            r.raise_for_status()
+            return float(r.json()["price"]), name
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}"[:80])
+    try:
+        r = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{YAHOO[sym]}",
+                         params={"interval": "1m", "range": "1d"}, headers=UA, timeout=10)
+        r.raise_for_status()
+        return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]), "yahoo finance"
+    except Exception as exc:
+        errors.append(f"yahoo: {type(exc).__name__}")
+    raise RuntimeError("; ".join(errors))
+
+
 def _complete(df, rule):
     now = pd.Timestamp.now(tz="UTC")
     return df[df.index + pd.Timedelta(rule) <= now]
@@ -376,6 +400,9 @@ def run():
             new_events.append(f"{now.tz_convert('Asia/Kolkata').strftime('%d %b %H:%M')} IST {e}")
             title, body, urgent = alert_text(sym, e, st, equity)
             notify(topic, title, body, urgent)
+        # What the next 4h close must beat: shown in the app as the entry and exit levels.
+        st.update(price=float(m15.close.iloc[-1]), price_time=str(m15.index[-1] + pd.Timedelta("15min")),
+                  buy_above=float(h4.high.iloc[-N_IN:].max()), sell_below=float(h4.low.iloc[-N_OUT:].min()))
         time.sleep(0.2)
     relay_fx(book, topic)
     book["events"] = (book.get("events", []) + new_events)[-500:]

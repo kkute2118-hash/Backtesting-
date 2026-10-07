@@ -2,7 +2,7 @@
 #
 # Keep the Oracle server on the latest `main`, as a read-only mirror.
 #
-# Run by ati-lab-update.timer (installed by install-updater.sh) every 6 hours.
+# Run by ati-lab-update.timer (installed by install-updater.sh) every 15 minutes.
 # Cheap when nothing changed: one `git fetch`, no rebuild. When main moved it
 # rebuilds and restarts the containers; the database lives in a Docker volume
 # and the settings in deploy/oracle/.env (untracked), so neither is touched.
@@ -30,6 +30,31 @@ for kv in BACKUP_READONLY=1 MIRROR_REFRESH_MINUTES=10 DHAN_YIELD_TO_JOBS=1 ${sit
     changed_env=1
   fi
 done
+
+# Check for new code every 15 minutes, not every 6 hours: a fix pushed to main
+# reached the server up to 6 hours late. The check is one `git fetch`.
+# (Servers installed with the older 6-hour timer get this one here.)
+install_update_timer() {
+  local unit=/etc/systemd/system/ati-lab-update.timer want
+  want="[Unit]
+Description=Check GitHub for ATI Lab updates every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target"
+  if [ "$(cat "$unit" 2>/dev/null)" != "$want" ]; then
+    printf '%s\n' "$want" > "$unit"
+    systemctl daemon-reload
+    systemctl restart ati-lab-update.timer
+    echo "$(date -u +%FT%TZ) update timer set to every 15 minutes"
+  fi
+}
+install_update_timer || echo "$(date -u +%FT%TZ) could not change the update timer"
 
 # Daily database snapshots on this server's disk (snapshot.sh), at the lowest
 # CPU and disk priority so the app never waits on them. Installed or refreshed

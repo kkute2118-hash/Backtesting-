@@ -1,16 +1,27 @@
-# Paper-trades liquidity strategy B (scripts/fx_paper.py) on forex and gold:
-# every 15 minutes through the London and New York sessions it replays the
-# frozen rules on fresh Twelve Data candles, keeps the book on the `fx-paper`
-# branch, and posts new pending orders and closed trades as comments on the
-# "FX paper trading" issue (GitHub emails and notifies the owner). The Oracle
-# server relays the same events to the owner's phone (trend_paper.relay_fx).
-# Needs the repository secret TWELVEDATA_API_KEY. No real orders, no database.
+# Paper-trades liquidity strategy B (scripts/fx_paper.py) on forex and gold.
+# GitHub runs short schedules late or not at all (on 6 Oct a 15-minute
+# schedule ran twice), so each scheduled run is one long job that replays the
+# frozen rules on fresh Twelve Data candles every 5 minutes in the entry hours
+# (every 15 outside them) until 17:00 UTC or for at most ~5h50m. Three starts a
+# day cover the London and New York sessions even if one is dropped; runs
+# queue behind each other. Each pass keeps the book on the `fx-paper` branch
+# and posts new pending orders and closed trades on the "FX paper trading"
+# issue; the Oracle server relays them to the owner's phone
+# (trend_paper.relay_fx). Twelve Data: 5 requests a pass, about 500 of the
+# free 800 a day. Needs the secret TWELVEDATA_API_KEY. No real orders.
 name: FX paper trading
 
 on:
   schedule:
-    - cron: "*/15 5-16 * * 1-5"     # 10:30-22:30 IST, Monday to Friday
+    - cron: "0 5 * * 1-5"           # 10:30 IST
+    - cron: "0 10 * * 1-5"          # backups, if a start was dropped or ended early
+    - cron: "0 13 * * 1-5"
   workflow_dispatch:
+    inputs:
+      loop:
+        description: "Keep running every 5 minutes (otherwise one pass)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write                   # the fx-paper branch only
@@ -23,7 +34,7 @@ concurrency:
 jobs:
   paper:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,37 +50,49 @@ jobs:
             git worktree add --detach "$RUNNER_TEMP/book" HEAD
             cd "$RUNNER_TEMP/book" && git checkout -q --orphan fx-paper-new && git rm -rfq .
           fi
+      # One pass: replay, copy the crypto book, save, post. Repeated on the
+      # 5-minute candle closes (plus a minute for the data) when looping.
       - name: Replay the rules on fresh candles
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           ALERTS_FILE: ${{ runner.temp }}/alerts.md
-        run: python scripts/fx_paper.py "$RUNNER_TEMP/book"
-      # The Oracle crypto book's public summary, kept beside the forex book so
-      # the Claude dashboard page can show both (scripts/claude_dashboard.py).
-      - name: Copy the crypto paper book from the Oracle server
-        env:
-          IP: ${{ vars.ORACLE_IP || '132.226.191.194' }}
-        run: |
-          if curl -fsS -m 20 "http://$IP/public/trend.json" -o "$RUNNER_TEMP/crypto.json" \
-             && python -c "import json,sys; json.load(open(sys.argv[1]))" "$RUNNER_TEMP/crypto.json"; then
-            mv "$RUNNER_TEMP/crypto.json" "$RUNNER_TEMP/book/crypto-trend.json"
-          else
-            echo "::warning title=Crypto book unavailable::http://$IP/public/trend.json did not answer with JSON"
-          fi
-      - name: Save the book
-        run: |
-          cd "$RUNNER_TEMP/book"
-          git add -A
-          git -c user.name="fx-paper bot" -c user.email="actions@users.noreply.github.com" \
-            commit -qm "Paper book $(date -u +%FT%H:%MZ)" || exit 0
-          git push origin HEAD:refs/heads/fx-paper
-      - name: Post alerts
-        env:
           GH_TOKEN: ${{ github.token }}
-        # hashFiles() only sees the workspace, so test for the alerts file here.
+          IP: ${{ vars.ORACLE_IP || '132.226.191.194' }}
+          LOOP: ${{ github.event_name == 'schedule' || inputs.loop }}
         run: |
-          [ -s "$RUNNER_TEMP/alerts.md" ] || exit 0
-          n=$(gh issue list --state open --search "FX paper trading in:title" --json number -q '.[0].number')
-          [ -n "$n" ] || n=$(gh issue create --title "FX paper trading" \
-            --body "Alerts from .github/workflows/fx-paper.yml (paper only, no real orders). Book: branch fx-paper." | grep -o '[0-9]*$')
-          gh issue comment "$n" --body-file "$RUNNER_TEMP/alerts.md"
+          book="$RUNNER_TEMP/book"
+          one_pass() {
+            rm -f "$ALERTS_FILE"
+            python scripts/fx_paper.py "$book" || echo "::warning title=FX pass failed::$(date -u +%H:%M) UTC"
+            # The Oracle crypto book's public summary, kept beside the forex book
+            # so the Claude dashboard page can show both (scripts/claude_dashboard.py).
+            if curl -fsS -m 20 "http://$IP/public/trend.json" -o "$RUNNER_TEMP/crypto.json" \
+               && python -c "import json,sys; json.load(open(sys.argv[1]))" "$RUNNER_TEMP/crypto.json"; then
+              mv "$RUNNER_TEMP/crypto.json" "$book/crypto-trend.json"
+            elif [ -z "${crypto_warned:-}" ]; then
+              crypto_warned=1
+              echo "::warning title=Crypto book unavailable::http://$IP/public/trend.json did not answer with JSON"
+            fi
+            ( cd "$book" && git add -A \
+              && git -c user.name="fx-paper bot" -c user.email="actions@users.noreply.github.com" \
+                   commit -qm "Paper book $(date -u +%FT%H:%MZ)" && git push -q origin HEAD:refs/heads/fx-paper ) || true
+            if [ -s "$ALERTS_FILE" ]; then
+              ( n=$(gh issue list --state open --search "FX paper trading in:title" --json number -q '.[0].number')
+                [ -n "$n" ] || n=$(gh issue create --title "FX paper trading" \
+                  --body "Alerts from .github/workflows/fx-paper.yml (paper only, no real orders). Book: branch fx-paper." | grep -o '[0-9]*$')
+                gh issue comment "$n" --body-file "$ALERTS_FILE" ) || echo "::warning title=Alerts not posted::$(date -u +%H:%M) UTC"
+            fi
+          }
+          one_pass
+          [ "$LOOP" = "true" ] || exit 0
+          stop=$(( $(date +%s) + 350*60 ))
+          end_of_day=$(date -u -d "17:00" +%s)
+          [ "$end_of_day" -lt "$stop" ] && stop=$end_of_day
+          while :; do
+            now=$(date +%s); hour=$(date -u +%-H)
+            case " 6 7 12 13 14 15 " in *" $hour "*) step=300 ;; *) step=900 ;; esac
+            next=$(( (now / step + 1) * step + 60 ))
+            [ "$next" -ge "$stop" ] && break
+            sleep $(( next - now ))
+            one_pass
+          done

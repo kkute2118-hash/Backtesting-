@@ -19,7 +19,7 @@ and never competes with them:
   app does not mint a new token (that would cut the job off mid-sync); it shows
   stored prices for those few minutes and logs in again after the job ends.
 - **Updates itself.** `install-updater.sh` installs a systemd timer that runs
-  `update.sh` every 6 hours: one `git fetch`, and a rebuild only when `main`
+  `update.sh` every 15 minutes: one `git fetch`, and a rebuild only when `main`
   has changed. It also adds the three settings above to an older `.env`.
 - **Keeps its own daily copies.** `update.sh` also installs
   `ati-lab-snapshot.timer`: at 03:00 IST, at the lowest CPU and disk priority,

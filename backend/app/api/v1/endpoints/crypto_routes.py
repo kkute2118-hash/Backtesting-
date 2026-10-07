@@ -13,6 +13,8 @@ router = APIRouter()
 REPORTS_DIR = Path("/data/reports")
 CANDLE_TTL_SECONDS = 300
 _candle_cache: dict[str, tuple[float, dict]] = {}
+LIVE_TTL_SECONDS = 10
+_live_cache: dict[str, tuple[float, dict]] = {}
 
 
 @router.get("/crypto/candles/{symbol}")
@@ -37,6 +39,25 @@ def get_candles(symbol: str, bars: int = 120):
         cached = _candle_cache[symbol] = (time.time(), payload)
     data = cached[1]
     return data | {"candles": data["candles"][-max(20, min(bars, 300)):]}
+
+
+@router.get("/crypto/live")
+def get_live_prices():
+    """Last traded price of every market the paper book trades, at most 10 s old."""
+    from app.tasks import trend_paper
+
+    out = {}
+    for symbol in trend_paper.SYMBOLS:
+        cached = _live_cache.get(symbol)
+        if not cached or time.time() - cached[0] > LIVE_TTL_SECONDS:
+            try:
+                price, source = trend_paper.live_price(symbol)
+                cached = _live_cache[symbol] = (time.time(), {"price": price, "source": source, "at": int(time.time())})
+            except Exception as exc:
+                out[symbol] = (cached[1] | {"stale": True}) if cached else {"error": str(exc)[:200]}
+                continue
+        out[symbol] = cached[1]
+    return out
 
 
 @router.get("/crypto/trend-report")

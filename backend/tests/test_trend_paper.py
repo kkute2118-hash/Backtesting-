@@ -107,6 +107,8 @@ def test_new_rules_restart_the_book_and_keep_the_topic(monkeypatch, tmp_path):
     assert len(list(tmp_path.glob("trend-state-before-*.json"))) == 1
     tp.run()                                    # same rules: kept, no second restart
     assert len(list(tmp_path.glob("trend-state-before-*.json"))) == 1
+    btc = json.loads((tmp_path / "trend-latest.json").read_text())["markets"]["BTCUSDT"]
+    assert btc["buy_above"] == h4.high.iloc[-tp.N_IN:].max() and btc["price"] == m15.close.iloc[b + 15]
 
 
 FX_STATE = {"pending": [{"id": "GBPUSD|x", "symbol": "GBPUSD", "direction": 1, "entry": 1.25, "stop": 1.248,
@@ -135,3 +137,17 @@ def test_forex_relay_survives_an_unreachable_book():
     book = {}
     tp.relay_fx(book, "t")                      # the autouse fixture makes the fetch fail
     assert "fx_seen" not in book
+
+
+def test_live_prices_endpoint(monkeypatch):
+    from app.api.v1.endpoints import crypto_routes as cr
+
+    def price(sym):
+        if sym == "SOLUSDT":
+            raise RuntimeError("all sources down")
+        return 100.0, "test"
+    monkeypatch.setattr(tp, "live_price", price)
+    cr._live_cache.clear()
+    out = cr.get_live_prices()
+    assert out["BTCUSDT"]["price"] == 100.0 and "error" in out["SOLUSDT"]
+    assert set(out) == set(tp.SYMBOLS)

@@ -86,6 +86,7 @@ def main():
     state_file = state_dir / "state.json"
     state = json.loads(state_file.read_text()) if state_file.exists() else {"alerted": [], "trades": {}}
     alerts, pending_all, errors = [], [], []
+    prices = {}
     now = pd.Timestamp.now(tz="UTC")
 
     for sym in SYMBOLS:
@@ -102,6 +103,7 @@ def main():
             setups = setups[setups.ts.dt.hour.isin(SESSION_UTC) & (setups.score >= MIN_SCORE)
                             & (setups.cost_r <= MAX_COST_R) & (setups.ts >= start)]
         last_bar = df.index[-1]
+        prices[sym] = {"price": float(df.close.iloc[-1]), "bar": last_bar.isoformat()}
         for _, row in setups.iterrows() if len(setups) else []:
             tid = trade_id(row)
             still_open = (pd.Timestamp(row.exit_time) >= last_bar and row.outcome in ("time", "tp1+time")
@@ -137,6 +139,7 @@ def main():
     state["updated"] = now.isoformat(timespec="minutes")
     state["errors"] = errors
     state["pending"] = pending_all
+    state["prices"] = prices             # the latest 5-minute close per market, for the dashboard
     state_file.write_text(json.dumps(state, indent=1, default=str))
 
     closed = [t for t in state["trades"].values() if t["status"] == "closed"]

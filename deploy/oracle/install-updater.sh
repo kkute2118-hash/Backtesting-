@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install the 6-hourly self-update (update.sh) as a systemd timer, then run it
+# Install the self-update (every 15 minutes) (update.sh) as a systemd timer, then run it
 # once. Safe to re-run. On a server created before this existed, run once:
 #
 #   sudo bash -c 'cd /opt/ati-lab && git fetch origin main && git checkout -B main origin/main && bash deploy/oracle/install-updater.sh'
@@ -22,12 +22,12 @@ UNIT
 
 cat > /etc/systemd/system/ati-lab-update.timer <<'UNIT'
 [Unit]
-Description=Check GitHub for ATI Lab updates every 6 hours
+Description=Check GitHub for ATI Lab updates every 15 minutes
 
 [Timer]
-OnBootSec=10min
-OnUnitActiveSec=6h
-RandomizedDelaySec=10min
+OnBootSec=3min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
 Persistent=true
 
 [Install]
