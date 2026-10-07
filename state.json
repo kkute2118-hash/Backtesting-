@@ -22,68 +22,29 @@
    "status": "closed"
   }
  },
- "updated": "2026-10-07T10:46+00:00",
+ "updated": "2026-10-07T11:01+00:00",
  "errors": [],
- "pending": [
-  {
-   "symbol": "AUDUSD",
-   "family": "continuation",
-   "direction": -1,
-   "event_time": "2026-10-07 10:30:00+00:00",
-   "event": "run",
-   "pool_kind": "pdl",
-   "htf_regime": "bear",
-   "htf_aligned": true,
-   "msb": "n/a",
-   "displacement": true,
-   "fvg": false,
-   "zone": "level",
-   "discount_ok": "False",
-   "ote": false,
-   "entry_method": "limit",
-   "entry_time": "",
-   "entry": 0.6961292142857143,
-   "stop": 0.6966007857142856,
-   "tp1": 0.69504,
-   "tp2": 0.69049,
-   "rr1": 2.31,
-   "rr2": 11.96,
-   "score": 70,
-   "decision": "",
-   "reject_reason": "",
-   "exit_time": "",
-   "outcome": "",
-   "r": 0.0,
-   "mae_r": 0.0,
-   "mfe_r": 0.0,
-   "hold_minutes": 0,
-   "cost_r": 0.0,
-   "extras": {},
-   "expires": "2026-10-07 16:30:00+00:00",
-   "grade": "watchlist",
-   "id": "AUDUSD|2026-10-07 10:30:00+00:00|-1"
-  }
- ],
+ "pending": [],
  "prices": {
   "EURUSD": {
-   "price": 1.11919,
-   "bar": "2026-10-07T10:40:00+00:00"
+   "price": 1.11913,
+   "bar": "2026-10-07T10:55:00+00:00"
   },
   "GBPUSD": {
-   "price": 1.32244,
-   "bar": "2026-10-07T10:40:00+00:00"
+   "price": 1.32186,
+   "bar": "2026-10-07T10:55:00+00:00"
   },
   "USDJPY": {
-   "price": 158.33429,
-   "bar": "2026-10-07T10:40:00+00:00"
+   "price": 158.32161,
+   "bar": "2026-10-07T10:55:00+00:00"
   },
   "AUDUSD": {
-   "price": 0.69605,
-   "bar": "2026-10-07T10:40:00+00:00"
+   "price": 0.6959,
+   "bar": "2026-10-07T10:55:00+00:00"
   },
   "XAUUSD": {
-   "price": 4113.18821,
-   "bar": "2026-10-07T10:40:00+00:00"
+   "price": 4116.90276,
+   "bar": "2026-10-07T10:55:00+00:00"
   }
  }
 }

@@ -1,14 +1,8 @@
 # Liquidity strategy B: paper trading
 
-Updated 07 Oct 16:16 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
+Updated 07 Oct 16:31 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
 
 Closed trades: **1**, total **-1.04R**, average -1.04R, wins 0. Backtest expectation: about +0.3R a trade, 36% wins, ~80 trades a year.
-
-## Pending limit orders
-
-| symbol | side | entry | stop | TP1 | TP2 | score | cancel at |
-|---|---|---|---|---|---|---|---|
-| AUDUSD | SELL | 0.69613 | 0.6966 | 0.69504 | 0.69049 | 70 | 07 Oct 22:00 IST |
 
 ## Trades
 
