@@ -1,7 +1,8 @@
 {
  "alerted": [
   "USDJPY|2026-10-06 23:45:00+00:00|1",
-  "AUDUSD|2026-10-07 10:30:00+00:00|-1"
+  "AUDUSD|2026-10-07 10:30:00+00:00|-1",
+  "AUDUSD|2026-10-08 11:00:00+00:00|-1"
  ],
  "trades": {
   "EURUSD|2026-10-05 13:30:00+00:00|-1": {
@@ -22,29 +23,68 @@
    "status": "closed"
   }
  },
- "updated": "2026-10-07T19:15+00:00",
+ "updated": "2026-10-08T11:48+00:00",
  "errors": [],
- "pending": [],
+ "pending": [
+  {
+   "symbol": "AUDUSD",
+   "family": "continuation",
+   "direction": -1,
+   "event_time": "2026-10-08 11:00:00+00:00",
+   "event": "run",
+   "pool_kind": "pdl",
+   "htf_regime": "bear",
+   "htf_aligned": true,
+   "msb": "n/a",
+   "displacement": true,
+   "fvg": false,
+   "zone": "level",
+   "discount_ok": "False",
+   "ote": false,
+   "entry_method": "limit",
+   "entry_time": "",
+   "entry": 0.6942772142857143,
+   "stop": 0.6946527857142857,
+   "tp1": 0.69332,
+   "tp2": 0.69049,
+   "rr1": 2.55,
+   "rr2": 10.08,
+   "score": 70,
+   "decision": "",
+   "reject_reason": "",
+   "exit_time": "",
+   "outcome": "",
+   "r": 0.0,
+   "mae_r": 0.0,
+   "mfe_r": 0.0,
+   "hold_minutes": 0,
+   "cost_r": 0.0,
+   "extras": {},
+   "expires": "2026-10-08 17:00:00+00:00",
+   "grade": "watchlist",
+   "id": "AUDUSD|2026-10-08 11:00:00+00:00|-1"
+  }
+ ],
  "prices": {
   "EURUSD": {
-   "price": 1.11981,
-   "bar": "2026-10-07T19:10:00+00:00"
+   "price": 1.1182,
+   "bar": "2026-10-08T11:40:00+00:00"
   },
   "GBPUSD": {
-   "price": 1.32163,
-   "bar": "2026-10-07T19:10:00+00:00"
+   "price": 1.32017,
+   "bar": "2026-10-08T11:40:00+00:00"
   },
   "USDJPY": {
-   "price": 158.01017,
-   "bar": "2026-10-07T19:10:00+00:00"
+   "price": 158.2442,
+   "bar": "2026-10-08T11:40:00+00:00"
   },
   "AUDUSD": {
-   "price": 0.69656,
-   "bar": "2026-10-07T19:10:00+00:00"
+   "price": 0.69395,
+   "bar": "2026-10-08T11:40:00+00:00"
   },
   "XAUUSD": {
-   "price": 4107.49874,
-   "bar": "2026-10-07T19:10:00+00:00"
+   "price": 4123.96008,
+   "bar": "2026-10-08T11:40:00+00:00"
   }
  }
 }
