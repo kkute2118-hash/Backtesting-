@@ -1,6 +1,6 @@
 # Liquidity strategy B: paper trading
 
-Updated 09 Oct 20:46 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
+Updated 09 Oct 20:51 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
 
 Closed trades: **2**, total **-2.27R**, average -1.14R, wins 0. Backtest expectation: about +0.3R a trade, 36% wins, ~80 trades a year.
 
