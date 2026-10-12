@@ -40,24 +40,29 @@
    "status": "closed"
   }
  },
- "updated": "2026-10-12T14:16+00:00",
- "errors": [
-  "AUDUSD: Twelve Data 429 You have run out of API credits for the current minute. 9 API credits were used, with the current limit being 8. Wait for the next minute or consider switching to a higher tier",
-  "XAUUSD: Twelve Data 429 You have run out of API credits for the current minute. 10 API credits were used, with the current limit being 8. Wait for the next minute or consider switching to a higher tie"
- ],
+ "updated": "2026-10-12T14:21+00:00",
+ "errors": [],
  "pending": [],
  "prices": {
   "EURUSD": {
-   "price": 1.11773,
-   "bar": "2026-10-12T14:10:00+00:00"
+   "price": 1.11708,
+   "bar": "2026-10-12T14:15:00+00:00"
   },
   "GBPUSD": {
-   "price": 1.32312,
-   "bar": "2026-10-12T14:10:00+00:00"
+   "price": 1.32227,
+   "bar": "2026-10-12T14:15:00+00:00"
   },
   "USDJPY": {
-   "price": 158.64861,
-   "bar": "2026-10-12T14:10:00+00:00"
+   "price": 158.67161,
+   "bar": "2026-10-12T14:15:00+00:00"
+  },
+  "AUDUSD": {
+   "price": 0.69645,
+   "bar": "2026-10-12T14:15:00+00:00"
+  },
+  "XAUUSD": {
+   "price": 4159.28585,
+   "bar": "2026-10-12T14:15:00+00:00"
   }
  }
 }

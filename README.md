@@ -1,6 +1,6 @@
 # Liquidity strategy B: paper trading
 
-Updated 12 Oct 19:46 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
+Updated 12 Oct 19:51 IST. Paper start 2026-10-05. Rules: scripts/fx_paper.py (frozen).
 
 Closed trades: **2**, total **-2.27R**, average -1.14R, wins 0. Backtest expectation: about +0.3R a trade, 36% wins, ~80 trades a year.
 
@@ -10,5 +10,3 @@ Closed trades: **2**, total **-2.27R**, average -1.14R, wins 0. Backtest expecta
 |---|---|---|---|---|---|---|---|---|
 | 08 Oct 17:35 IST | AUDUSD | short | 0.69428 | 0.69465 | 0.69332 | closed | stop | -1.23 |
 | 05 Oct 19:30 IST | EURUSD | short | 1.1195 | 1.1203 | 1.1171 | closed | stop | -1.04 |
-
-Data errors this run: AUDUSD: Twelve Data 429 You have run out of API credits for the current minute. 9 API credits were used, with the current limit being 8. Wait for the next minute or consider switching to a higher tier; XAUUSD: Twelve Data 429 You have run out of API credits for the current minute. 10 API credits were used, with the current limit being 8. Wait for the next minute or consider switching to a higher tie
