@@ -15,6 +15,9 @@ def no_forex_book(monkeypatch):
     def boom(*a, **k):
         raise OSError("offline")
     monkeypatch.setattr(tp.requests, "get", boom)
+    monkeypatch.setattr(tp.requests, "post", boom)
+    monkeypatch.delenv("GH_BACKUP_TOKEN", raising=False)
+    monkeypatch.delenv("GH_DISPATCH_TOKEN", raising=False)
 
 
 def _frames():
@@ -174,3 +177,47 @@ def test_test_alert_once_and_delivery_log(monkeypatch, tmp_path):
     latest = json.loads((tmp_path / "trend-latest.json").read_text())
     assert latest["alerts"]["topic_ends_with"] == "1234"
     assert latest["alerts"]["log"][0]["ok"] and "abcd" not in json.dumps(latest)
+
+
+class _Resp:
+    def __init__(self, code=200, data=None):
+        self.status_code, self._data, self.text = code, data or {}, ""
+
+    def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise OSError(self.status_code)
+
+
+def test_keep_fx_running_starts_the_workflow_once_and_reports(monkeypatch):
+    calls = []
+    monkeypatch.setenv("GH_BACKUP_TOKEN", "t0ken")
+    monkeypatch.setattr(tp.requests, "get", lambda url, **k: calls.append(("get", k["params"]["status"])) or _Resp(data={"total_count": 0}))
+    monkeypatch.setattr(tp.requests, "post", lambda url, **k: calls.append(("post", k["json"])) or _Resp(204))
+    book = {}
+    mon = pd.Timestamp("2026-10-12 06:00", tz="UTC")
+    tp.keep_fx_running(book, mon)
+    assert book["fx_dispatch"]["status"] == "started"
+    assert ("post", {"ref": "main", "inputs": {"loop": "true"}}) in calls
+    n = len(calls)
+    tp.keep_fx_running(book, mon + pd.Timedelta(minutes=10))     # within 30 minutes: no new check
+    assert len(calls) == n
+    tp.keep_fx_running(book, pd.Timestamp("2026-10-11 06:00", tz="UTC"))   # Sunday: nothing
+    tp.keep_fx_running(book, pd.Timestamp("2026-10-12 20:00", tz="UTC"))   # after hours: nothing
+    assert len(calls) == n
+
+
+def test_keep_fx_running_leaves_a_running_job_and_reports_refusals(monkeypatch):
+    monkeypatch.setenv("GH_BACKUP_TOKEN", "t0ken")
+    monkeypatch.setattr(tp.requests, "get", lambda url, **k: _Resp(data={"total_count": 1}))
+    book = {}
+    tp.keep_fx_running(book, pd.Timestamp("2026-10-12 06:00", tz="UTC"))
+    assert book["fx_dispatch"]["status"] == "running"
+    monkeypatch.setattr(tp.requests, "get", lambda url, **k: _Resp(data={"total_count": 0}))
+    monkeypatch.setattr(tp.requests, "post", lambda url, **k: _Resp(403))
+    book = {}
+    tp.keep_fx_running(book, pd.Timestamp("2026-10-12 06:00", tz="UTC"))
+    assert book["fx_dispatch"]["status"].startswith("refused 403")
+    assert "t0ken" not in json.dumps(book)

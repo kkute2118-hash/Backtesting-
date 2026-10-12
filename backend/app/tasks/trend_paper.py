@@ -284,6 +284,7 @@ def write_report(book, now, events, sources):
                "closed": sorted(trades, key=lambda t: t["exit_time"], reverse=True)[:50],
                # the topic itself stays private; its last 4 characters let the owner
                # check the ntfy app is subscribed to the right one
+               "fx_dispatch": book.get("fx_dispatch"),
                "alerts": {"topic_ends_with": str(book.get("ntfy_topic", ""))[-4:],
                           "log": book.get("alerts_log", [])[-20:]}}
     (REPORT_DIR / "trend-latest.json").write_text(json.dumps(summary, indent=1, default=str))
@@ -351,6 +352,44 @@ def fx_alerts(state: dict, seen: set) -> list[tuple[str, str, str, bool]]:
                         f"{side} {t['symbol']} from {t['entry']:.5g} ({ist(t['entry_time'])}): "
                         f"{t['outcome']}, {t['r']:+.2f}R after costs.", False))
     return out
+
+
+# The forex paper book runs as a GitHub workflow, and GitHub drops scheduled
+# starts (12 Oct: the 10:30 IST start never came). In the forex hours this
+# server checks every 30 minutes and starts the workflow when it is not running.
+FX_WORKFLOW_API = os.environ.get(
+    "FX_WORKFLOW_API", "https://api.github.com/repos/kkute2118-hash/Backtesting-/actions/workflows/fx-paper.yml")
+FX_HOURS_UTC = (5, 16)                         # Monday to Friday, as the workflow's own schedule
+FX_CHECK_MINUTES = 30
+
+
+def keep_fx_running(book: dict, now: pd.Timestamp) -> None:
+    """Start the forex workflow (looping) if none is running or queued. Records
+    the outcome in book["fx_dispatch"]; never raises, never logs the token."""
+    if now.weekday() >= 5 or not (FX_HOURS_UTC[0] <= now.hour < FX_HOURS_UTC[1]):
+        return
+    last = book.get("fx_dispatch", {}).get("checked")
+    if last and now - pd.Timestamp(last) < pd.Timedelta(minutes=FX_CHECK_MINUTES):
+        return
+    token = os.environ.get("GH_DISPATCH_TOKEN") or os.environ.get("GH_BACKUP_TOKEN")
+    status = "no GitHub token on the server"
+    if token:
+        h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+        try:
+            busy = 0
+            for state in ("in_progress", "queued"):
+                r = requests.get(f"{FX_WORKFLOW_API}/runs", params={"status": state, "per_page": 1}, headers=h, timeout=20)
+                r.raise_for_status()
+                busy += r.json().get("total_count", 0)
+            if busy:
+                status = "running"
+            else:
+                r = requests.post(f"{FX_WORKFLOW_API}/dispatches", headers=h, timeout=20,
+                                  json={"ref": "main", "inputs": {"loop": "true"}})
+                status = "started" if r.status_code == 204 else f"refused {r.status_code}: {r.text[:120]}"
+        except Exception as exc:
+            status = f"error: {type(exc).__name__}"
+    book["fx_dispatch"] = {"checked": now.isoformat(timespec="minutes"), "status": status}
 
 
 def relay_fx(book: dict, topic: str) -> None:
@@ -427,6 +466,7 @@ def run():
                "Crypto (BTC, ETH, SOL, gold): a BUY NOW alert when a 4h candle closes above its 40-bar high, "
                "then fills and exits. Forex: limit orders and closed trades. Nothing to do now.")
     relay_fx(book, topic)
+    keep_fx_running(book, now)
     book["alerts_log"] = (book.get("alerts_log", []) + SENT_LOG)[-50:]
     book["events"] = (book.get("events", []) + new_events)[-500:]
     path.write_text(json.dumps(book, indent=1, default=str))

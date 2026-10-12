@@ -43,9 +43,15 @@ and never competes with them:
     as the fallback). The book is at `/reports/trend.html`. Breakouts, fills
     and exits are pushed to the owner's phone through the free ntfy app; the
     private topic name is created on the server and shown only on that page.
+    The same job keeps the forex paper book running: Monday to Friday,
+    05:00-16:00 UTC, every 30 minutes it starts the `fx-paper` GitHub workflow
+    if no run is active (GitHub drops scheduled starts). It uses
+    `GH_DISPATCH_TOKEN`, or else `GH_BACKUP_TOKEN`, from `.env`; the token
+    needs the "Actions: Read and write" permission. The outcome is in
+    `fx_dispatch` of `/public/trend.json`.
 
   Reports are JSON files under `/reports/` on the site (same login), kept for
-  30 days. Neither job writes the backup or GitHub. The daily load is also what
+  30 days. Neither job writes the backup or the repository. The daily load is also what
   keeps Oracle from reclaiming the server as idle (below).
 
 A server created before this existed needs one command, once:
