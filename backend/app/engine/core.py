@@ -10313,6 +10313,84 @@ def sync_latest_sessions(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=5
             "aborted": aborted[0] if aborted else ""}
 
 
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
+
+
+def yahoo_daily(symbol, start_date, end_date):
+    """Daily OHLCV for one NSE share from Yahoo Finance (SYMBOL.NS), the backup
+    source when Dhan is unavailable. Dates are IST trading dates."""
+    s = str(symbol).upper().replace(".NS", "")
+    p1 = int(pd.Timestamp(start_date).tz_localize("Asia/Kolkata").timestamp())
+    p2 = int((pd.Timestamp(end_date) + timedelta(days=1)).tz_localize("Asia/Kolkata").timestamp())
+    r = requests.get(YAHOO_CHART_URL.format(requests.utils.quote(s + ".NS")),
+                     params={"period1": p1, "period2": p2, "interval": "1d"},
+                     headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    r.raise_for_status()
+    res = (r.json().get("chart") or {}).get("result") or []
+    if not res or not res[0].get("timestamp"):
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    q = res[0]["indicators"]["quote"][0]
+    idx = pd.to_datetime(res[0]["timestamp"], unit="s", utc=True).tz_convert("Asia/Kolkata").normalize().tz_localize(None)
+    df = pd.DataFrame({k: q.get(k) for k in ("open", "high", "low", "close", "volume")}, index=idx)
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    df["volume"] = df["volume"].fillna(0)
+    return df[~df.index.duplicated(keep="last")]
+
+
+def sync_latest_sessions_yahoo(tickers, tail_days=LATEST_SYNC_TAIL_DAYS, max_workers=4):
+    """The same top-up as sync_latest_sessions, from Yahoo Finance: used by the
+    daily job when Dhan refuses (expired login, unpaid data plan, outage).
+    Writes completed sessions only, never today's unfinished candle. Same
+    summary shape; never raises for individual symbols."""
+    symbols = list(dict.fromkeys(s for s in (str(t).upper().replace(".NS", "") for t in tickers) if s))
+    if not symbols:
+        return {"symbols": 0, "updated": 0, "latest": None, "errors": [], "advanced": 0, "source": "yahoo"}
+    end = latest_completed_nse_session()
+    start = end - timedelta(days=int(tail_days))
+    con = _db()
+    try:
+        qmarks = ",".join(["?"] * len(symbols))
+        pre = {r[0]: r[1] for r in con.execute(
+            f"SELECT symbol,MAX(dt) FROM candles WHERE symbol IN ({qmarks}) GROUP BY symbol", symbols).fetchall()}
+    finally:
+        con.close()
+    errors, updated = [], 0
+
+    def worker(symbol):
+        try:
+            d = yahoo_daily(symbol, start, end)
+            d = d[d.index <= pd.Timestamp(end)]
+            if d.empty:
+                return symbol, 0, None
+            c = _db()
+            try:
+                return symbol, _save(c, symbol, d), None
+            finally:
+                c.close()
+        except Exception as exc:
+            return symbol, 0, f"{type(exc).__name__}: {str(exc)[:120]}"
+
+    with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), 8))) as pool:
+        for symbol, saved, err in pool.map(worker, symbols):
+            if err:
+                errors.append(f"{symbol}: {err}")
+            elif saved:
+                updated += 1
+    con = _db()
+    try:
+        post = {r[0]: r[1] for r in con.execute(
+            f"SELECT symbol,MAX(dt) FROM candles WHERE symbol IN ({qmarks}) GROUP BY symbol", symbols).fetchall()}
+    finally:
+        con.close()
+    invalidate_session_calendar()
+    newest = max((v for v in post.values() if v), default=None)
+    advanced = sum(1 for s in symbols if post.get(s) and pre.get(s) != post.get(s))
+    if newest and advanced:
+        _log_sync_freshness(newest, advanced)
+    return {"symbols": len(symbols), "updated": updated, "latest": newest, "errors": errors[:20],
+            "advanced": advanced, "source": "yahoo"}
+
+
 def dhan_history_floor_table():
     """Every symbol Dhan has confirmed has no candles before a given date.
 

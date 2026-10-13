@@ -352,11 +352,40 @@ def step_token(force=False):
     except Exception as exc:
         cached, issued = core._read_cached_dhan_token()
         if not cached:
+            if _yahoo_fallback():
+                # No Dhan today: the candles come from Yahoo Finance instead
+                # (step_sync_with_fallback), so the run, its paper trades and
+                # the backup still happen.
+                log("token", f"Dhan login failed ({exc}); continuing without Dhan - "
+                             "candles will come from Yahoo Finance")
+                return None
             raise
         age_note = f"issued {issued}" if issued else "age unknown"
         log("token", f"renewal failed ({exc}); continuing on the cached token ({age_note})")
         log("token", "  a cached Dhan token lasts 24h, so this is only a problem if it repeats")
         return False
+
+
+def _yahoo_fallback():
+    """Yahoo Finance as the backup candle source (on unless DATA_FALLBACK=off)."""
+    return os.environ.get("DATA_FALLBACK", "yahoo").strip().lower() != "off"
+
+
+def step_sync_with_fallback(tickers, tail_days, dhan_ok):
+    """Dhan first; Yahoo Finance when Dhan is unavailable or left the store
+    behind (expired login, unpaid data plan, outage)."""
+    if dhan_ok is not None:
+        summary = step_sync(tickers, tail_days)
+        fresh = core.data_freshness_status(tickers)
+        if fresh["current"] or fresh["awaiting_publication"] or not _yahoo_fallback():
+            return summary
+        log("sync", f"Dhan left the store at {fresh['latest']}; topping up from Yahoo Finance")
+    summary = core.sync_latest_sessions_yahoo(tickers, tail_days=tail_days)
+    log("sync", f"Yahoo Finance: {summary['advanced']:,}/{summary['symbols']:,} stocks advanced; "
+                f"newest stored session {summary['latest'] or '—'}")
+    for err in summary["errors"][:5]:
+        log("sync", f"  Yahoo error — {err}")
+    return summary
 
 
 def step_sync(tickers, tail_days):
@@ -590,7 +619,7 @@ def run_daily():
     # host would put it on the wrong session.
     summary = {"date": str(core.market_today()), "traded": None, "added": 0, "resolved": 0}
     step_restore()
-    step_token(force=True)
+    dhan_ok = step_token(force=True)
 
     session = core.latest_completed_nse_session()
     today = core.market_today()
@@ -609,7 +638,7 @@ def run_daily():
     download = core.resolve_universes(_sync_universes(universes), purpose="download")
     log("universe", f"{', '.join(universes)} — {len(download):,} symbols to sync")
 
-    step_sync(download, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS))
+    step_sync_with_fallback(download, _env_int("SYNC_TAIL_DAYS", core.LATEST_SYNC_TAIL_DAYS), dhan_ok)
     try:
         filled = _backfill_short_history(download, core.last_expected_nse_session())
         if filled:

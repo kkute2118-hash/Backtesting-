@@ -198,13 +198,23 @@ check("a token 500 no longer kills the run",
       "scan" in calls6 and "add" in calls6 and "backup" in calls6, str(calls6))
 check("it fell back to the cached token", "gen_token" not in calls6, str(calls6))
 
-# ...but with no cached token there is nothing to fall back to, so it must fail
+# ...with no cached token either, the candles come from Yahoo Finance instead
 STATE["cached_token"] = (None, None)
+_yahoo = core.sync_latest_sessions_yahoo
+core.sync_latest_sessions_yahoo = lambda t, **k: (CALLS.append("yahoo") or
+    {"symbols": len(t), "updated": 0, "latest": None, "errors": [], "advanced": 0, "source": "yahoo"})
+_s7, calls7 = run()
+check("no Dhan login: the run carries on from Yahoo", "yahoo" in calls7 and "sync" not in calls7, str(calls7))
+check("and still backs up", "backup" in calls7, str(calls7))
+# ...and with the fallback switched off there is nothing to fall back to, so it must fail
+os.environ["DATA_FALLBACK"] = "off"
 try:
     run()
-    check("no token and no cache must fail loudly", False, "it returned instead of raising")
+    check("no token, no cache, no fallback must fail loudly", False, "it returned instead of raising")
 except Exception:
-    check("no token and no cache still fails loudly", True)
+    check("no token, no cache, no fallback still fails loudly", True)
+os.environ.pop("DATA_FALLBACK", None)
+core.sync_latest_sessions_yahoo = _yahoo
 STATE["cached_token"] = ("tok", "2026-09-09T08:00:00")
 STATE["token_raises"] = False
 
