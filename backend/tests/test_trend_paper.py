@@ -221,3 +221,47 @@ def test_keep_fx_running_leaves_a_running_job_and_reports_refusals(monkeypatch):
     tp.keep_fx_running(book, pd.Timestamp("2026-10-12 06:00", tz="UTC"))
     assert book["fx_dispatch"]["status"].startswith("refused 403")
     assert "t0ken" not in json.dumps(book)
+
+
+def _falling():
+    """A long decline (below the 100-day average), then a 4h breakdown."""
+    m15, h4, d1, b = _frames()
+    m15[["open", "high", "low", "close"]] = m15[["open", "high", "low", "close"]].iloc[::-1].to_numpy()
+    m15.iloc[b:b + 16, :] = [[90, 91, 89, 90]] * 16
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    return m15, m15.resample("4h").agg(agg), m15.resample("1D").agg(agg), b
+
+
+def test_short_breakdown_in_a_downtrend_then_stop():
+    m15, h4, d1, b = _falling()
+    ind = tp.indicators(d1, h4)
+    st = {"last15": str(m15.index[b - 1]), "status": "flat"}
+    ev = tp.advance(st, ind, m15.iloc[:b + 16], "BTCUSDT")
+    assert st["status"] == "enter_short_next" and any("BREAKDOWN" in e for e in ev)
+    title, body, urgent = tp.alert_text("BTCUSDT", [e for e in ev if "BREAKDOWN" in e][0], st, 10_000.0)
+    assert urgent and title.startswith("BTC: SELL SHORT NOW") and "above)" in body
+    tp.advance(st, ind, m15.iloc[:b + 17], "BTCUSDT")
+    assert st["status"] == "short" and st["stop"] > st["entry"]
+    m15.loc[m15.index[b + 17]] = [89, 120, 88, 119]          # rallies through the stop
+    tp.advance(st, ind, m15.iloc[:b + 18], "BTCUSDT")
+    t = st["closed"][-1]
+    assert st["status"] == "flat" and t["side"] == "short" and -1.2 < t["r"] < -1.0
+
+
+def test_no_short_on_gold_or_above_the_average():
+    m15, h4, d1, b = _falling()
+    st = {"last15": str(m15.index[b - 1]), "status": "flat"}
+    tp.advance(st, tp.indicators(d1, h4), m15.iloc[:b + 16], "XAUUSDT")
+    assert st["status"] == "flat"                              # gold: long only
+    ind = tp.indicators(d1, h4)
+    ind["down"] = False                                        # above the 100-day average
+    st = {"last15": str(m15.index[b - 1]), "status": "flat"}
+    tp.advance(st, ind, m15.iloc[:b + 16], "BTCUSDT")
+    assert st["status"] == "flat"
+
+
+def test_short_profit_is_positive_r():
+    st = {"status": "short", "entry": 100.0, "stop": 103.0, "entry_time": "x", "held15": 0, "size_x": 1.0}
+    ev = []
+    tp._close(st, 94.0, pd.Timestamp("2026-10-14", tz="UTC"), "trend exit", ev, "ETHUSDT")
+    assert st["closed"][-1]["r"] > 1.9 and "COVERED" in ev[0]

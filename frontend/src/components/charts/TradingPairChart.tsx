@@ -8,7 +8,8 @@ import { useTheme } from "next-themes";
 import { api, errorMessage } from "@/lib/api";
 
 export type MarketStatus =
-  | "flat" | "enter_next" | "awaiting_retest" | "long" | "exit_next" | "pending";
+  | "flat" | "enter_next" | "awaiting_retest" | "long" | "exit_next" | "pending"
+  | "enter_short_next" | "short" | "cover_next";
 
 interface Candle {
   time: number;
@@ -32,6 +33,9 @@ const STATUS_LABEL: Record<MarketStatus, string> = {
   long: "Long",
   exit_next: "Exit next open",
   pending: "Pending",
+  enter_short_next: "Short at next open",
+  short: "Short",
+  cover_next: "Cover next open",
 };
 
 const STATUS_CLASS: Record<MarketStatus, string> = {
@@ -41,6 +45,9 @@ const STATUS_CLASS: Record<MarketStatus, string> = {
   long: "bg-up-soft text-up",
   exit_next: "bg-down-soft text-down",
   pending: "bg-surface text-muted",
+  enter_short_next: "bg-warn-soft text-warn",
+  short: "bg-down-soft text-down",
+  cover_next: "bg-up-soft text-up",
 };
 
 const REFRESH_MS = 5 * 60 * 1000;
@@ -127,11 +134,13 @@ export function TradingPairChart({
         lines.push(series.createPriceLine({ price, color, lineWidth: 1, lineStyle: 2, title, axisLabelVisible: true }));
       }
     };
-    if (status === "long" || status === "exit_next") {
+    if (status === "long" || status === "exit_next" || status === "short" || status === "cover_next") {
       add(entry, "#16a34a", "Entry");
       add(stopLoss, "#dc2626", "Stop");
     } else if (status === "awaiting_retest" || status === "enter_next") {
       add(level, "#d97706", "Breakout level");
+    } else if (status === "enter_short_next") {
+      add(level, "#d97706", "Breakdown level");
     }
     linesRef.current = lines;
     chartRef.current?.timeScale().fitContent();

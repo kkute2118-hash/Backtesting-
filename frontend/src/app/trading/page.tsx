@@ -14,6 +14,9 @@ interface MarketState {
   price?: number;
   buy_above?: number;
   sell_below?: number;
+  short_below?: number;
+  cover_above?: number;
+  downtrend?: boolean;
 }
 
 type LivePrices = Record<string, { price?: number; source?: string; at?: number; stale?: boolean; error?: string }>;
@@ -107,7 +110,7 @@ export default function TradingPage() {
       <div className="border-b border-line pb-4">
         <h1 className="text-2xl font-semibold text-ink">Live Signals</h1>
         <p className="text-muted mt-1 text-sm">
-          4h breakout 40/30 · 1.5 ATR stop · 1% risk · BTC, ETH, SOL, gold · paper book
+          4h breakout 40/30 long · 20/10 short in downtrends (BTC, ETH, SOL) · 1.5 ATR stop · 1% risk · paper book
           {latest ? ` · updated ${istTime(latest.updated)} IST` : ""}
         </p>
       </div>
@@ -116,10 +119,11 @@ export default function TradingPage() {
         <Card><CardBody><p className="text-down text-sm">{error}</p></CardBody></Card>
       ) : null}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {[
           { label: "Long", value: count(["long", "exit_next"]), tone: "text-up" },
-          { label: "Buying at next open", value: count(["enter_next"]), tone: "text-warn" },
+          { label: "Short", value: count(["short", "cover_next"]), tone: "text-down" },
+          { label: "Entering at next open", value: count(["enter_next", "enter_short_next"]), tone: "text-warn" },
           { label: "Closed trades", value: latest?.trades ?? "–", tone: "text-ink" },
           {
             label: "Paper equity",
@@ -156,12 +160,23 @@ export default function TradingPage() {
                   let action = "–";
                   if (status === "long") {
                     action = `Holding from ${fmt(st.entry)}. Stop ${fmt(st.stop)}${pctAway(px, st.stop)}; sell if a 4h candle closes below ${fmt(st.sell_below)}${pctAway(px, st.sell_below)}`;
+                  } else if (status === "short") {
+                    action = `Short from ${fmt(st.entry)}. Stop ${fmt(st.stop)}${pctAway(px, st.stop)}; buy back if a 4h candle closes above ${fmt(st.cover_above)}${pctAway(px, st.cover_above)}`;
                   } else if (status === "exit_next") {
                     action = "Selling at the next 15-minute open";
+                  } else if (status === "cover_next") {
+                    action = "Buying back (closing the short) at the next 15-minute open";
                   } else if (status === "enter_next") {
                     action = "BUY NOW at market (breakout confirmed)";
+                  } else if (status === "enter_short_next") {
+                    action = "SELL SHORT NOW at market (breakdown confirmed)";
                   } else if (st.buy_above != null) {
                     action = `BUY if a 4h candle closes above ${fmt(st.buy_above)}${pctAway(px, st.buy_above)}`;
+                    if (st.short_below != null) {
+                      action += st.downtrend
+                        ? `; SELL SHORT if one closes below ${fmt(st.short_below)}${pctAway(px, st.short_below)}`
+                        : "; no shorts (above the 100-day average)";
+                    }
                   }
                   return (
                     <tr key={m.symbol} className="border-b border-line">
@@ -172,8 +187,10 @@ export default function TradingPage() {
                           {lp?.price != null && !lp.stale ? "live" : st.price != null ? "last 15m close" : lp?.error ? "no price" : ""}
                         </div>
                       </td>
-                      <td className={`py-2 pr-3 ${status === "long" ? "text-up" : status === "enter_next" ? "text-warn" : "text-muted"}`}>
-                        {status === "long" || status === "exit_next" ? "Long" : status === "enter_next" ? "Buying" : "Flat"}
+                      <td className={`py-2 pr-3 ${status === "long" ? "text-up" : status === "short" ? "text-down" : status === "enter_next" || status === "enter_short_next" ? "text-warn" : "text-muted"}`}>
+                        {status === "long" || status === "exit_next" ? "Long"
+                          : status === "short" || status === "cover_next" ? "Short"
+                          : status === "enter_next" ? "Buying" : status === "enter_short_next" ? "Shorting" : "Flat"}
                       </td>
                       <td className="py-2 pr-3 text-ink">{action}</td>
                     </tr>

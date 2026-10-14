@@ -4,11 +4,17 @@ held on 2025-26).
 
 Rules (frozen; changing them restarts the paper book, see RULES):
   markets   BTCUSDT, ETHUSDT, SOLUSDT, XAUUSDT perpetuals
-  signal    a 4h close above the highest high of the previous 40 4h bars
-  entry     market buy at the next 15-minute open (the next 4h open)
-  stop      1.5 ATR(4h, 20) below the entry
-  exit      a 4h close below the lowest low of the previous 30 4h bars, at the
-            next 15-minute open; or the stop
+  long      a 4h close above the highest high of the previous 40 4h bars;
+            market buy at the next 15-minute open (the next 4h open); stop
+            1.5 ATR(4h, 20) below; exit at the next open after a 4h close
+            below the lowest low of the previous 30 4h bars, or the stop
+  short     BTC, ETH and SOL only (gold shorts lost in 2021-24), and only
+            while the last daily close is below its 100-day average: a 4h
+            close below the lowest low of the previous 20 4h bars; market sell
+            at the next open; stop 1.5 ATR above; exit at the next open after
+            a 4h close above the highest high of the previous 10 4h bars, or
+            the stop (research/fx_crypto/STEP17_SHORTS.md)
+  one position per market at a time; a long signal is checked first
   size      1% of equity at risk: position = 1% / stop distance (crypto is
             usually under 1x equity, gold about 1.4x), never above 5x
   charges   taker 0.05% + 18% GST + 0.01% slippage on the entry and the exit,
@@ -42,10 +48,12 @@ import pandas as pd
 import requests
 
 REPORT_DIR = Path(os.environ.get("REPORT_DIR", "/data/reports"))
-RULES = "4h breakout 40/30, 1.5 ATR stop, 1% risk (step 14)"
+RULES = "4h breakout 40/30 long + 20/10 short below the 100-day average (coins), 1.5 ATR stop, 1% risk (step 17)"
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XAUUSDT")
 YAHOO = {"XAUUSDT": "GC=F", "BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD"}
 N_IN, N_OUT, ATR_N, STOP_ATR = 40, 30, 20, 1.5
+SHORT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+S_IN, S_OUT, S_SMA = 20, 10, 100
 TAKER = 0.0005 * 1.18 + 0.0001
 FUNDING_PER_15M = 0.0001 / 32
 START_EQUITY, RISK, MAX_POSITION_X = 10_000.0, 0.01, 5.0
@@ -138,18 +146,25 @@ def _complete(df, rule):
 
 # ------------------------------------------------------------- strategy
 def indicators(d1, h4):
-    """Channels and ATR on 4h bars. d1 is accepted for the fetch signature;
-    the step 14 rules use no daily trend filter."""
+    """Channels and ATR on 4h bars, and the short side's downtrend flag: the
+    previous completed daily close below its 100-day average (longs use no
+    daily filter)."""
     hh = h4.high.rolling(N_IN).max().shift()
     ll = h4.low.rolling(N_OUT).min().shift()
+    sll = h4.low.rolling(S_IN).min().shift()
+    shh = h4.high.rolling(S_OUT).max().shift()
     tr = np.maximum(h4.high - h4.low, np.maximum(abs(h4.high - h4.close.shift()), abs(h4.low - h4.close.shift())))
     atr = tr.rolling(ATR_N).mean()
-    return pd.DataFrame({"hh": hh, "ll": ll, "atr": atr, "close": h4.close}, index=h4.index)
+    sma = d1.close.rolling(S_SMA).mean()
+    below = ((d1.close < sma) & (d1.close.rolling(S_SMA).count() >= S_SMA)).astype(float).shift(1)
+    down = below.reindex(h4.index.floor("1D")).fillna(0).to_numpy() > 0
+    return pd.DataFrame({"hh": hh, "ll": ll, "sll": sll, "shh": shh, "atr": atr, "close": h4.close,
+                         "down": down}, index=h4.index)
 
 
 def position_x(entry: float, stop: float) -> float:
     """Position as a multiple of equity so that the stop loses RISK of it."""
-    return round(min(RISK / ((entry - stop) / entry), MAX_POSITION_X), 3)
+    return round(min(RISK / (abs(entry - stop) / entry), MAX_POSITION_X), 3)
 
 
 def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[str]:
@@ -164,7 +179,7 @@ def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[st
         bars = m15.iloc[-1:]
     for ts, b in bars.iterrows():
         status = st.get("status", "flat")
-        if status == "exit_next":
+        if status in ("exit_next", "cover_next"):
             _close(st, b.open, ts, "trend exit", events, sym)
         elif status in ("pending", "awaiting_retest"):      # orders from earlier rule sets
             events.append(f"{sym}: order at {st.get('level', 0):.6g} cancelled (rules changed)")
@@ -175,10 +190,20 @@ def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[st
             st.update(status="long", entry=entry, stop=stop, entry_time=str(ts), held15=0,
                       size_x=position_x(entry, stop))
             events.append(f"{sym}: BOUGHT at {entry:.6g}, stop {stop:.6g}, position {st['size_x']:.2f}x equity")
+        elif status == "enter_short_next":
+            entry = float(b.open)
+            stop = entry + STOP_ATR * st["atr"]
+            st.update(status="short", entry=entry, stop=stop, entry_time=str(ts), held15=0,
+                      size_x=position_x(entry, stop))
+            events.append(f"{sym}: SHORTED at {entry:.6g}, stop {stop:.6g}, position {st['size_x']:.2f}x equity")
         if st.get("status") == "long":
             st["held15"] = st.get("held15", 0) + 1
             if b.low <= st["stop"]:
                 _close(st, min(b.open, st["stop"]), ts, "stop", events, sym)
+        elif st.get("status") == "short":
+            st["held15"] = st.get("held15", 0) + 1
+            if b.high >= st["stop"]:
+                _close(st, max(b.open, st["stop"]), ts, "stop", events, sym)
         # does this 15m bar close a 4h bar?
         end = ts + pd.Timedelta(minutes=15)
         if end.hour % 4 == 0 and end.minute == 0:
@@ -188,26 +213,40 @@ def advance(st: dict, ind: pd.DataFrame, m15: pd.DataFrame, sym: str) -> list[st
                 if st.get("status") == "long" and np.isfinite(r.ll) and r.close < r.ll:
                     st["status"] = "exit_next"
                     events.append(f"{sym}: 4h close {r.close:.6g} below the 30-bar low {r.ll:.6g}: sell at the next open")
+                elif st.get("status") == "short" and np.isfinite(r.shh) and r.close > r.shh:
+                    st["status"] = "cover_next"
+                    events.append(f"{sym}: 4h close {r.close:.6g} above the 10-bar high {r.shh:.6g}: "
+                                  f"buy back at the next open")
                 elif (st.get("status") == "flat" and np.isfinite(r.hh) and np.isfinite(r.atr)
                       and r.close > r.hh):
                     st.update(status="enter_next", level=float(r.hh), atr=float(r.atr), signal_time=str(j),
                               signal_close=float(r.close))
                     events.append(f"{sym}: BREAKOUT, 4h close {r.close:.6g} above the 40-bar high {r.hh:.6g}. "
                                   f"Buy at market now, stop about {r.close - STOP_ATR * r.atr:.6g}")
+                elif (st.get("status") == "flat" and sym in SHORT_SYMBOLS and bool(r.down)
+                      and np.isfinite(r.sll) and np.isfinite(r.atr) and r.close < r.sll):
+                    st.update(status="enter_short_next", level=float(r.sll), atr=float(r.atr), signal_time=str(j),
+                              signal_close=float(r.close))
+                    events.append(f"{sym}: BREAKDOWN, 4h close {r.close:.6g} below the 20-bar low {r.sll:.6g} "
+                                  f"in a downtrend. Sell short at market now, stop about "
+                                  f"{r.close + STOP_ATR * r.atr:.6g}")
         st["last15"] = str(ts)
     return events
 
 
 def _close(st, px, ts, why, events, sym):
     entry, stop = st["entry"], st["stop"]
-    risk = entry - stop
+    d = -1 if st.get("status") in ("short", "cover_next") else 1
+    risk = abs(entry - stop)
     cost = TAKER * entry + TAKER * px + FUNDING_PER_15M * st.get("held15", 0) * entry
-    r = (px - entry - cost) / risk
-    st.setdefault("closed", []).append({"symbol": sym, "entry_time": st["entry_time"], "exit_time": str(ts),
+    r = (d * (px - entry) - cost) / risk
+    st.setdefault("closed", []).append({"symbol": sym, "side": "short" if d < 0 else "long",
+                                        "entry_time": st["entry_time"], "exit_time": str(ts),
                                         "entry": entry, "stop": stop, "exit": float(px), "why": why, "r": round(r, 3),
-                                        "ret": round((px - entry - cost) / entry, 6),
+                                        "ret": round((d * (px - entry) - cost) / entry, 6),
                                         "size_x": st.get("size_x", position_x(entry, stop))})
-    events.append(f"{sym}: SOLD at {px:.6g} ({why}), {r:+.2f}R after charges")
+    verb = "COVERED" if d < 0 else "SOLD"
+    events.append(f"{sym}: {verb} at {px:.6g} ({why}), {r:+.2f}R after charges")
     st.update(status="flat")
     for k in ("entry", "stop", "entry_time", "held15", "level", "atr", "expires", "signal_time",
               "signal_close", "size_x"):
@@ -250,6 +289,24 @@ def alert_text(sym: str, event: str, st: dict, equity: float) -> tuple[str, str,
                 f"Position: Rs {equity * size_x:,.0f} ({size_x:.2f}x your Rs {equity:,.0f}; "
                 f"set the exchange leverage to 5x)\nRisk: Rs {equity * RISK:,.0f} (1%)\n\n"
                 f"Exit: a 4h close below the 30-bar low (you will get an alert).", True)
+    if "BREAKDOWN" in event and "signal_close" in st:
+        px = st["signal_close"]
+        stop = px + STOP_ATR * st["atr"]
+        size_x = position_x(px, stop)
+        return (f"{name}: SELL SHORT NOW at market (~{px:.6g})",
+                f"4h breakdown on {name} perp in a downtrend: close {px:.6g} below the 20-bar low "
+                f"{st['level']:.6g}.\n\nSELL (short) at market now\nSTOP-LOSS (buy stop) at {stop:.6g} "
+                f"({(stop - px) / px:.1%} above)\nPosition: Rs {equity * size_x:,.0f} ({size_x:.2f}x your "
+                f"Rs {equity:,.0f}; set the exchange leverage to 5x)\nRisk: Rs {equity * RISK:,.0f} (1%)\n\n"
+                f"Exit: a 4h close above the 10-bar high (you will get an alert).", True)
+    if "SHORTED at" in event and st.get("status") == "short":
+        return (f"{name}: paper short at {st['entry']:.6g}",
+                f"Paper book sold {name} short at {st['entry']:.6g}.\nStop {st['stop']:.6g}\n"
+                f"Position {st['size_x']:.2f}x equity = Rs {equity * st['size_x']:,.0f}", False)
+    if "above the 10-bar high" in event:
+        return f"{name}: BUY BACK (close short) now", event + "\nClose the short at market now.", True
+    if "COVERED" in event:
+        return f"{name}: short closed", event, False
     if "BOUGHT at" in event and st.get("status") == "long":
         return (f"{name}: paper entry at {st['entry']:.6g}",
                 f"Paper book bought {name} at {st['entry']:.6g}.\nStop {st['stop']:.6g}\n"
@@ -294,14 +351,20 @@ def write_report(book, now, events, sources):
         st = s.get("status", "flat")
         if st == "long":
             info = f"LONG from {s['entry']:.6g}, stop {s['stop']:.6g}, since {ist(s['entry_time'])}"
+        elif st == "short":
+            info = f"SHORT from {s['entry']:.6g}, stop {s['stop']:.6g}, since {ist(s['entry_time'])}"
         elif st == "enter_next":
             info = f"BUY at the next open (breakout above {s['level']:.6g})"
+        elif st == "enter_short_next":
+            info = f"SELL SHORT at the next open (breakdown below {s['level']:.6g})"
         elif st == "exit_next":
             info = "selling at the next open"
+        elif st == "cover_next":
+            info = "buying back at the next open"
         else:
-            info = "waiting for a 4h breakout"
+            info = "waiting for a 4h breakout" + (" or breakdown" if sym in SHORT_SYMBOLS else "")
         rows.append(f"<tr><td>{sym}</td><td>{info}</td><td>{sources.get(sym, '')}</td></tr>")
-    trows = "".join(f"<tr><td>{ist(t['entry_time'])}</td><td>{t['symbol']}</td><td>{t['entry']:.6g}</td>"
+    trows = "".join(f"<tr><td>{ist(t['entry_time'])}</td><td>{t['symbol']} {t.get('side', 'long')}</td><td>{t['entry']:.6g}</td>"
                     f"<td>{t['exit']:.6g}</td><td>{t['why']}</td><td>{t['r']:+.2f}R</td></tr>"
                     for t in sorted(trades, key=lambda t: t["exit_time"], reverse=True)[:50])
     ev = "".join(f"<li>{e}</li>" for e in reversed(book.get("events", [])[-20:]))
@@ -317,10 +380,12 @@ table{{border-collapse:collapse;width:100%}}td,th{{border-bottom:1px solid #ddd;
 <h3>Markets now</h3><table><tr><th>market</th><th>state</th><th>data</th></tr>{''.join(rows)}</table>
 <h3>Latest events</h3><ul>{ev or '<li>none yet</li>'}</ul>
 <h3>Closed trades</h3><table><tr><th>entered</th><th>market</th><th>entry</th><th>exit</th><th>why</th><th>R</th></tr>{trows}</table>
-<p><b>Rules (research/fx_crypto/STEP14_STRATEGY_SEARCH.md):</b> BTC, ETH, SOL and gold perpetuals. Buy at the next
-open after a 4h close above the 40-bar high. Stop 1.5 ATR(4h) below the entry. Sell at the next open after a 4h close
-below the 30-bar low. Position sized so the stop loses 1% of the account. Real prices 2021-24: +1.30R a trade;
-held-out 2025-26: +0.72R; about 1 trade in 4 wins.</p>"""
+<p><b>Rules (research/fx_crypto/STEP14_STRATEGY_SEARCH.md, STEP17_SHORTS.md):</b> BTC, ETH, SOL and gold perpetuals.
+Long: buy at the next open after a 4h close above the 40-bar high; stop 1.5 ATR(4h) below; sell after a 4h close below
+the 30-bar low. Short (BTC, ETH, SOL only, and only while the daily close is below its 100-day average): sell at the
+next open after a 4h close below the 20-bar low; stop 1.5 ATR above; buy back after a 4h close above the 10-bar high.
+Position sized so the stop loses 1% of the account. Long and short together on real prices: 2021-24 +0.87R a trade,
+held-out 2025-26 +0.52R; about 1 trade in 4 wins.</p>"""
     (REPORT_DIR / "trend.html").write_text(html)
 
 
@@ -439,8 +504,9 @@ def run():
     elif book is not old:
         book["test_alert"] = TEST_ALERT
         notify(topic, "Trend book: new rules",
-               "Paper book restarted: BTC, ETH, SOL, gold. 4h 40-bar breakout, 1.5 ATR stop, "
-               "30-bar exit, 1% risk. Forex and leverage tiers removed.")
+               "Paper book restarted with SHORTS added: BTC, ETH, SOL can now be sold short when a 4h candle "
+               "closes below its 20-bar low in a downtrend (below the 100-day average). Longs unchanged: "
+               "4h 40-bar breakout, 1.5 ATR stop, 30-bar exit, 1% risk. You get SELL SHORT / BUY BACK alerts too.")
     trades_so_far = [t for st_ in book["markets"].values() for t in st_.get("closed", [])]
     equity = _equity(trades_so_far)
     sources, new_events = {}, []
@@ -459,6 +525,11 @@ def run():
         # What the next 4h close must beat: shown in the app as the entry and exit levels.
         st.update(price=float(m15.close.iloc[-1]), price_time=str(m15.index[-1] + pd.Timedelta("15min")),
                   buy_above=float(h4.high.iloc[-N_IN:].max()), sell_below=float(h4.low.iloc[-N_OUT:].min()))
+        if sym in SHORT_SYMBOLS:
+            sma = d1.close.rolling(S_SMA).mean()
+            st.update(short_below=float(h4.low.iloc[-S_IN:].min()), cover_above=float(h4.high.iloc[-S_OUT:].max()),
+                      downtrend=bool(len(d1) >= S_SMA and d1.close.iloc[-1] < sma.iloc[-1]),
+                      sma100=float(sma.iloc[-1]) if np.isfinite(sma.iloc[-1]) else None)
         time.sleep(0.2)
     if book.get("test_alert") != TEST_ALERT:
         book["test_alert"] = TEST_ALERT

@@ -36,8 +36,10 @@ def main():
         rows += st.get("closed", [])
     t = pd.DataFrame(rows)
     t["period"] = (pd.to_datetime(t.exit_time, utc=True) >= SPLIT).map({False: "2021-24", True: "2025-26"})
-    out = t.groupby(["symbol", "period"]).r.agg(trades="size", avg_r="mean", total_r="sum").round(2)
+    t["side"] = t.get("side", "long")
+    out = t.groupby(["symbol", "side", "period"]).r.agg(trades="size", avg_r="mean", total_r="sum").round(2)
     print(out.to_string())
+    print(t.groupby(["side", "period"]).r.agg(trades="size", avg_r="mean", total_r="sum").round(2).to_string())
     print(t.groupby("period").r.agg(trades="size", avg_r="mean").round(2).to_string())
 
 
