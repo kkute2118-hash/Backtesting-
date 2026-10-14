@@ -3,7 +3,8 @@
   "USDJPY|2026-10-06 23:45:00+00:00|1",
   "AUDUSD|2026-10-07 10:30:00+00:00|-1",
   "AUDUSD|2026-10-08 11:00:00+00:00|-1",
-  "GBPUSD|2026-10-14 17:00:00+00:00|1"
+  "GBPUSD|2026-10-14 17:00:00+00:00|1",
+  "EURUSD|2026-10-14 17:00:00+00:00|1"
  ],
  "trades": {
   "EURUSD|2026-10-05 13:30:00+00:00|-1": {
@@ -41,9 +42,47 @@
    "status": "closed"
   }
  },
- "updated": "2026-10-14T17:23+00:00",
+ "updated": "2026-10-14T17:50+00:00",
  "errors": [],
  "pending": [
+  {
+   "symbol": "EURUSD",
+   "family": "continuation",
+   "direction": 1,
+   "event_time": "2026-10-14 17:00:00+00:00",
+   "event": "run",
+   "pool_kind": "swing",
+   "htf_regime": "bull",
+   "htf_aligned": true,
+   "msb": "n/a",
+   "displacement": true,
+   "fvg": false,
+   "zone": "level",
+   "discount_ok": "True",
+   "ote": false,
+   "entry_method": "limit",
+   "entry_time": "",
+   "entry": 1.1126667857142858,
+   "stop": 1.1120832142857142,
+   "tp1": 1.12214,
+   "tp2": 1.12786,
+   "rr1": 16.23,
+   "rr2": 26.03,
+   "score": 71,
+   "decision": "",
+   "reject_reason": "",
+   "exit_time": "",
+   "outcome": "",
+   "r": 0.0,
+   "mae_r": 0.0,
+   "mfe_r": 0.0,
+   "hold_minutes": 0,
+   "cost_r": 0.0,
+   "extras": {},
+   "expires": "2026-10-14 23:00:00+00:00",
+   "grade": "watchlist",
+   "id": "EURUSD|2026-10-14 17:00:00+00:00|1"
+  },
   {
    "symbol": "GBPUSD",
    "family": "continuation",
@@ -61,12 +100,12 @@
    "ote": false,
    "entry_method": "limit",
    "entry_time": "",
-   "entry": 1.315760642857143,
-   "stop": 1.315229357142857,
+   "entry": 1.3157510714285714,
+   "stop": 1.3152389285714285,
    "tp1": 1.32964,
    "tp2": 1.32964,
-   "rr1": 26.12,
-   "rr2": 26.12,
+   "rr1": 27.12,
+   "rr2": 27.12,
    "score": 71,
    "decision": "",
    "reject_reason": "",
@@ -85,24 +124,24 @@
  ],
  "prices": {
   "EURUSD": {
-   "price": 1.11324,
-   "bar": "2026-10-14T17:15:00+00:00"
+   "price": 1.11378,
+   "bar": "2026-10-14T17:45:00+00:00"
   },
   "GBPUSD": {
-   "price": 1.31654,
-   "bar": "2026-10-14T17:15:00+00:00"
+   "price": 1.31696,
+   "bar": "2026-10-14T17:45:00+00:00"
   },
   "USDJPY": {
-   "price": 158.68925,
-   "bar": "2026-10-14T17:15:00+00:00"
+   "price": 158.6,
+   "bar": "2026-10-14T17:45:00+00:00"
   },
   "AUDUSD": {
-   "price": 0.69621,
-   "bar": "2026-10-14T17:15:00+00:00"
+   "price": 0.69632,
+   "bar": "2026-10-14T17:45:00+00:00"
   },
   "XAUUSD": {
-   "price": 4080.69667,
-   "bar": "2026-10-14T17:15:00+00:00"
+   "price": 4084.65482,
+   "bar": "2026-10-14T17:45:00+00:00"
   }
  }
 }
