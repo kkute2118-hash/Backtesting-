@@ -1,5 +1,5 @@
 import {
-  Activity, BarChart3, Brain, Database, Eye, Layers, LayoutDashboard, Radar,
+  Activity, BarChart3, Brain, ClipboardCheck, Database, Eye, Layers, LayoutDashboard, Radar,
   Settings, Target, TestTube2, TrendingUp, Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -45,6 +45,8 @@ export const NAV: NavGroup[] = [
     items: [
       { href: "/forward", label: "Forward Tests", icon: Activity,
         description: "Live P/L on recorded signals" },
+      { href: "/front-test", label: "Front Test", icon: ClipboardCheck,
+        description: "Every paper-traded strategy against its backtest" },
       { href: "/trading", label: "Live Signals", icon: Zap,
         description: "4h charts and signals for BTC, ETH, SOL and gold" },
       { href: "/crypto", label: "Crypto Trading", icon: TrendingUp,
