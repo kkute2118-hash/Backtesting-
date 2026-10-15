@@ -1,0 +1,223 @@
+Save each picture as its scene id (s01.png ... s71.png) in the images folder.
+
+STEP 0 - make the character sheet first, then attach it as a reference image to every prompt that mentions GAPPU KAKA (Gemini app / Google AI Studio both accept a reference image).
+
+CHARACTER SHEET
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. Character turnaround sheet on a plain light background: front view, side view, happy, shocked, angry and laughing expressions of GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s01  (मिलिए गप्पू काका से)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA waving cheerfully at the viewer, sitting on a brick doorstep in an ancient brick town street, morning light | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s02  (मिलिए गप्पू काका से)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA proudly pointing behind him at a big planned brick city with straight streets, wide shot | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s03  (मिलिए गप्पू काका से)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA laughing with his hands on his belly, two confused modern kids staring at him | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s04  (मिलिए गप्पू काका से)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Egyptian workers struggling to push a huge stone block toward a half-built pyramid, a pharaoh shouting orders
+
+s05  (मिलिए गप्पू काका से)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. bird's-eye cartoon view of a tidy grid city with straight streets, brick houses with courtyards and covered drains along the streets
+
+s06  (मिलिए गप्पू काका से)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon cross-section of a hill showing a whole brick city buried under layers of soil, a sleeping cartoon cat on top of the hill
+
+s07  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA leaning toward the viewer with a sly smile, one finger raised as if telling a secret | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s08  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon 1850s British railway engineer in a pith helmet and moustache pointing at a map, Indian workers with shovels beside an unfinished railway line
+
+s09  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. excited cartoon worker holding up an old baked brick next to a big mound full of bricks, other workers peeking
+
+s10  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA facepalming while a cartoon steam train rolls over a track laid on ancient bricks | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s11  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon British officer shrugging while holding an ancient brick, a speech-less puzzled look
+
+s12  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Indian archaeologist in a 1920s coat and round glasses carefully brushing soil from a brick wall in a trench at Harappa
+
+s13  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon archaeologist jumping with joy on top of a dusty mound with a ruined stupa, brick walls appearing below
+
+s14  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. simple cartoon map of the Indus river with two little city icons far apart along the river, a dotted line between them, no text
+
+s15  (ईंटों वाली रेल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon crowd of 1920s scholars and reporters with jaws dropped, a British archaeologist holding up a small square seal
+
+s16  (हमारा इलाका)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA puffing out his chest proudly with hands on his hips | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s17  (हमारा इलाका)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. simple cartoon map of north-west South Asia with many small glowing dots spread along rivers and down to Gujarat, no text
+
+s18  (हमारा इलाका)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. three cartoon characters side by side: an Egyptian, a Mesopotamian and GAPPU KAKA, Gappu standing on a box to look tallest | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s19  (हमारा इलाका)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon timeline drawn as a long rope with three knots, small city icons growing bigger in the middle section, no text
+
+s20  (हमारा इलाका)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA sipping from a clay cup while cartoon kings in crowns of different eras rush past him in a line | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s21  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA walking and waving the viewer along a straight brick-lined street, townsfolk going about their day | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s22  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Harappan town planners stretching a measuring cord across the ground, a simple grid drawn in the dirt | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s23  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon brick maker proudly stacking identical bricks next to a kiln, one brick being checked against a stick
+
+s24  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Harappan woman with many bangles holding a crooked brick and scolding a sheepish young GAPPU with a black beard | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s25  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA scratching his head with an embarrassed grin | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s26  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA presenting a covered brick drain with both arms like a showman, sparkles around the drain | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s27  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon cutaway of a house with a small drain flowing into a covered street drain, a worker cleaning an inspection pit
+
+s28  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. split cartoon: left side a neat ancient covered drain with Gappu smiling, right side a modern street with an open overflowing drain and a man holding his nose
+
+s29  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon two-storey brick house with an open courtyard, a family cooking, kids on wooden stairs to the roof | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s30  (स्मार्ट शहर)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Harappan woman pulling a clay pot of water from a round brick well in her courtyard, smiling | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s31  (महान स्नानागार)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon raised brick mound with a large rectangular pool building on top, townsfolk climbing steps toward it | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s32  (महान स्नानागार)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Great Bath filled with water, steps going down at both ends, a row of brick pillars around it
+
+s33  (महान स्नानागार)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon workers sealing brick joints with black sticky tar, one worker with tar stuck on his hand looking annoyed
+
+s34  (महान स्नानागार)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA zipping his lips with a cheeky smile | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s35  (महान स्नानागार)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon people in white cotton walking calmly down the steps into the Great Bath at sunrise | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s36  (महान स्नानागार)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. two cartoon modern scholars arguing in front of a large brick platform, one holding a sack of grain, the other pointing at a hall
+
+s37  (धोलावीरा और लोथल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. simple cartoon map of Gujarat with an island in a salt desert and a little city icon on it, no text
+
+s38  (धोलावीरा और लोथल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon townsfolk cheering as monsoon rain fills a huge stone-cut reservoir with steps | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s39  (धोलावीरा और लोथल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon city gate with a long wooden board of ten big white abstract symbols above it, a visitor looking up at it
+
+s40  (धोलावीरा और लोथल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA holding a shiny medal and grinning in front of ruined stone walls of Dholavira | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s41  (धोलावीरा और लोथल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon brick dock basin with small wooden boats, workers unloading pots and bundles of cotton
+
+s42  (धोलावीरा और लोथल)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. three cartoon scholars each pointing at the same basin and shouting different things, Gappu in the middle with hands over his ears
+
+s43  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon busy riverside market with traders selling beads, pottery and cotton cloth
+
+s44  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. simple cartoon map with a dotted sea route and a little reed boat sailing from the Indus delta to Mesopotamia, no text
+
+s45  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon Mesopotamian buyer with a long curly beard bargaining with GAPPU over a red carnelian bead necklace | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s46  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon balance scale with a row of neat cube-shaped stone weights of increasing size
+
+s47  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. close-up cartoon of a square stone seal with a one-horned bull-like animal and a row of simple abstract symbols, held in Gappu's hand
+
+s48  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon modern professor at a messy desk surrounded by papers covered in symbols, scratching his head with a pencil
+
+s49  (व्यापार और लिपि)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA winking and holding the seal behind his back while the professor reaches for it | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s50  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon lively morning street with potters, bead makers, children playing and a woman grinding grain | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s51  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon farmers in a cotton and wheat field beside a river, an ox pulling a plough | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s52  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon bead maker squinting through a tiny bead while drilling it with a bow drill
+
+s53  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon young Harappan woman standing confidently with one hand on her hip and an arm full of bangles, posing proudly | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s54  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon bearded man with a patterned shawl and headband posing stiffly like a statue, Gappu next to him whispering behind his hand
+
+s55  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon kids racing small clay bullock carts on wheels in a courtyard, one blowing a clay whistle | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s56  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA looking around with a telescope over a city skyline of plain uniform houses, no palace in sight | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s57  (हमारी ज़िंदगी)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon council of elders and merchants sitting in a circle in a brick hall, arguing politely
+
+s58  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA sitting alone on a broken wall, looking sad, dusty orange sky | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s59  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon half-empty city street with cracked walls, a lone dog and a few people leaving | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s60  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon 1940s British archaeologist dramatically pointing at a few skeletons in a trench, wearing a pith helmet
+
+s61  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon modern scientist in a lab coat examining a skull with a magnifying glass and shaking her head
+
+s62  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon cracked dry field with a tiny sad cloud dropping a single raindrop, farmers looking up hopefully | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s63  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. simple cartoon map with one river fading into a dry dotted line while settlement dots around it go dim, no text
+
+s64  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon families walking east with bullock carts and goats, the brick city fading behind them at sunset | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s65  (शहर खाली क्यों हुए)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon small village of mud huts at dawn, smoke rising, GAPPU KAKA sitting under a tree telling stories to kids | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s66  (हम आज भी यहीं हैं)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. split cartoon: an ancient Harappan woman with white bangles on the left and a modern Indian village woman with similar bangles on the right, both smiling | Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths
+
+s67  (हम आज भी यहीं हैं)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon modern Indian village scene with a bullock cart, clay pots drying in the sun and a cotton field
+
+s68  (हम आज भी यहीं हैं)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. cartoon modern archaeologists under a tent carefully brushing a brick wall, GAPPU KAKA peeking over their shoulders | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s69  (हम आज भी यहीं हैं)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA holding a glowing seal up to the night sky, stars above the ruins of Mohenjo-daro | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s70  (हम आज भी यहीं हैं)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA pretending to be angry with crossed arms and puffed cheeks, then peeking with one eye | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+s71  (हम आज भी यहीं हैं)
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA leaning close to the viewer with a hand cupped behind his ear, waiting for an answer | GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands
+
+THUMBNAIL
+flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles. GAPPU KAKA with a shocked wide-mouthed face in the foreground pointing at a glowing ancient brick city behind him, bright high-contrast cartoon, empty space on the right for big text
+Add the text in Canva: मैं 4500 साल पुराना हूँ!

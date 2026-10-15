@@ -95,4 +95,8 @@ storyteller "गप्पू काका") and a kids channel. Keep them separa
 videos are never "made for kids". Narration must be natural, human-sounding
 Hindi: eSpeak and MBROLA were tried and rejected. Use ElevenLabs (when it has
 credits), VoiceStudio, Google AI Studio (Gemini TTS) or the owner's own
-recordings.
+recordings. Google's Gemini API (generativelanguage.googleapis.com) IS reachable
+from cloud sessions: with `GEMINI_API_KEY` in the environment, natural Hindi
+narration can be made in-session (`youtube/history/ep01/tools/gemini_voice.py`,
+voices as in the MoneyPrinterTurbo fork). Episode projects live in `youtube/`;
+see `youtube/history/ep01/NEXT_SESSION.md`.

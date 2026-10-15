@@ -1,0 +1,570 @@
+{
+ "episode": 1,
+ "title_hi": "सिंधु घाटी सभ्यता: 5000 साल पुराना स्मार्ट शहर",
+ "youtube": {
+  "title": "मैं मोहनजोदड़ो में रहता था | सिंधु घाटी सभ्यता की पूरी कहानी (Cartoon) | Indus Valley Civilization in Hindi",
+  "tags": [
+   "सिंधु घाटी सभ्यता",
+   "हड़प्पा सभ्यता",
+   "मोहनजोदड़ो",
+   "Indus Valley Civilization in Hindi",
+   "Harappan civilization",
+   "Mohenjo daro",
+   "cartoon history Hindi",
+   "भारत का इतिहास",
+   "animated history Hindi",
+   "प्राचीन भारत"
+  ],
+  "category": "Education"
+ },
+ "voices": {
+  "n": {
+   "name": "गप्पू काका (narrator)",
+   "edge": "hi-IN-MadhurNeural",
+   "rate": "-4%",
+   "pitch": "-2Hz"
+  },
+  "f": {
+   "name": "women characters",
+   "edge": "hi-IN-SwaraNeural",
+   "rate": "+0%",
+   "pitch": "+0Hz"
+  },
+  "m": {
+   "name": "other men",
+   "edge": "hi-IN-MadhurNeural",
+   "rate": "+8%",
+   "pitch": "+6Hz"
+  }
+ },
+ "style": "flat 2D cartoon illustration, thick clean dark outlines, simple rounded characters with dot eyes and big expressive mouths, muted earthy colour palette with warm sand and brick tones, soft simple shading, webcomic-style history explainer, 16:9, no text, no speech bubbles",
+ "characters": {
+  "gappu": "GAPPU KAKA: a skinny old storyteller from Mohenjo-daro, long messy grey beard, bushy eyebrows, big toothy grin, thin off-white cotton cloth draped over one shoulder with torn edges, faded red headband, a single string of red carnelian beads, barefoot, very expressive hands",
+  "people": "Harappan townsfolk: simple knee-length off-white and ochre cotton wraps, women with many white shell bangles on the arms and beaded necklaces, men with short beards and headbands, children in simple loincloths"
+ },
+ "chapters": [
+  {
+   "id": "c01",
+   "title": "मिलिए गप्पू काका से",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "नमस्ते बच्चों... और बड़ों! मेरा नाम है गप्पू काका।",
+     "prompt": "GAPPU KAKA waving cheerfully at the viewer, sitting on a brick doorstep in an ancient brick town street, morning light",
+     "bubble": "नमस्ते!",
+     "id": "s01"
+    },
+    {
+     "speaker": "n",
+     "text": "मैं रहता था मोहनजोदड़ो में। जी हाँ, आज से करीब साढ़े चार हज़ार साल पहले।",
+     "prompt": "GAPPU KAKA proudly pointing behind him at a big planned brick city with straight streets, wide shot",
+     "id": "s02"
+    },
+    {
+     "speaker": "n",
+     "text": "आप सोच रहे होंगे, इतना बूढ़ा आदमी आज तक ज़िंदा कैसे है? अरे भाई, कहानी सुनाने वाले कभी मरते थोड़ी हैं!",
+     "prompt": "GAPPU KAKA laughing with his hands on his belly, two confused modern kids staring at him",
+     "bubble": "कहानी कभी नहीं मरती!",
+     "id": "s03"
+    },
+    {
+     "speaker": "n",
+     "text": "उस ज़माने में मिस्र वाले पिरामिड बना रहे थे। बड़े-बड़े पत्थर, बड़े-बड़े राजा, बड़ी-बड़ी बातें।",
+     "prompt": "cartoon Egyptian workers struggling to push a huge stone block toward a half-built pyramid, a pharaoh shouting orders",
+     "id": "s04"
+    },
+    {
+     "speaker": "n",
+     "text": "और हम? हम बना रहे थे ऐसे शहर, जिनमें सीधी सड़कें थीं, घर-घर में नहाने की जगह थी, और गंदा पानी ढकी नालियों से बाहर जाता था।",
+     "prompt": "bird's-eye cartoon view of a tidy grid city with straight streets, brick houses with courtyards and covered drains along the streets",
+     "id": "s05"
+    },
+    {
+     "speaker": "n",
+     "text": "फिर एक दिन हमारे शहर खाली हो गए, और हज़ारों साल तक मिट्टी के नीचे सोते रहे। कैसे? क्यों? चलो, शुरू से बताता हूँ।",
+     "prompt": "cartoon cross-section of a hill showing a whole brick city buried under layers of soil, a sleeping cartoon cat on top of the hill",
+     "card": "सिंधु घाटी सभ्यता",
+     "id": "s06"
+    }
+   ]
+  },
+  {
+   "id": "c02",
+   "title": "ईंटों वाली रेल",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "पहले सुनो हमें ढूँढा कैसे गया। ये कहानी बड़ी मज़ेदार है।",
+     "prompt": "GAPPU KAKA leaning toward the viewer with a sly smile, one finger raised as if telling a secret",
+     "id": "s07"
+    },
+    {
+     "speaker": "n",
+     "text": "अठारह सौ पचास के आसपास अंग्रेज़ पंजाब में रेल की पटरी बिछा रहे थे। पटरी के नीचे चाहिए थीं ईंटें।",
+     "prompt": "cartoon 1850s British railway engineer in a pith helmet and moustache pointing at a map, Indian workers with shovels beside an unfinished railway line",
+     "id": "s08"
+    },
+    {
+     "speaker": "m",
+     "text": "साहब! इस टीले में तो ढेर सारी पकी हुई ईंटें पड़ी हैं!",
+     "prompt": "excited cartoon worker holding up an old baked brick next to a big mound full of bricks, other workers peeking",
+     "bubble": "साहब, ईंटें!",
+     "id": "s09"
+    },
+    {
+     "speaker": "n",
+     "text": "और कहा जाता है, हमारी हज़ारों साल पुरानी ईंटें उठाकर रेल की पटरी के नीचे बिछा दी गईं।",
+     "prompt": "GAPPU KAKA facepalming while a cartoon steam train rolls over a track laid on ancient bricks",
+     "bubble": "मेरी ईंटें!",
+     "id": "s10"
+    },
+    {
+     "speaker": "n",
+     "text": "किसी को अंदाज़ा ही नहीं था कि ये ईंटें कितनी पुरानी हैं।",
+     "prompt": "cartoon British officer shrugging while holding an ancient brick, a speech-less puzzled look",
+     "id": "s11"
+    },
+    {
+     "speaker": "n",
+     "text": "फिर आया उन्नीस सौ इक्कीस। पुरातत्वविद दयाराम साहनी ने हड़प्पा में खुदाई शुरू की।",
+     "prompt": "cartoon Indian archaeologist in a 1920s coat and round glasses carefully brushing soil from a brick wall in a trench at Harappa",
+     "card": "1921 · हड़प्पा",
+     "id": "s12"
+    },
+    {
+     "speaker": "n",
+     "text": "और अगले ही साल, राखालदास बनर्जी को सिंध में मिला... मेरा शहर! मोहनजोदड़ो। मतलब, मुर्दों का टीला। नाम थोड़ा डरावना है, पर शहर बड़ा प्यारा था।",
+     "prompt": "cartoon archaeologist jumping with joy on top of a dusty mound with a ruined stupa, brick walls appearing below",
+     "card": "1922 · मोहनजोदड़ो",
+     "id": "s13"
+    },
+    {
+     "speaker": "n",
+     "text": "दोनों शहर सैकड़ों किलोमीटर दूर थे, पर ईंटें एक जैसी, मुहरें एक जैसी, नक्शा भी एक जैसा।",
+     "prompt": "simple cartoon map of the Indus river with two little city icons far apart along the river, a dotted line between them, no text",
+     "id": "s14"
+    },
+    {
+     "speaker": "n",
+     "text": "उन्नीस सौ चौबीस में जॉन मार्शल ने दुनिया को बताया: भारत में मिस्र जितनी पुरानी सभ्यता मिली है। और सब बोले... क्या?!",
+     "prompt": "cartoon crowd of 1920s scholars and reporters with jaws dropped, a British archaeologist holding up a small square seal",
+     "bubble": "क्या?!",
+     "id": "s15"
+    }
+   ]
+  },
+  {
+   "id": "c03",
+   "title": "हमारा इलाका",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "अब हम कोई छोटा-मोटा गाँव नहीं थे, समझे?",
+     "prompt": "GAPPU KAKA puffing out his chest proudly with hands on his hips",
+     "id": "s16"
+    },
+    {
+     "speaker": "n",
+     "text": "आज तक एक हज़ार से ज़्यादा जगहों पर हमारे निशान मिल चुके हैं। पाकिस्तान से लेकर गुजरात, राजस्थान, हरियाणा और पंजाब तक।",
+     "prompt": "simple cartoon map of north-west South Asia with many small glowing dots spread along rivers and down to Gujarat, no text",
+     "card": "1000+ जगहें",
+     "id": "s17"
+    },
+    {
+     "speaker": "n",
+     "text": "हमारा फैलाव मिस्र और मेसोपोटामिया दोनों से बड़ा माना जाता है।",
+     "prompt": "three cartoon characters side by side: an Egyptian, a Mesopotamian and GAPPU KAKA, Gappu standing on a box to look tallest",
+     "id": "s18"
+    },
+    {
+     "speaker": "n",
+     "text": "शुरुआत हुई करीब तीन हज़ार तीन सौ साल ईसा पूर्व, और हमारे सबसे बड़े शहर चमके लगभग दो हज़ार छह सौ से उन्नीस सौ ईसा पूर्व तक।",
+     "prompt": "cartoon timeline drawn as a long rope with three knots, small city icons growing bigger in the middle section, no text",
+     "card": "3300 ईसा पूर्व → 2600-1900 ईसा पूर्व",
+     "id": "s19"
+    },
+    {
+     "speaker": "n",
+     "text": "यानी करीब सात सौ साल तक शान से। इतने में तो आपके कितने ही राजा आए और गए!",
+     "prompt": "GAPPU KAKA sipping from a clay cup while cartoon kings in crowns of different eras rush past him in a line",
+     "id": "s20"
+    }
+   ]
+  },
+  {
+   "id": "c04",
+   "title": "स्मार्ट शहर",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "चलो, मेरे शहर की सैर करते हैं। सबसे पहले, सड़कें।",
+     "prompt": "GAPPU KAKA walking and waving the viewer along a straight brick-lined street, townsfolk going about their day",
+     "id": "s21"
+    },
+    {
+     "speaker": "n",
+     "text": "हमारी सड़कें ज़्यादातर उत्तर से दक्षिण और पूरब से पश्चिम चलती थीं। जैसे किसी ने पहले नक्शा बनाया हो, फिर शहर।",
+     "prompt": "cartoon Harappan town planners stretching a measuring cord across the ground, a simple grid drawn in the dirt",
+     "id": "s22"
+    },
+    {
+     "speaker": "n",
+     "text": "और ईंटें? सब एक नाप की। लंबाई, चौड़ाई, मोटाई का अनुपात लगभग चार, दो और एक।",
+     "prompt": "cartoon brick maker proudly stacking identical bricks next to a kiln, one brick being checked against a stick",
+     "card": "ईंट: 4 : 2 : 1",
+     "id": "s23"
+    },
+    {
+     "speaker": "f",
+     "text": "अरे गप्पू, ये ईंट टेढ़ी है! वापस ले जाओ।",
+     "prompt": "cartoon Harappan woman with many bangles holding a crooked brick and scolding a sheepish young GAPPU with a black beard",
+     "bubble": "टेढ़ी है!",
+     "id": "s24"
+    },
+    {
+     "speaker": "n",
+     "text": "हाँ हाँ, जवानी में मेरी ईंटें कभी-कभी टेढ़ी निकल जाती थीं। पर नियम सबके लिए एक था।",
+     "prompt": "GAPPU KAKA scratching his head with an embarrassed grin",
+     "id": "s25"
+    },
+    {
+     "speaker": "n",
+     "text": "और अब मेरी सबसे पसंदीदा चीज़: नालियाँ!",
+     "prompt": "GAPPU KAKA presenting a covered brick drain with both arms like a showman, sparkles around the drain",
+     "id": "s26"
+    },
+    {
+     "speaker": "n",
+     "text": "हर घर का गंदा पानी छोटी नाली से गली की बड़ी नाली में जाता था। ऊपर से ढकी हुई, और सफ़ाई के लिए जगह-जगह गड्ढे।",
+     "prompt": "cartoon cutaway of a house with a small drain flowing into a covered street drain, a worker cleaning an inspection pit",
+     "id": "s27"
+    },
+    {
+     "speaker": "n",
+     "text": "सोचो, साढ़े चार हज़ार साल पहले! आज भी कितने शहरों में खुली नालियाँ हैं, है ना?",
+     "prompt": "split cartoon: left side a neat ancient covered drain with Gappu smiling, right side a modern street with an open overflowing drain and a man holding his nose",
+     "id": "s28"
+    },
+    {
+     "speaker": "n",
+     "text": "घर पकी ईंटों के थे। कई घर दो मंज़िले, बीच में आँगन, और दरवाज़े छोटी गलियों में खुलते थे, ताकि मुख्य सड़क की धूल और शोर अंदर न आए।",
+     "prompt": "cartoon two-storey brick house with an open courtyard, a family cooking, kids on wooden stairs to the roof",
+     "id": "s29"
+    },
+    {
+     "speaker": "f",
+     "text": "और पानी के लिए दूर जाने की ज़रूरत नहीं थी। बहुत से घरों में अपना कुआँ था।",
+     "prompt": "cartoon Harappan woman pulling a clay pot of water from a round brick well in her courtyard, smiling",
+     "id": "s30"
+    }
+   ]
+  },
+  {
+   "id": "c05",
+   "title": "महान स्नानागार",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "शहर के ऊँचे हिस्से पर, जिसे आप गढ़ी कहते हो, बना था हमारा सबसे मशहूर तालाब: महान स्नानागार।",
+     "prompt": "cartoon raised brick mound with a large rectangular pool building on top, townsfolk climbing steps toward it",
+     "id": "s31"
+    },
+    {
+     "speaker": "n",
+     "text": "करीब बारह मीटर लंबा, सात मीटर चौड़ा, और ढाई मीटर गहरा। दोनों तरफ़ से सीढ़ियाँ।",
+     "prompt": "cartoon Great Bath filled with water, steps going down at both ends, a row of brick pillars around it",
+     "card": "12 × 7 मीटर · 2.4 मीटर गहरा",
+     "id": "s32"
+    },
+    {
+     "speaker": "n",
+     "text": "पानी रिसे नहीं, इसलिए ईंटों के बीच बिटुमेन, यानी प्राकृतिक डामर लगाया गया।",
+     "prompt": "cartoon workers sealing brick joints with black sticky tar, one worker with tar stuck on his hand looking annoyed",
+     "id": "s33"
+    },
+    {
+     "speaker": "n",
+     "text": "ये किस लिए था? सच कहूँ तो... ये मैं आपको नहीं बताऊँगा।",
+     "prompt": "GAPPU KAKA zipping his lips with a cheeky smile",
+     "bubble": "राज़ है!",
+     "id": "s34"
+    },
+    {
+     "speaker": "n",
+     "text": "मज़ाक कर रहा हूँ। असल में इतिहासकार भी पक्का नहीं जानते। ज़्यादातर मानते हैं कि ये किसी पवित्र या धार्मिक स्नान से जुड़ा था।",
+     "prompt": "cartoon people in white cotton walking calmly down the steps into the Great Bath at sunrise",
+     "id": "s35"
+    },
+    {
+     "speaker": "n",
+     "text": "पास में एक बड़ी इमारत भी थी, जिसे पहले अनाज का गोदाम कहा गया। अब कई विद्वान कहते हैं, नहीं, ये बड़ा हॉल था। बहस आज तक चल रही है।",
+     "prompt": "two cartoon modern scholars arguing in front of a large brick platform, one holding a sack of grain, the other pointing at a hall",
+     "id": "s36"
+    }
+   ]
+  },
+  {
+   "id": "c06",
+   "title": "धोलावीरा और लोथल",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "अब ज़रा गुजरात चलें। कच्छ के रण में एक द्वीप पर बसा था धोलावीरा।",
+     "prompt": "simple cartoon map of Gujarat with an island in a salt desert and a little city icon on it, no text",
+     "id": "s37"
+    },
+    {
+     "speaker": "n",
+     "text": "वहाँ पानी सोने से भी कीमती था। तो लोगों ने पत्थर काटकर बड़े-बड़े जलाशय बनाए, और बारिश की एक-एक बूँद जमा की।",
+     "prompt": "cartoon townsfolk cheering as monsoon rain fills a huge stone-cut reservoir with steps",
+     "id": "s38"
+    },
+    {
+     "speaker": "n",
+     "text": "वहाँ एक बड़ा साइनबोर्ड भी मिला। सिंधु लिपि के दस बड़े अक्षर। शायद शहर के दरवाज़े पर लगा था, जैसे आज लिखा होता है: स्वागत है!",
+     "prompt": "cartoon city gate with a long wooden board of ten big white abstract symbols above it, a visitor looking up at it",
+     "id": "s39"
+    },
+    {
+     "speaker": "n",
+     "text": "दो हज़ार इक्कीस में धोलावीरा को यूनेस्को विश्व धरोहर का दर्जा मिला।",
+     "prompt": "GAPPU KAKA holding a shiny medal and grinning in front of ruined stone walls of Dholavira",
+     "card": "UNESCO विश्व धरोहर · 2021",
+     "id": "s40"
+    },
+    {
+     "speaker": "n",
+     "text": "और गुजरात में ही है लोथल। वहाँ ईंटों का एक बड़ा बेसिन मिला, जिसे कई लोग दुनिया के सबसे पुराने बंदरगाहों में से एक मानते हैं।",
+     "prompt": "cartoon brick dock basin with small wooden boats, workers unloading pots and bundles of cotton",
+     "id": "s41"
+    },
+    {
+     "speaker": "n",
+     "text": "कुछ विद्वान कहते हैं कि ये बस पानी का टैंक था। इतिहास में अक्सर यही होता है: सबूत एक, राय अनेक।",
+     "prompt": "three cartoon scholars each pointing at the same basin and shouting different things, Gappu in the middle with hands over his ears",
+     "id": "s42"
+    }
+   ]
+  },
+  {
+   "id": "c07",
+   "title": "व्यापार और लिपि",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "और व्यापार में तो हमारा कोई जवाब नहीं था।",
+     "prompt": "cartoon busy riverside market with traders selling beads, pottery and cotton cloth",
+     "id": "s43"
+    },
+    {
+     "speaker": "n",
+     "text": "मेसोपोटामिया, यानी आज का इराक़। वहाँ के पुराने लेखों में एक देश का नाम आता है: मेलुहा। ज़्यादातर इतिहासकार मानते हैं, वो हम ही थे।",
+     "prompt": "simple cartoon map with a dotted sea route and a little reed boat sailing from the Indus delta to Mesopotamia, no text",
+     "card": "मेलुहा ➜ मेसोपोटामिया",
+     "id": "s44"
+    },
+    {
+     "speaker": "m",
+     "text": "भाई साहब, ये लाल मोती कितने के दिए?",
+     "prompt": "cartoon Mesopotamian buyer with a long curly beard bargaining with GAPPU over a red carnelian bead necklace",
+     "bubble": "कितने के?",
+     "id": "s45"
+    },
+    {
+     "speaker": "n",
+     "text": "मोती, शंख की चूड़ियाँ, कपास... सब जाता था। और तौल में कोई गड़बड़ नहीं। हमारे पास पत्थर के तय वज़न के बाट थे।",
+     "prompt": "cartoon balance scale with a row of neat cube-shaped stone weights of increasing size",
+     "id": "s46"
+    },
+    {
+     "speaker": "n",
+     "text": "और ये देखो, हमारी मुहर। एक सींग वाला जानवर, और ऊपर कुछ चिह्न।",
+     "prompt": "close-up cartoon of a square stone seal with a one-horned bull-like animal and a row of simple abstract symbols, held in Gappu's hand",
+     "id": "s47"
+    },
+    {
+     "speaker": "n",
+     "text": "ये है सिंधु लिपि। चार सौ से ज़्यादा अलग-अलग चिह्न मिल चुके हैं।",
+     "prompt": "cartoon modern professor at a messy desk surrounded by papers covered in symbols, scratching his head with a pencil",
+     "id": "s48"
+    },
+    {
+     "speaker": "n",
+     "text": "पर आज तक इसे कोई पढ़ नहीं पाया। और मैं? मैं बताऊँगा नहीं। कुछ राज़ राज़ ही अच्छे लगते हैं।",
+     "prompt": "GAPPU KAKA winking and holding the seal behind his back while the professor reaches for it",
+     "card": "सिंधु लिपि: आज तक अनपढ़ी",
+     "bubble": "नहीं बताऊँगा!",
+     "id": "s49"
+    }
+   ]
+  },
+  {
+   "id": "c08",
+   "title": "हमारी ज़िंदगी",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "अब बताता हूँ, हम आम लोग रहते कैसे थे।",
+     "prompt": "cartoon lively morning street with potters, bead makers, children playing and a woman grinding grain",
+     "id": "s50"
+    },
+    {
+     "speaker": "n",
+     "text": "हम खेती करते थे: गेहूँ, जौ, और कपास। कपड़े के लिए कपास के सबसे पुराने इस्तेमाल के सबूत हमारे इसी इलाके से मिलते हैं।",
+     "prompt": "cartoon farmers in a cotton and wheat field beside a river, an ox pulling a plough",
+     "id": "s51"
+    },
+    {
+     "speaker": "n",
+     "text": "और कारीगर? इतने बारीक मोती बनाते थे कि आज के लोग भी हैरान हैं।",
+     "prompt": "cartoon bead maker squinting through a tiny bead while drilling it with a bow drill",
+     "id": "s52"
+    },
+    {
+     "speaker": "f",
+     "text": "और मेरी काँसे की मूर्ति तो आपने देखी होगी। लोग मुझे नर्तकी कहते हैं।",
+     "prompt": "cartoon young Harappan woman standing confidently with one hand on her hip and an arm full of bangles, posing proudly",
+     "bubble": "नर्तकी!",
+     "id": "s53"
+    },
+    {
+     "speaker": "n",
+     "text": "एक और मूर्ति है, शॉल ओढ़े दाढ़ी वाले आदमी की। आप उसे पुजारी-राजा कहते हो। वो असल में कौन था, कोई नहीं जानता। शायद मेरा मामा हो!",
+     "prompt": "cartoon bearded man with a patterned shawl and headband posing stiffly like a statue, Gappu next to him whispering behind his hand",
+     "id": "s54"
+    },
+    {
+     "speaker": "n",
+     "text": "बच्चों के खिलौने भी थे: पहियों वाली मिट्टी की गाड़ियाँ, सीटियाँ, और सिर हिलाने वाले जानवर।",
+     "prompt": "cartoon kids racing small clay bullock carts on wheels in a courtyard, one blowing a clay whistle",
+     "id": "s55"
+    },
+    {
+     "speaker": "n",
+     "text": "एक मज़ेदार बात: हमारे यहाँ बाकी सभ्यताओं जैसे बड़े महल या विशाल मंदिर साफ़-साफ़ नहीं मिले। हथियार भी कम।",
+     "prompt": "GAPPU KAKA looking around with a telescope over a city skyline of plain uniform houses, no palace in sight",
+     "id": "s56"
+    },
+    {
+     "speaker": "n",
+     "text": "तो राज कौन करता था? शायद व्यापारी, शायद बड़ों की कोई सभा। पर ये अभी तक अनुमान ही है।",
+     "prompt": "cartoon council of elders and merchants sitting in a circle in a brick hall, arguing politely",
+     "id": "s57"
+    }
+   ]
+  },
+  {
+   "id": "c09",
+   "title": "शहर खाली क्यों हुए",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "अब आता है वो हिस्सा जो मुझे सबसे कम पसंद है।",
+     "prompt": "GAPPU KAKA sitting alone on a broken wall, looking sad, dusty orange sky",
+     "id": "s58"
+    },
+    {
+     "speaker": "n",
+     "text": "करीब उन्नीस सौ ईसा पूर्व के बाद, हमारे बड़े शहर धीरे-धीरे खाली होने लगे।",
+     "prompt": "cartoon half-empty city street with cracked walls, a lone dog and a few people leaving",
+     "id": "s59"
+    },
+    {
+     "speaker": "n",
+     "text": "पहले एक अंग्रेज़ साहब ने कहा था कि बाहर से हमलावर आए और सबको मार डाला।",
+     "prompt": "cartoon 1940s British archaeologist dramatically pointing at a few skeletons in a trench, wearing a pith helmet",
+     "bubble": "हमला हुआ!",
+     "id": "s60"
+    },
+    {
+     "speaker": "n",
+     "text": "पर बाद की जाँच में पता चला कि वो कंकाल अलग-अलग समय के थे। किसी एक बड़े कत्लेआम का पक्का सबूत नहीं मिला। आज ज़्यादातर विद्वान ये बात नहीं मानते।",
+     "prompt": "cartoon modern scientist in a lab coat examining a skull with a magnifying glass and shaking her head",
+     "id": "s61"
+    },
+    {
+     "speaker": "n",
+     "text": "असल वजह थी, मौसम। मानसून कमज़ोर पड़ गया, बारिश कम होने लगी।",
+     "prompt": "cartoon cracked dry field with a tiny sad cloud dropping a single raindrop, farmers looking up hopefully",
+     "id": "s62"
+    },
+    {
+     "speaker": "n",
+     "text": "नदियों ने रास्ते बदल लिए। घग्गर-हकरा जैसी नदियाँ सूखने लगीं, जिनके किनारे हमारे बहुत से गाँव थे।",
+     "prompt": "simple cartoon map with one river fading into a dry dotted line while settlement dots around it go dim, no text",
+     "card": "घग्गर-हकरा",
+     "id": "s63"
+    },
+    {
+     "speaker": "n",
+     "text": "खेती घटी, व्यापार घटा, तो लोग बड़े शहर छोड़कर पूरब और दक्षिण के छोटे गाँवों में जा बसे।",
+     "prompt": "cartoon families walking east with bullock carts and goats, the brick city fading behind them at sunset",
+     "id": "s64"
+    },
+    {
+     "speaker": "n",
+     "text": "तो हम किसी एक दिन में खत्म नहीं हुए। हम बस बदल गए, और गाँवों में बिखर गए।",
+     "prompt": "cartoon small village of mud huts at dawn, smoke rising, GAPPU KAKA sitting under a tree telling stories to kids",
+     "id": "s65"
+    }
+   ]
+  },
+  {
+   "id": "c10",
+   "title": "हम आज भी यहीं हैं",
+   "shots": [
+    {
+     "speaker": "n",
+     "text": "और सच पूछो तो, हम पूरी तरह गए भी नहीं।",
+     "prompt": "split cartoon: an ancient Harappan woman with white bangles on the left and a modern Indian village woman with similar bangles on the right, both smiling",
+     "id": "s66"
+    },
+    {
+     "speaker": "n",
+     "text": "चूड़ियाँ, बैलगाड़ी, मिट्टी के बर्तन, कपास... ये सब आज भी आपके गाँवों में दिखते हैं।",
+     "prompt": "cartoon modern Indian village scene with a bullock cart, clay pots drying in the sun and a cotton field",
+     "id": "s67"
+    },
+    {
+     "speaker": "n",
+     "text": "हरियाणा के राखीगढ़ी में आज भी खुदाई चल रही है। हर नई खोज मेरी कहानी में एक नया पन्ना जोड़ती है।",
+     "prompt": "cartoon modern archaeologists under a tent carefully brushing a brick wall, GAPPU KAKA peeking over their shoulders",
+     "id": "s68"
+    },
+    {
+     "speaker": "n",
+     "text": "और जिस दिन कोई हमारी लिपि पढ़ लेगा... उस दिन शायद हम खुद आपको अपनी कहानी सुनाएँगे। तब तक, मैं हूँ ना!",
+     "prompt": "GAPPU KAKA holding a glowing seal up to the night sky, stars above the ruins of Mohenjo-daro",
+     "bubble": "मैं हूँ ना!",
+     "id": "s69"
+    },
+    {
+     "speaker": "n",
+     "text": "अगली बार सुनाऊँगा मोहनजोदड़ो के अंत की पूरी कहानी, और उस पर चल रही सबसे बड़ी बहस। चैनल सब्सक्राइब कर लेना, वरना गप्पू काका नाराज़ हो जाएँगे!",
+     "prompt": "GAPPU KAKA pretending to be angry with crossed arms and puffed cheeks, then peeking with one eye",
+     "card": "अगला एपिसोड: मोहनजोदड़ो का अंत",
+     "id": "s70"
+    },
+    {
+     "speaker": "n",
+     "text": "और कमेंट में बताओ: तुम्हें क्या लगता है, हमारी लिपि में क्या लिखा होगा?",
+     "prompt": "GAPPU KAKA leaning close to the viewer with a hand cupped behind his ear, waiting for an answer",
+     "bubble": "बताओ!",
+     "id": "s71"
+    }
+   ]
+  }
+ ],
+ "thumbnail": {
+  "prompt": "GAPPU KAKA with a shocked wide-mouthed face in the foreground pointing at a glowing ancient brick city behind him, bright high-contrast cartoon, empty space on the right for big text",
+  "text": "मैं 4500 साल पुराना हूँ!"
+ },
+ "sources": [
+  "Jonathan Mark Kenoyer, Ancient Cities of the Indus Valley Civilization (Oxford University Press, 1998)",
+  "Upinder Singh, A History of Ancient and Early Medieval India (Pearson, 2008), ch. 4",
+  "Gregory L. Possehl, The Indus Civilization: A Contemporary Perspective (AltaMira, 2002)",
+  "Giosan et al., 'Fluvial landscapes of the Harappan civilization', PNAS 109 (2012)",
+  "UNESCO World Heritage List: Dholavira, a Harappan City (inscribed 2021)",
+  "Archaeological Survey of India: Lothal, Dholavira, Rakhigarhi site notes"
+ ]
+}
