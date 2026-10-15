@@ -60,3 +60,39 @@ stay inside Oracle's **Always Free** allowance, always:
 - **The journal** (collection `journal` in the artifact's database) is the
   owner's real trades: read it, never write it unless asked. Republish the
   page without `capabilities` so its storage rules carry forward.
+
+## The owner's tool forks: check them first, in every session
+
+The owner keeps forks of agent and media tools under `github.com/kkute2118-hash/`.
+At the start of any task, check whether one of them does the job better than
+building from scratch, and use it. They are public, so a session can clone
+them (`git clone --depth 1 https://github.com/kkute2118-hash/<repo>`; prefix
+`GIT_LFS_SKIP_SMUDGE=1`). Do not push to them unless asked.
+
+| Fork | Use it for |
+|---|---|
+| `OmniRoute` | One OpenAI-compatible gateway over many providers' free tiers: chat, `/v1/audio/speech` (TTS: ElevenLabs, Cartesia, Deepgram, …), images, video. Needs the owner's provider keys and a host the session can reach. |
+| `VoiceStudio` | Local voice cloning, voice design and TTS in 600+ languages, Hindi included (OmniVoice engine). Best free natural Hindi voice; models download from Hugging Face. |
+| `remotion`, `hyperframes` | Programmatic video (React / HTML -> MP4) for YouTube work. |
+| `youtube-agent-skill` | YouTube channel workflows. |
+| `superpowers`, `ECC` | Plan -> test -> implement -> review methodology skills for coding agents. |
+| `code-review-graph` | Structural code map over MCP so reviews read only touched files. |
+| `claude-mem` | Persistent memory across sessions. |
+| `ui-ux-pro-max-skill` | Design-system guidance for UI work. |
+| `geo-seo-claude` | SEO / AI-search optimisation (video titles, descriptions). |
+| `OpenShell`, `OpenBB`, `jugaad-data`, `flutter` | Sandboxed agents; market data (OpenBB, NSE via jugaad-data); mobile apps. |
+
+Cloud sessions block Hugging Face, ModelScope, GitHub release downloads and
+most speech APIs, so model-based tools (VoiceStudio, OmniRoute's providers)
+usually cannot run inside the session. In that case say so plainly, run what
+does work, and hand the owner the exact steps to run the rest on their own
+machine or the Oracle server.
+
+## YouTube projects
+
+The owner runs two channels: an Indian history channel (Hindi, cartoon
+storyteller "गप्पू काका") and a kids channel. Keep them separate; history
+videos are never "made for kids". Narration must be natural, human-sounding
+Hindi: eSpeak and MBROLA were tried and rejected. Use ElevenLabs (when it has
+credits), VoiceStudio, Google AI Studio (Gemini TTS) or the owner's own
+recordings.
