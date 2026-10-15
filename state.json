@@ -42,29 +42,24 @@
    "status": "closed"
   }
  },
- "updated": "2026-10-15T16:31+00:00",
- "errors": [],
+ "updated": "2026-10-15T16:46+00:00",
+ "errors": [
+  "GBPUSD: Twelve Data 404 **symbol** GBP/USD is not available with your plan. You may select the appropriate plan at https://twelvedata.com/pricing",
+  "AUDUSD: Twelve Data 404 **symbol** AUD/USD is not available with your plan. You may select the appropriate plan at https://twelvedata.com/pricing"
+ ],
  "pending": [],
  "prices": {
   "EURUSD": {
-   "price": 1.12083,
-   "bar": "2026-10-15T16:25:00+00:00"
-  },
-  "GBPUSD": {
-   "price": 1.3257,
-   "bar": "2026-10-15T16:25:00+00:00"
+   "price": 1.12077,
+   "bar": "2026-10-15T16:40:00+00:00"
   },
   "USDJPY": {
-   "price": 158.11872,
-   "bar": "2026-10-15T16:25:00+00:00"
-  },
-  "AUDUSD": {
-   "price": 0.69112,
-   "bar": "2026-10-15T16:25:00+00:00"
+   "price": 158.09126,
+   "bar": "2026-10-15T16:40:00+00:00"
   },
   "XAUUSD": {
-   "price": 4152.5671,
-   "bar": "2026-10-15T16:25:00+00:00"
+   "price": 4149.04843,
+   "bar": "2026-10-15T16:40:00+00:00"
   }
  }
 }
