@@ -67,7 +67,7 @@ def chapter_body(ch):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("script"); ap.add_argument("out")
-    ap.add_argument("--model", default="gemini-2.5-pro-preview-tts")
+    ap.add_argument("--model", default="gemini-2.5-flash-preview-tts")  # free tier; pro TTS may need billing
     ap.add_argument("--only", nargs="*")
     a = ap.parse_args()
     key = os.environ.get("GEMINI_API_KEY", "")   # empty when a network secret supplies the header
