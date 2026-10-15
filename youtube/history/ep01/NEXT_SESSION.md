@@ -14,7 +14,7 @@ environment:
         --no-tts --burn-subs --font FreeSans --out out/episode01.mp4
 
 Voices (same set MoneyPrinterTurbo uses): Algenib = Gappu Kaka, Sulafat = women,
-Puck = worker/trader; model gemini-2.5-flash-preview-tts (free tier). Never set up Google billing:
+Puck = worker/trader; model gemini-3.8-flash-tts (free tier; two-speaker chapters are made one voice at a time and joined). Never set up Google billing:
 the owner wants this free.
 Then compress under 30 MB for sending (two-pass x264 ~360k) and update the
 chapter times in youtube_upload.txt from out/episode01.chapters.txt.

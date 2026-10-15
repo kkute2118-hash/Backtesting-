@@ -67,7 +67,7 @@ def chapter_body(ch):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("script"); ap.add_argument("out")
-    ap.add_argument("--model", default="gemini-2.5-flash-preview-tts")  # free tier; pro TTS may need billing
+    ap.add_argument("--model", default="gemini-3.8-flash-tts")  # free tier; pro TTS may need billing
     ap.add_argument("--only", nargs="*")
     a = ap.parse_args()
     key = os.environ.get("GEMINI_API_KEY", "")   # empty when a network secret supplies the header
@@ -78,12 +78,35 @@ def main():
         dst = out / f"{ch['id']}.wav"
         if dst.exists() and not a.only:
             continue
-        pcm = call(a.model, key, chapter_body(ch))
-        raw = out / f"{ch['id']}_raw.wav"
-        with wave.open(str(raw), "wb") as w:
-            w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-af", "loudnorm=I=-16:TP=-1.5", "-ar", "48000", str(dst)], check=True)
-        raw.unlink()
+        # one request per run of lines by the same speaker, joined with a short breath
+        runs = []
+        for s in ch["shots"]:
+            sp = s.get("speaker", "n")
+            if runs and runs[-1][0] == sp:
+                runs[-1][1].append(s["text"])
+            else:
+                runs.append([sp, [s["text"]]])
+        parts = []
+        for k, (sp, texts) in enumerate(runs):
+            style = STYLE if sp == "n" else STYLE2[sp] + " Natural fluent Hindi, Indian accent, expressive, not robotic."
+            body = {"contents": [{"parts": [{"text": f"{style}\n\n{' '.join(texts)}"}]}],
+                    "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {
+                        "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE[sp]}}}}}
+            pcm = call(a.model, key, body)
+            f = out / f"{ch['id']}_part{k}.wav"
+            with wave.open(str(f), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
+            parts.append(f)
+            if k < len(runs) - 1:
+                time.sleep(21)
+        lst = out / f"{ch['id']}_list.txt"
+        gap = out / "gap.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "0.35", str(gap)], check=True)
+        lst.write_text("".join(f"file '{p.resolve()}'\nfile '{gap.resolve()}'\n" for p in parts))
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+                        "-af", "loudnorm=I=-16:TP=-1.5", "-ar", "48000", str(dst)], check=True)
+        for p in parts: p.unlink()
+        lst.unlink(); gap.unlink()
         print(ch["id"], "done", flush=True)
         time.sleep(21)   # stay under the free tier's ~3 requests a minute
 
