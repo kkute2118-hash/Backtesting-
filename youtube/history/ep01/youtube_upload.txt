@@ -8,15 +8,15 @@ DESCRIPTION
 
 अध्याय:
 0:00 मिलिए गप्पू काका से
-0:44 ईंटों वाली रेल
-1:43 हमारा इलाका
-2:15 स्मार्ट शहर
-3:19 महान स्नानागार
-4:02 धोलावीरा और लोथल
-4:47 व्यापार और लिपि
-5:29 हमारी ज़िंदगी
-6:24 शहर खाली क्यों हुए
-7:15 हम आज भी यहीं हैं
+0:52 ईंटों वाली रेल
+2:04 हमारा इलाका
+2:45 स्मार्ट शहर
+4:14 महान स्नानागार
+5:04 धोलावीरा और लोथल
+5:48 व्यापार और लिपि
+6:42 हमारी ज़िंदगी
+7:54 शहर खाली क्यों हुए
+8:51 हम आज भी यहीं हैं
 
 स्रोत:
 • Jonathan Mark Kenoyer, Ancient Cities of the Indus Valley Civilization (Oxford University Press, 1998)
@@ -26,7 +26,7 @@ DESCRIPTION
 • UNESCO World Heritage List: Dholavira, a Harappan City (inscribed 2021)
 • Archaeological Survey of India: Lothal, Dholavira, Rakhigarhi site notes
 
-चित्र कोड से बनाए गए कार्टून हैं। आवाज़ कंप्यूटर से बनी है (eSpeak NG + MBROLA in1/in2 हिंदी आवाज़)।
+चित्र कोड से बनाए गए कार्टून हैं। आवाज़ AI (Google Gemini) से बनी है।
 
 #सिंधुघाटीसभ्यता #भारतकाइतिहास #IndusValley #MohenjoDaro #HindiCartoon
 
@@ -35,4 +35,4 @@ TAGS
 
 CATEGORY: Education
 AUDIENCE: No, it's not made for kids (history channel; keep it separate from the kids channel)
-ALTERED OR SYNTHETIC CONTENT: tick Yes only if a scene looks realistic; cartoons usually do not need it
+ALTERED OR SYNTHETIC CONTENT: the voice is AI-generated; tick Yes to be safe
