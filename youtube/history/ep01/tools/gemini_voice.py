@@ -18,8 +18,13 @@ STYLE2 = {"f": "Aurat speaks like a confident, sharp young Indian woman.",
 
 
 def call(model, key, body, tries=6):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    # With a plain environment variable the key goes in the x-goog-api-key header; with a
+    # network secret the session's proxy adds that header itself and key is empty.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["x-goog-api-key"] = key
+    req = urllib.request.Request(url, json.dumps(body).encode(), headers)
     for i in range(tries):
         try:
             with urllib.request.urlopen(req, timeout=300) as r:
@@ -65,7 +70,7 @@ def main():
     ap.add_argument("--model", default="gemini-2.5-pro-preview-tts")
     ap.add_argument("--only", nargs="*")
     a = ap.parse_args()
-    key = os.environ.get("GEMINI_API_KEY") or sys.exit("set GEMINI_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY", "")   # empty when a network secret supplies the header
     sc = json.load(open(a.script, encoding="utf-8")); out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     for ch in sc["chapters"]:
         if a.only and ch["id"] not in a.only:
