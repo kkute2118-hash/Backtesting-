@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-check S6 against the data it came from, and against over-fitting.
 
-    python scripts/s6_crosscheck.py OUT.json
+    python scripts/research/s6_crosscheck.py OUT.json
 
 1. Top gainers: the biggest 1-year gainers in the store. Did S6 signal them,
    how far into the move, and how much of it did its own exit keep?
@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 warnings.filterwarnings("ignore")
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="s6-check-"))
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")

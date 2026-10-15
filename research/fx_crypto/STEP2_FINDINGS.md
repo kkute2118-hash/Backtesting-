@@ -1,8 +1,8 @@
 # Step 2: refining the liquidity framework (4 Oct 2026)
 
-Runs: scripts/liquidity_step2_runs.py (all symbols, limit and LTF entries,
+Runs: scripts/research/liquidity_step2_runs.py (all symbols, limit and LTF entries,
 crypto with taker and maker fees incl. 18% GST), analysis:
-scripts/liquidity_step2_analysis.py. Every choice below was made on 2021-24
+scripts/research/liquidity_step2_analysis.py. Every choice below was made on 2021-24
 and then checked on 2025-26.
 
 ## Chosen on 2021-24

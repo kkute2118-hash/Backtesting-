@@ -2,7 +2,7 @@
 """S1-S3 with S6's traits (breadth >= 0.50, >= 60% above the 52-week low,
 within 15% of the 52-week high) through the Rs 1 lakh account, against S4-S6.
 
-    python scripts/s123_account.py OUT.json
+    python scripts/research/s123_account.py OUT.json
 
 Same account as research/STRATEGY_SHORTLIST.md: one pool, 10 slots, 1% risk,
 Indian delivery costs, one position per stock. Read-only with respect to the
@@ -20,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 warnings.filterwarnings("ignore")
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="s123acct-"))
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")

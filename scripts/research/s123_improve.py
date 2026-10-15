@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Can S1-S3 be made better? Rules learned on 2022-24, judged on 2025-26.
 
-    python scripts/s123_improve.py OUT.json
+    python scripts/research/s123_improve.py OUT.json
 
 For each retired strategy, from its raw engine signals (every signal, before
 any entry filter) with the ~40 readings recorded on the signal day:
@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="s123-"))
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")

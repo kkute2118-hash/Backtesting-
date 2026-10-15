@@ -6,7 +6,7 @@ replayed on the signal day (`portfolio_bt.collect_trades`). All accounts:
 ₹1 lakh, one pool, 10 slots, 1% risk per trade, 25% position cap, Indian
 delivery costs. MTF: risk and cap scale with leverage, 12.5% a year interest
 on borrowed cash charged daily, ₹20 pledge per buy, margin calls not modelled.
-Scripts: `scripts/all_strategies_mtf.py`, `scripts/breadth_gate_study.py`.
+Scripts: `scripts/all_strategies_mtf.py` (removed 15 Oct 2026, see git history), `scripts/research/breadth_gate_study.py`.
 
 ## Account results
 

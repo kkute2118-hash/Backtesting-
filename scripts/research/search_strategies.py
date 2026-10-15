@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Rank every searched strategy on 2021-24 only, then show its 2025-26 result.
 
-Inputs: the trend grid (scripts/search_trend_grid.py) and the liquidity
-framework's recorded setups (scripts/search_liquidity_runs.py). For the
+Inputs: the trend grid (scripts/research/search_trend_grid.py) and the liquidity
+framework's recorded setups (scripts/research/search_liquidity_runs.py). For the
 liquidity framework, every combination of filters on the recorded features is
 a candidate: event family, score floor, session, HTF alignment, strong MSB on
 reversals, FVG, premium/discount location. Each candidate is evaluated on
@@ -10,7 +10,7 @@ market groups. A candidate qualifies on 2021-24 alone (enough trades, at
 least 3 of 4 years positive, positive average); qualifiers are ranked by R
 a year in 2021-24. The 2025-26 hold-out is reported, never used to choose.
 
-Usage: python scripts/search_strategies.py TREND.csv.gz LIQ1.csv.gz [LIQ2.csv.gz ...] OUT_PREFIX
+Usage: python scripts/research/search_strategies.py TREND.csv.gz LIQ1.csv.gz [LIQ2.csv.gz ...] OUT_PREFIX
 """
 from __future__ import annotations
 

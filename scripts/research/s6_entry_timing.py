@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Is S6's entry too late? Earlier and pullback entries against the breakout.
 
-    python scripts/s6_entry_timing.py OUT.json
+    python scripts/research/s6_entry_timing.py OUT.json
 
 Every variant keeps S6's stock rules (ATR, 52-week location), the market
 breadth gate, the 28-day re-arm and S6's exit (3 x ATR stop, 20% trail from
@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="s6-timing-"))
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")

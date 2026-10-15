@@ -172,7 +172,7 @@ Expected outcome:
 - ✅ Recommended 5 concrete filters with expected impact
 
 ### Phase 2: Backtest Each Filter
-Create variants in `scripts/trend_4h_study.py`:
+Create variants in `scripts/research/trend_4h_study.py`:
 ```python
 def run_with_filters(sym, m15, h4, d1, filters):
     """Run backtest with optional filters."""

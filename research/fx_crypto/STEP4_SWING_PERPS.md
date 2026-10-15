@@ -14,7 +14,7 @@ XAUUSDT tracks spot gold closely, so 2021-26 Dukascopy spot with perp fees
 stands in for it. Fees used: taker 0.05% + 18% GST + 0.01% slippage a side,
 maker 0.02% + GST, funding 0.01% per 8 hours held.
 
-## Swing mode (4h regime, 1h setups, 15m entries; scripts/liquidity_swing_runs.py)
+## Swing mode (4h regime, 1h setups, 15m entries; scripts/research/liquidity_swing_runs.py)
 
 Continuation (run → retest), average R per trade, 2021-24 / 2025-26:
 

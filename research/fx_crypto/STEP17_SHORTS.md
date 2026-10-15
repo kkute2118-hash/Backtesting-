@@ -5,7 +5,7 @@ already trades both ways. The crypto/gold trend book (T1, step 14) was long only
 
 ## What was tested
 
-The step 14 grid (`scripts/search_trend_grid.py`, real 5-minute prices Aug 2021 -
+The step 14 grid (`scripts/research/search_trend_grid.py`, real 5-minute prices Aug 2021 -
 Oct 2026, crypto fees and funding) already holds every channel/stop/trend-filter
 configuration as long-only and as long+short. The short side alone is the
 difference between the two.
@@ -27,7 +27,7 @@ shorts earn in falling markets: 2022 and 2026.
 ## Combined with the long side (one position per market)
 
 The live code (`backend/app/tasks/trend_paper.py`) was replayed bar by bar over
-the same history (`scripts/trend_live_check.py`). Shorts never blocked a long:
+the same history (`scripts/research/trend_live_check.py`). Shorts never blocked a long:
 long trades are identical with and without them.
 
 | | 2021-24 | 2025-26 |

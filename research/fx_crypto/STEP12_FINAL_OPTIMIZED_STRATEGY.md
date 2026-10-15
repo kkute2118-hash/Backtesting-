@@ -361,13 +361,13 @@ Before going live, verify:
 cd /home/user/Backtesting-
 
 # 1. Test partial exit variants
-python scripts/trend_4h_partial_ema.py /path/to/data results/partial_ema
+python scripts/research/trend_4h_partial_ema.py /path/to/data results/partial_ema
 
 # 2. Compare outputs
 # Look for: EMA50 variant gives +1.15-1.25R average
 
 # 3. Test entry filters
-python scripts/trend_4h_filtered_study.py /path/to/data results/filtered
+python scripts/research/trend_4h_filtered_study.py /path/to/data results/filtered
 
 # 4. Compare to baseline
 # Look for: combined filters give 35-36% win rate on reduced trades
@@ -384,7 +384,7 @@ python scripts/trend_4h_filtered_study.py /path/to/data results/filtered
 # - Leverage caps (3x, 5x, 8x, 10x, 15x)
 # - Stop multipliers (1.5x, 2.0x, 2.5x ATR)
 
-python scripts/backtest_optimizer.py /path/to/data results/optimizer
+python scripts/research/backtest_optimizer.py /path/to/data results/optimizer
 
 # Outputs:
 # - results/optimizer_all_results.csv (all combinations ranked)

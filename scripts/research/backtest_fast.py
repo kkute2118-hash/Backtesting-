@@ -205,9 +205,9 @@ def main():
     print("="*80)
 
     results_df = pd.DataFrame(results)
-    results_df.to_csv("results/fast_backtest.csv", index=False)
+    results_df.to_csv(str(Path(__file__).resolve().parent / "fast_backtest.csv"), index=False)
 
-    print("\n✓ Results saved to: results/fast_backtest.csv")
+    print("\n✓ Results saved next to this script")
     print("\nKey findings:")
     print(f"  Best by Avg R: {results_df.loc[results_df['avg_r'].idxmax(), 'config']}")
     print(f"  Best by Win Rate: {results_df.loc[results_df['win_rate'].idxmax(), 'config']}")

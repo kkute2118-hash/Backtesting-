@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replay S4/S5/S6 through an account, with Indian delivery costs.
 
-    python scripts/portfolio_backtest.py OUT.json [--capital 100000] [--slots 10]
+    python scripts/research/portfolio_backtest.py OUT.json [--capital 100000] [--slots 10]
         [--strategies S4_SEPA,S5_POCKETPIVOT,S6_BREAKOUT] [--buckets S5_POCKETPIVOT=1,S6_BREAKOUT=1]
         [--risk 1] [--start 2022-01-01] [--no-costs] [--point-in-time 500]
 
@@ -22,7 +22,7 @@ import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="portfolio-bt-"))
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")

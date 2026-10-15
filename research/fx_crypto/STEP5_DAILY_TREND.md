@@ -1,6 +1,6 @@
 # Step 5: daily trend strategy for crypto and gold perpetuals (4 Oct 2026)
 
-scripts/daily_trend_study.py. BTC, ETH, SOL, BNB, XRP (Binance USD-M perps,
+scripts/daily_trend_study.py (removed 15 Oct 2026, see git history). BTC, ETH, SOL, BNB, XRP (Binance USD-M perps,
 real funding) and gold (Dukascopy spot for XAUUSDT, 0.01%/8h funding). Taker
 0.05% + 18% GST + 0.01% slippage a side. Signal at the daily close, entry
 at the next open, stops on daily highs/lows (a gap exits at the open).

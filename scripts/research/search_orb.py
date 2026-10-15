@@ -19,7 +19,7 @@ spread of that bar plus 0.002% slippage; crypto perpetuals 0.05% taker +
 18% GST + 0.01% slippage (funding ignored: trades last at most 8 hours).
 
 Writes one row per (symbol, session, entry, stop, exit, costcap, year).
-Usage: python scripts/search_orb.py DATA_DIR OUT.csv.gz
+Usage: python scripts/research/search_orb.py DATA_DIR OUT.csv.gz
 """
 from __future__ import annotations
 

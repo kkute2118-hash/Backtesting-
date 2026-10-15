@@ -11,7 +11,7 @@ Costs per side: crypto taker 0.05% + 18% GST + 0.01% slippage (maker 0.02% +
 GST on limit fills) and real Binance funding while held; forex and gold the
 median recorded spread. Writes per (config, symbol, year): trades, wins, R.
 
-Usage: python scripts/search_trend_grid.py DATA_DIR OUT.csv.gz
+Usage: python scripts/research/search_trend_grid.py DATA_DIR OUT.csv.gz
 """
 from __future__ import annotations
 

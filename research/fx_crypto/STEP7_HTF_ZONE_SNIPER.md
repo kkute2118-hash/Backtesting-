@@ -1,6 +1,6 @@
 # Step 7: sniper entries at higher-timeframe demand/supply zones (4 Oct 2026)
 
-scripts/zone_sniper_study.py: the owner's master prompt (liquidity where
+scripts/zone_sniper_study.py (removed 15 Oct 2026, see git history): the owner's master prompt (liquidity where
 stop-losses sit, sections 1-2; rally/drop-base zones, section 14; sniper and
 LTF entries, 17; structural stops and liquidity targets, 18-21) with the GTF
 course's zone marking, freshness and "achievement" rules, on BTC, ETH, SOL,

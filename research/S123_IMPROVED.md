@@ -1,6 +1,6 @@
 # S1-S3 improved with S6's market traits (29 Sep 2026)
 
-Scripts: `scripts/s123_improve.py` (trade level) and `scripts/s123_account.py`
+Scripts: `scripts/research/s123_improve.py` (trade level) and `scripts/research/s123_account.py`
 (Rs 1 lakh account). Both read-only.
 
 ## The rule

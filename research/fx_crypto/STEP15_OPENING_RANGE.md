@@ -4,7 +4,7 @@
 above it is a buy, a break below a sell. Stop at the candle's far end, or at
 its middle (50%).
 
-**Test.** `scripts/search_orb.py` on real 5-minute prices, Jan 2021 - Oct 2026:
+**Test.** `scripts/research/search_orb.py` on real 5-minute prices, Jan 2021 - Oct 2026:
 EUR/USD, GBP/USD, USD/JPY, AUD/USD, gold (Dukascopy, recorded spreads) and
 BTC, ETH, SOL perpetuals (Binance, 0.05% taker + GST + slippage).
 

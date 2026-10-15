@@ -1,6 +1,6 @@
 # S6 cross-check, 28 Sep 2026
 
-`scripts/s6_crosscheck.py` on the stored universe (485 stocks), signals
+`scripts/research/s6_crosscheck.py` on the stored universe (485 stocks), signals
 1 Jan 2022 to 28 Sep 2026, S6's own entry and exit, gross per closed trade.
 
 ## 1. The code matches the rules
@@ -82,7 +82,7 @@ In each cell, the first figure is 2022-24 and the second is 2025-26.
 - **Breadth 0.40** is the one change that clearly hurts: 2025-26 turns
   negative. It confirms that the gate matters.
 
-## 4. Is the entry too late? (`scripts/s6_entry_timing.py`)
+## 4. Is the entry too late? (`scripts/research/s6_entry_timing.py`)
 
 Same stock rules, breadth gate, re-arm and exit. Only the entry changes. Each
 cell is the average per closed trade (trades, win %):

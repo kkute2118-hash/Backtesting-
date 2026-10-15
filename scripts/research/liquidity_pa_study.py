@@ -4,7 +4,7 @@
 measure what each concept adds (framework section 29), separately for
 2021-24 (rules may be chosen here) and 2025-26 (they must hold here).
 
-Usage: python scripts/liquidity_pa_study.py DATA_DIR OUT_DIR [--symbols A,B] [--entry ltf|limit]
+Usage: python scripts/research/liquidity_pa_study.py DATA_DIR OUT_DIR [--symbols A,B] [--entry ltf|limit]
 Writes OUT_DIR/trades_<entry>.csv (every setup, section 28 fields) and
 OUT_DIR/summary_<entry>.json.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.engine import liquidity_pa as lp  # noqa: E402
 
 SPLIT = pd.Timestamp("2025-01-01", tz="UTC")

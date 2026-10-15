@@ -5,7 +5,7 @@ EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD (Dukascopy, real BID/ASK spread) and
 BTC, ETH, SOL, BNB, XRP perpetuals (Binance; 0.05% taker + 0.01% slippage a
 side). Rules may be chosen on 2021-24; they must hold on 2025-26.
 
-## Market structure (scripts/fx_structure_study.py)
+## Market structure (scripts/fx_structure_study.py (removed 15 Oct 2026, see git history))
 
 - Intraday moves mean-revert: variance ratio below 1 from 15 minutes to 4
   hours on every symbol, in both periods. Crypto most of all.

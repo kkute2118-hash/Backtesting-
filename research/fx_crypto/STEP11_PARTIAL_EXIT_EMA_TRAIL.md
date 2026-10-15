@@ -177,7 +177,7 @@ if (d > 0 and h4.close[-1] < ema20[-1]) or \
     })
 ```
 
-### In scripts/trend_4h_study.py (for backtesting)
+### In scripts/research/trend_4h_study.py (for backtesting)
 
 ```python
 def run_with_partial_ema(sym, m15, h4, n_in, n_out, entry_mode):
@@ -289,7 +289,7 @@ Expected result:
 
 ## Next Steps
 
-1. ✅ Create backtest variant: `scripts/trend_4h_partial_ema.py`
+1. ✅ Create backtest variant: `scripts/research/trend_4h_partial_ema.py`
 2. ✅ Test on 2021-24 to establish baseline
 3. ✅ Compare EMA20 vs EMA50 vs EMA100
 4. ⚡ Validate win rate holds on 2025-26

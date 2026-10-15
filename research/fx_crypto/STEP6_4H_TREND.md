@@ -1,6 +1,6 @@
 # Step 6: 4-hour trend with 15-minute entries, and the Oracle paper book (4 Oct 2026)
 
-scripts/trend_4h_study.py. Same six markets, fees, GST and funding as step 5.
+scripts/research/trend_4h_study.py. Same six markets, fees, GST and funding as step 5.
 Signal: 4h close above the previous 55 (or 20) 4h highs, last completed daily
 close above its 200-day average, long only. Stop 2 ATR(4h); exit on a 4h close
 below the previous 20 (or 10) 4h lows. Entries executed on 15-minute bars.

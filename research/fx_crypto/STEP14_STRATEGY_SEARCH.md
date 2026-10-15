@@ -65,7 +65,7 @@ fills at the next 4h open and no exchange outage.
 `backend/app/tasks/trend_paper.py` now runs T1 on BTC, ETH, SOL and the
 XAUUSDT perpetual at 1% risk; forex and the leverage tiers are gone, and the
 book restarted (the old one is kept as `trend-state-before-*.json`).
-`scripts/trend_live_check.py` replays that live code over the same history.
+`scripts/research/trend_live_check.py` replays that live code over the same history.
 On the coins it matches the grid (same trade counts, averages within 0.03R).
 Gold differs because the live book pays perpetual fees, GST and funding on a
 0.7% stop instead of the spot spread the grid used: +0.08R (2021-24) and

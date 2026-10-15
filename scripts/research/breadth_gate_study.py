@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What S6's market-breadth gate would do to every strategy.
 
-    python scripts/breadth_gate_study.py OUT.json [--start 2022-01-01]
+    python scripts/research/breadth_gate_study.py OUT.json [--start 2022-01-01]
 
 S6 only buys when market breadth (core.market_breakout_breadth: the 10-day sum
 of the daily share of stocks closing above their prior 50-day high) is at
@@ -30,7 +30,7 @@ from pathlib import Path
 import pandas as pd
 
 warnings.filterwarnings("ignore")
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("GTF_DATA_DIR", tempfile.mkdtemp(prefix="breadth-gate-"))
 os.environ.setdefault("DB_BACKUP_REPO", "kkute2118-hash/Backtesting-")

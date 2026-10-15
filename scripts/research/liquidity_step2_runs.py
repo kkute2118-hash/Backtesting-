@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Step 2 runs: every symbol with limit and LTF entries; crypto under taker
 and maker fee assumptions. Writes one CSV of every traded setup with its
-features (extras expanded) for scripts/liquidity_step2_analysis.py.
+features (extras expanded) for scripts/research/liquidity_step2_analysis.py.
 
-Usage: python scripts/liquidity_step2_runs.py DATA_DIR OUT.csv
+Usage: python scripts/research/liquidity_step2_runs.py DATA_DIR OUT.csv
 """
 import ast
 import sys
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.engine import liquidity_pa as lp  # noqa: E402
 
 # Per side, as a fraction of price. Indian crypto exchanges charge 18% GST on fees.

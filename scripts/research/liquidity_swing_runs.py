@@ -4,7 +4,7 @@ on gold and crypto, all paying crypto-exchange perpetual fees (gold as
 XAU/USDT, history from Dukascopy spot). Variants: entry (limit / LTF micro
 MSB) and fees (taker / maker).
 
-Usage: python scripts/liquidity_swing_runs.py DATA_DIR OUT.csv
+Usage: python scripts/research/liquidity_swing_runs.py DATA_DIR OUT.csv
 """
 import ast
 import sys
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.engine import liquidity_pa as lp  # noqa: E402
 
 SYMBOLS = ("XAUUSD", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")

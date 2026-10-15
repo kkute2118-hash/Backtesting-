@@ -1,6 +1,6 @@
 # Step 13: the live book's leverage tiers, tested on real prices (4 Oct 2026)
 
-`scripts/trend_leverage_study.py` runs the live paper book's own code
+`scripts/trend_leverage_study.py` (removed 15 Oct 2026, see git history) runs the live paper book's own code
 (`backend/app/tasks/trend_paper.py`: `indicators` and `advance`, retest entry,
 2 ATR stop, 20-bar-low exit, its charges) bar by bar over real 5-minute history
 (release `fx-crypto-data`, Aug 2021 to 2 Oct 2026). Spot gold (XAUUSD) stands

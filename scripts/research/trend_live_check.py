@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Replay the live trend paper book (app.tasks.trend_paper) bar by bar over the
 real 2021-2026 history and print its trades by market and period, to check it
-matches the strategy search (scripts/search_trend_grid.py, step 14).
+matches the strategy search (scripts/research/search_trend_grid.py, step 14).
 
 Spot gold (XAUUSD) stands in for XAUUSDT. The live book charges perpetual fees
 on gold; the grid charged the recorded spot spread, so gold differs slightly.
 
-Usage: python scripts/trend_live_check.py DATA_DIR
+Usage: python scripts/research/trend_live_check.py DATA_DIR
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.tasks import trend_paper as tp  # noqa: E402
 
 FILES = {"BTCUSDT": "BTCUSDT", "ETHUSDT": "ETHUSDT", "SOLUSDT": "SOLUSDT", "XAUUSDT": "XAUUSD"}

@@ -25,7 +25,7 @@ Always Free server (`deploy/oracle/`); Render is no longer used.
 | Any time | "/scan", "how are my S6 trades?", "scan S6 on Nifty 50" | Any Claude Code session on this repository |
 
 The database lives on the `db-backup` branch; the GitHub jobs are its only
-writer. Research tools (`scripts/portfolio_backtest.py`,
+writer. Research tools (`scripts/research/portfolio_backtest.py`,
 `scripts/survivorship_study.py`, `scripts/strategy_expectations.py`) restore it
 read-only. Oracle Cloud (`deploy/oracle/`) is kept for the case a live web app
 is ever needed again; see `CLAUDE.md` for its Always-Free-only rule.

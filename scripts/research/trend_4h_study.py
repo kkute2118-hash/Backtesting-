@@ -15,7 +15,7 @@ Exit: a 4h close below the lowest low of the previous M 4h bars, at the next
 entry pays maker 0.02% + GST), real Binance funding while held (gold 0.01%
 per 8 hours). Also runs the daily 55/20 for comparison.
 
-Usage: python scripts/trend_4h_study.py DATA_DIR OUT_PREFIX
+Usage: python scripts/research/trend_4h_study.py DATA_DIR OUT_PREFIX
 """
 
 from __future__ import annotations

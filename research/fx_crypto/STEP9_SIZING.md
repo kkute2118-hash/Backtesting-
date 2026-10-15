@@ -4,7 +4,7 @@ The live strategy switched from a limit at the broken high to a market buy at
 the next 15-minute open after the 4h breakout close (the owner's choice;
 2021-24 / 2025-26: +0.83R / +0.57R a trade against +0.96R / +0.38R). A
 bar-by-bar replay of 2025-26 through backend/app/tasks/trend_paper.py enters
-the same 97 trades at the same times as scripts/trend_4h_study.py.
+the same 97 trades at the same times as scripts/research/trend_4h_study.py.
 
 313 trades, Jul 2021 - Oct 2026, 30% winners. Longest winning streak 5,
 longest losing streak 14. Stop distance median 3.1% (0.6% to 11.2%). Up to 6

@@ -1,6 +1,6 @@
 # Step 8: 4h trend breakout with a demand-zone entry (4 Oct 2026)
 
-scripts/trend_zone_entry_study.py. Same signals and exits as step 6 (4h 55/20,
+scripts/trend_zone_entry_study.py (removed 15 Oct 2026, see git history). Same signals and exits as step 6 (4h 55/20,
 daily 200-day filter, long only, crypto + gold perps, full charges); only the
 entry changes: the first pullback into the nearest fresh 4h demand zone (step
 7's rules) made in the 10 days before the breakout.

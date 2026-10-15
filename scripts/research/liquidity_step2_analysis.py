@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Step 2 analysis on the output of liquidity_step2_runs.py: candidate rules
 chosen on 2021-24, checked on 2025-26, with a Rs 10,000 account and a spread
-sensitivity check. Usage: python scripts/liquidity_step2_analysis.py TRADES.csv
+sensitivity check. Usage: python scripts/research/liquidity_step2_analysis.py TRADES.csv
 """
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.engine.liquidity_pa import metrics  # noqa: E402
 
 SESSION_UTC = {6, 7, 12, 13, 14, 15}          # London open, New York morning

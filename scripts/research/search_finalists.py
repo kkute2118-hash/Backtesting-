@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Account simulation of the finalists from scripts/search_strategies.py.
+"""Account simulation of the finalists from scripts/research/search_strategies.py.
 
 Rebuilds the trades of the chosen trend configs with search_trend_grid's
 engine, takes the liquidity framework's trades from its recorded setups, and
 compounds a Rs 10,000 account at a fixed % risk of current equity per trade,
 with overlapping positions (risk is fixed at entry, P/L booked at exit).
 
-Usage: python scripts/search_finalists.py DATA_DIR LIQ.csv.gz [LIQ.csv.gz ...] OUT_PREFIX
+Usage: python scripts/research/search_finalists.py DATA_DIR LIQ.csv.gz [LIQ.csv.gz ...] OUT_PREFIX
 """
 from __future__ import annotations
 

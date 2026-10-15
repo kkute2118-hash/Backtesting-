@@ -1,7 +1,7 @@
 # Portfolio replay of S4/S5/S6, with Indian costs (27 Sep 2026)
 
 Tools: `backend/app/engine/portfolio_bt.py` (engine) and
-`scripts/portfolio_backtest.py` (command line). Trades come from the engine's
+`scripts/research/portfolio_backtest.py` (command line). Trades come from the engine's
 own replays: S6 `run_s6_backtest`, S5 `run_s5_pocket_pivot_backtest`, S4
 `run_raw_signal_backtest`. S4 and S5 pass through the live entry filter as it
 stood on each signal day (`historical_entry_verdict`). Trades collected from

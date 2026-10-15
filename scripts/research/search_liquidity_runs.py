@@ -5,9 +5,9 @@ limit or LTF-confirmation entry, minimum R:R 1.5 or 2, stop buffer 0.10 or
 0.25 ATR. Limits fill only 0.05 ATR through (research STEP3). Crypto pays
 taker fee + 18% GST + slippage per side and funding; forex and gold pay their
 recorded spread. Filters on the recorded features are searched afterwards by
-scripts/search_strategies.py.
+scripts/research/search_strategies.py.
 
-Usage: python scripts/search_liquidity_runs.py DATA_DIR OUT.csv.gz SYMBOL [SYMBOL ...]
+Usage: python scripts/research/search_liquidity_runs.py DATA_DIR OUT.csv.gz SYMBOL [SYMBOL ...]
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.engine import liquidity_pa as lp  # noqa: E402
 
 TAKER = 0.0005 * 1.18 + 0.0001
