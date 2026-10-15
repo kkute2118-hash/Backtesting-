@@ -60,3 +60,18 @@ stay inside Oracle's **Always Free** allowance, always:
 - **The journal** (collection `journal` in the artifact's database) is the
   owner's real trades: read it, never write it unless asked. Republish the
   page without `capabilities` so its storage rules carry forward.
+
+## Skills in `.claude/skills`
+
+- Use an installed skill whenever a task matches its description, without
+  being asked: e.g. `systematic-debugging` for a bug or failing test,
+  `test-driven-development` and `verification-before-completion` for code
+  changes, `brainstorming`/`writing-plans` before a larger feature,
+  `ui-ux-pro-max` for the dashboard or web app, `remotion`/`hyperframes`
+  skills for video, `geo-*` for SEO, `yt-*` for YouTube.
+- `scan` and `liquidity-price-action` are this repository's own and always
+  win for scans, the dashboard and chart calls.
+- Everything else comes from the owner's forks (`.claude/skills/THIRD_PARTY.md`).
+  The rules in this file override any skill: a skill never justifies
+  writing the backup or journal, paid Oracle resources, or changing the
+  scan or backtest rules without the evidence rule.
