@@ -12,8 +12,9 @@ the full video out/episodeNN.mp4 and shorts.json:
 
 Each Short plays scenes from..to of the full video (cut at pauses in the voice, so no
 word is chopped), with the hook on top, the episode in the middle over a blurred copy
-of itself, and the call to action at the bottom. Writes out/shorts/shortN.mp4 and
-out/shorts/shorts_upload.txt. Pick moments that end on a question, so viewers go to
+of itself, and the call to action at the bottom. Writes out/shorts/epNN_shortN.mp4 and
+out/shorts/epNN_shorts_upload.txt (episode-prefixed, so files from different episodes
+never collide when sent or uploaded). Pick moments that end on a question, so viewers go to
 the full video for the answer.
 """
 import json, re, subprocess, sys
@@ -128,18 +129,18 @@ Dialogue: 2,{ass_time(cta_from)},{ass_time(dur)},Cta,,0,0,0,,{{\\fad(250,0)\\fsc
               f"[bg]scale=-2:1920,crop=1080:1920,boxblur=28:2,eq=brightness=-0.18[bgb];"
               f"[fg]scale=1242:-2,crop=1080:ih[fgc];"
               f"[bgb][fgc]overlay=0:(H-h)/2-40,ass='{arg}',fade=t=out:st={max(0, dur-0.4):.2f}:d=0.4[v]")
-        dst = out / f"short{i}.mp4"
+        dst = out / f"{ep.name}_short{i}.mp4"
         run(["ffmpeg", "-y", "-ss", f"{a:.2f}", "-t", f"{dur:.2f}", "-i", str(video), "-filter_complex", fc,
              "-map", "[v]", "-map", "0:a", "-af", f"afade=t=out:st={max(0, dur-0.4):.2f}:d=0.4",
              "-c:v", "libx264", "-preset", "medium", "-crf", "21", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(dst)])
         ass.unlink()
         print(f"short{i}: {s['from']}-{s['to']}  {dur:.1f}s  {dst.name}")
-        notes.append(f"=== short{i}.mp4 ({dur:.0f} s) ===\nTITLE: {s['title']} #shorts\n"
+        notes.append(f"=== {ep.name}_short{i}.mp4 ({dur:.0f} s) ===\nTITLE: {s['title']} #shorts\n"
                      f"DESCRIPTION: {s['hook']} पूरी कहानी: \"{spec['episode_title']}\" (History Tracker चैनल पर, लिंक ऊपर/कमेंट में)\n"
                      f"{s['hashtags']} #shorts #HistoryTracker #भारतकाइतिहास\n"
                      f"YOUTUBE: set 'Related video' to the full episode. INSTAGRAM/FACEBOOK REELS: same file, same caption.\n")
-    (out / "shorts_upload.txt").write_text("\n".join(notes), encoding="utf-8")
+    (out / f"{ep.name}_shorts_upload.txt").write_text("\n".join(notes), encoding="utf-8")
 
 
 if __name__ == "__main__":
