@@ -88,8 +88,11 @@ def main():
                 runs.append([sp, [s["text"]]])
         parts = []
         for k, (sp, texts) in enumerate(runs):
-            style = STYLE if sp == "n" else STYLE2[sp] + " Natural fluent Hindi, Indian accent, expressive, not robotic."
-            body = {"contents": [{"parts": [{"text": f"{style}\n\n{' '.join(texts)}"}]}],
+            # Only the narrator gets a style instruction (it is never read aloud for him); short
+            # lines by other voices are sent as bare text, because the model read their
+            # instruction out loud in English.
+            text = f"{STYLE}\n\n{' '.join(texts)}" if sp == "n" else " ".join(texts)
+            body = {"contents": [{"parts": [{"text": text}]}],
                     "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {
                         "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE[sp]}}}}}
             pcm = call(a.model, key, body)
