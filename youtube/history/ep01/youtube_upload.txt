@@ -11,12 +11,12 @@ DESCRIPTION
 0:52 ईंटों वाली रेल
 2:04 हमारा इलाका
 2:45 स्मार्ट शहर
-4:14 महान स्नानागार
-5:04 धोलावीरा और लोथल
-5:48 व्यापार और लिपि
-6:42 हमारी ज़िंदगी
-7:54 शहर खाली क्यों हुए
-8:51 हम आज भी यहीं हैं
+4:05 महान स्नानागार
+4:55 धोलावीरा और लोथल
+5:39 व्यापार और लिपि
+6:34 हमारी ज़िंदगी
+7:45 शहर खाली क्यों हुए
+8:42 हम आज भी यहीं हैं
 
 स्रोत:
 • Jonathan Mark Kenoyer, Ancient Cities of the Indus Valley Civilization (Oxford University Press, 1998)
@@ -35,4 +35,4 @@ TAGS
 
 CATEGORY: Education
 AUDIENCE: No, it's not made for kids (history channel; keep it separate from the kids channel)
-ALTERED OR SYNTHETIC CONTENT: the voice is AI-generated; tick Yes to be safe
+ALTERED OR SYNTHETIC CONTENT: optional; not required for a cartoon with a generic AI narrator (does not affect monetisation)
