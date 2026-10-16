@@ -99,12 +99,20 @@ def main():
             f = out / f"{ch['id']}_part{k}.wav"
             with wave.open(str(f), "wb") as w:
                 w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
+            # trim silence at both ends and fade 40 ms in/out, so joins between voices are smooth
+            g = out / f"{ch['id']}_part{k}_clean.wav"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(f), "-af",
+                            "silenceremove=start_periods=1:start_threshold=-45dB,areverse,"
+                            "silenceremove=start_periods=1:start_threshold=-45dB,areverse,"
+                            "afade=t=in:d=0.04,areverse,afade=t=in:d=0.06,areverse,loudnorm=I=-16:TP=-1.5",
+                            "-ar", "24000", "-ac", "1", str(g)], check=True)
+            f.unlink(); f = g
             parts.append(f)
             if k < len(runs) - 1:
                 time.sleep(21)
         lst = out / f"{ch['id']}_list.txt"
         gap = out / "gap.wav"
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "0.35", str(gap)], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "0.45", str(gap)], check=True)
         lst.write_text("".join(f"file '{p.resolve()}'\nfile '{gap.resolve()}'\n" for p in parts))
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
                         "-af", "loudnorm=I=-16:TP=-1.5", "-ar", "48000", str(dst)], check=True)
