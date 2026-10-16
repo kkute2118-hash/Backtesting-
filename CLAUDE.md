@@ -99,4 +99,7 @@ recordings. Google's Gemini API (generativelanguage.googleapis.com) IS reachable
 from cloud sessions: with `GEMINI_API_KEY` in the environment, natural Hindi
 narration can be made in-session (`youtube/history/ep01/tools/gemini_voice.py`,
 voices as in the MoneyPrinterTurbo fork). Episode projects live in `youtube/`;
-see `youtube/history/ep01/NEXT_SESSION.md`.
+see `youtube/history/ep01/NEXT_SESSION.md`. Every episode ships with: the voice
+checked against the script (`tools/check_voice.py`) before building, and 5-6
+cliffhanger Shorts/Reels (`shorts.json` + `tools/make_shorts.py`) made right after
+the full video, to pull viewers to it.

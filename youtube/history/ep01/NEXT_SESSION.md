@@ -32,3 +32,14 @@ and remake any chapter it lists (`--only cNN`) before building. Free TTS quota i
 about 10 requests per model per day and resets at midnight US Pacific (07:00 UTC);
 fall back 3.8-flash-tts -> 3.1-flash-tts-preview -> 2.5-flash-preview-tts.
 Episode 2 lives in youtube/history/ep02 (scenes02.py draws its scenes).
+
+## Every episode: Shorts / Reels right after the full video
+
+1. Write EPISODE_DIR/shorts.json: 5-6 moments (`from`/`to` scene ids, 15-30 s each),
+   each ending on a question or cliffhanger (the answer is only in the full video),
+   with a big `hook`, a `cta` ("... पूरा वीडियो देखो") and a YouTube `title`.
+   Good picks: the most surprising fact, a joke, a mystery, the episode's big question.
+2. `python ep01/tools/make_shorts.py <episode dir>` (from youtube/history) ->
+   out/shorts/shortN.mp4 (1080x1920, big Hindi captions) + shorts_upload.txt.
+3. Send them with the full episode. Owner posts 1-2 a day on YouTube Shorts (Related
+   video = the full episode) and the same files as Instagram / Facebook Reels.
