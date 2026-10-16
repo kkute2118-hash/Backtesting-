@@ -90,8 +90,8 @@ machine or the Oracle server.
 
 ## YouTube projects
 
-The owner runs two channels: an Indian history channel (Hindi, cartoon
-storyteller "गप्पू काका") and a kids channel. Keep them separate; history
+The owner runs two channels: an Indian history channel, "History Tracker" (Hindi,
+cartoon storyteller "गप्पू काका"; art and setup in youtube/history/channel/) and a kids channel. Keep them separate; history
 videos are never "made for kids". Narration must be natural, human-sounding
 Hindi: eSpeak and MBROLA were tried and rejected. Use ElevenLabs (when it has
 credits), VoiceStudio, Google AI Studio (Gemini TTS) or the owner's own

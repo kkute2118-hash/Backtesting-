@@ -1,0 +1,27 @@
+HISTORY TRACKER: channel setup (YouTube Studio -> Customisation)
+
+PROFILE PICTURE: profile_picture.png (800x800)
+BANNER: banner.png (2560x1440; title and Gappu Kaka sit in the safe area that shows on phones)
+
+HANDLE: @HistoryTrackerHindi  (or @HistoryTracker if free)
+
+DESCRIPTION (paste into "Description"):
+History Tracker पर आपका स्वागत है! यहाँ गप्पू काका, 4500 साल पुराने मोहनजोदड़ो के कहानीकार, आपको सुनाते हैं भारत का पूरा इतिहास: सिंधु घाटी से मौर्य, गुप्त, चोल, विजयनगर, मुग़ल, मराठा, 1857, आज़ादी की लड़ाई और आज़ाद भारत तक।
+हर वीडियो किताबों और पुरातत्व के स्रोतों पर आधारित है; स्रोत हर वीडियो के विवरण में दिए जाते हैं। जहाँ कहानी लोक-कथा है और जहाँ पक्का सबूत है, हम साफ़ बताते हैं।
+नई कहानी हर सोमवार, बुधवार और शुक्रवार, शाम 6 बजे।
+
+Welcome to History Tracker: the history of India told in Hindi by Gappu Kaka, a funny old storyteller from Mohenjo-daro. Cartoon stories, real sources.
+
+CHANNEL KEYWORDS (Settings -> Channel -> Basic info -> Keywords):
+भारत का इतिहास, Indian history in Hindi, प्राचीन भारत, सिंधु घाटी सभ्यता, मुग़ल इतिहास, मराठा इतिहास, आज़ादी की लड़ाई, history in Hindi, cartoon history Hindi, गप्पू काका, History Tracker
+
+SETTINGS
+- Country: India. Language: Hindi.
+- Audience (channel level): "No, set this channel as not made for kids".
+- Upload defaults: category Education; language Hindi; captions Hindi; licence Standard YouTube.
+- Add a channel trailer later (a 40-second Gappu Kaka intro).
+
+PLAYLISTS (create now, add episodes as they come)
+1. प्राचीन भारत (Season 1)
+2. रहस्य और खोई जगहें (Mysteries)
+3. गप्पू काका की पूरी कहानियाँ (Documentaries)
